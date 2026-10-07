@@ -17,6 +17,7 @@ dependencies = [
     "numba>=0.58",
     "pandas>=2.0",
     "pyteomics>=4.6",
+    "psims",           # newer pyteomics needs it to parse mzML
     "lxml>=4.9",
     "matplotlib>=3.7",
 ]

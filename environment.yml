@@ -1,4 +1,5 @@
 # conda env create -f environment.yml && conda activate peak3d && pip install -e .
+# (pip install -e . adds the remaining dependencies listed in pyproject.toml)
 name: peak3d
 channels:
   - conda-forge
