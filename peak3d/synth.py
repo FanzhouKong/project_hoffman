@@ -18,6 +18,7 @@ from pathlib import Path
 from .io import C13, Cloud, from_scans
 
 FWHM_TO_SIGMA = 1.0 / 2.3548200450309493
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz   # np.trapz was removed in numpy 2
 
 
 @dataclass
@@ -87,7 +88,7 @@ def make_cloud(peaks, n_scans: int = 600, dt: float = 0.005, t0: float = 0.0,
             I = pk.height * ratio * shape
             k = int(np.argmax(I))
             rows.append(dict(peak_id=pid, iso_n=n, z=pk.z, mz=mz0, rt=float(rt[k]), height=float(I[k]),
-                             area=float(np.trapz(I, rt)), fwhm=pk.fwhm,
+                             area=float(_trapezoid(I, rt)), fwhm=pk.fwhm,
                              n_sampled=int(np.count_nonzero(I >= max(thresh, 1e-12)))))
             if inoise_c > 0 or inoise_r > 0:
                 I = I + rng.standard_normal(S) * np.sqrt(inoise_c * I + (inoise_r * I) ** 2)
