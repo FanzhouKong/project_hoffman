@@ -1,0 +1,15 @@
+# conda env create -f environment.yml && conda activate peak3d && pip install -e .
+name: peak3d
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy>=1.24
+  - scipy>=1.10
+  - numba>=0.58
+  - pandas>=2.0
+  - pyteomics>=4.6
+  - lxml>=4.9
+  - matplotlib>=3.7
+  - pytest

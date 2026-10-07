@@ -187,10 +187,13 @@ def load_cloud(path, polarity: str | None = None) -> Cloud:
     want = {"pos": "positive scan", "neg": "negative scan"}.get(polarity)
     rts, mzs, intens = [], [], []
     seen = set()
+    n_ms1 = n_profile = 0
     with mzml.read(str(path), use_index=False) as reader:
         for s in reader:
             if s.get("ms level") != 1:
                 continue
+            n_ms1 += 1
+            n_profile += "profile spectrum" in s
             pol = "neg" if "negative scan" in s else ("pos" if "positive scan" in s else "")
             seen.add(pol)
             if want is not None and want not in s:
@@ -198,6 +201,9 @@ def load_cloud(path, polarity: str | None = None) -> Cloud:
             rts.append(_scan_rt_minutes(s))
             mzs.append(s["m/z array"])
             intens.append(s["intensity array"])
+    if n_ms1 and n_profile == n_ms1:
+        raise ValueError(f"{path}: MS1 spectra are profile mode; peak3d needs centroided MS1 "
+                         f"(convert with msconvert --filter \"peakPicking vendor msLevel=1\")")
     pols = seen - {""}
     if polarity is None and len(pols) > 1:
         raise ValueError(f"{path}: both polarities present; pass polarity='pos' or 'neg'")

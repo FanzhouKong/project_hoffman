@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peak3d"
+dynamic = ["version"]
+description = "3D apex peak picking and reference-free RT correction for LC-MS (centroided MS1 mzML)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Fanzhou Kong", email = "fzkong@ucdavis.edu" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "numba>=0.58",
+    "pandas>=2.0",
+    "pyteomics>=4.6",
+    "lxml>=4.9",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+peak3d = "peak3d.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/FanzhouKong/project_hoffman"
+
+[tool.setuptools.dynamic]
+version = { attr = "peak3d.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["peak3d", "peak3d.*"]

@@ -105,3 +105,31 @@ def test_single_file_run(tmp_path):
     assert (t["n_detected"] == 1).all() and "S0" in t.columns
     rc = pd.read_csv(out / "rt_correction/S0.tsv", sep="\t")
     assert np.allclose(rc["rt_native"], rc["rt_corr"])
+
+
+def test_profile_mode_is_refused(tmp_path):
+    cloud, _ = make_cloud([Peak(300.0, 1.0, 1e5, 0.05)], n_scans=50, dt=DT, name="prof")
+    p = tmp_path / "prof.mzML"
+    write_mzml(cloud, p)
+    p.write_text(p.read_text().replace('accession="MS:1000127" name="centroid spectrum"',
+                                       'accession="MS:1000128" name="profile spectrum"'))
+    with pytest.raises(ValueError, match="profile mode"):
+        load_cloud(p)
+
+
+def test_lowercase_extension_and_missing_input(tmp_path):
+    d, _ = _study(tmp_path, shifts=(0.0,))
+    (d / "S0.mzML").rename(d / "S0.mzml")
+    r = _run("process", "--input", str(d), "--output", str(tmp_path / "out"))
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "S0" in pd.read_csv(tmp_path / "out/aligned_feature_table.tsv", sep="\t").columns
+    r = _run("process", "--input", str(tmp_path / "nope"), "--output", str(tmp_path / "out2"))
+    assert r.returncode != 0 and "must be a directory" in r.stderr
+
+
+def test_demo(tmp_path):
+    r = _run("demo", "--output", str(tmp_path), "--cores", "2")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert sorted(p.name for p in (tmp_path / "demo_mzml").iterdir()) == ["demo1.mzML", "demo2.mzML", "demo3.mzML"]
+    t = pd.read_csv(tmp_path / "peak3d_out/aligned_feature_table.tsv", sep="\t")
+    assert ((t["n_detected"] == 3) & (t["iso_offset"] == 0)).sum() >= 54   # 60 injected compounds, found in all runs

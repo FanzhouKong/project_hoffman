@@ -19,3 +19,8 @@ scripts/local/
 bench/diag/method_benchmark_report.py
 bench/diag/crosstool_report.py
 bench/diag/hzv029_missed_page.py
+
+# packaging
+*.egg-info/
+build/
+dist/

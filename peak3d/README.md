@@ -108,11 +108,16 @@ model, noise floor, intensity-dependent noise law); nothing is tuned per dataset
 
 ## Usage
 
+Install with `pip install -e .` from the repository root (see the Quick start in the top-level README), then:
+
 ```
-PYTHONPATH=$ROOT envs/peak3d/bin/python -m peak3d process --input DIR --output OUT --cores 8
-PYTHONPATH=$ROOT envs/peak3d/bin/python -m peak3d pick FILE.mzML ... --output OUT
-PYTHONPATH=$ROOT envs/peak3d/bin/python -m peak3d align --output OUT [--no-rt-correction] [--no-gap-fill]
+peak3d process --input DIR --output OUT --cores 8
+peak3d pick FILE.mzML ... --output OUT
+peak3d align --output OUT [--no-rt-correction] [--no-gap-fill]
+peak3d demo --output OUT      # three synthetic runs, to check an installation
 ```
+
+Without installing, `PYTHONPATH=<repo> python -m peak3d ...` does the same.
 
 Options: `--ppm 5`, `--rt-tol-max 0.25`, `--min-score 0.5`, `--min-presence 2`, `--polarity pos|neg`,
 `--no-rt-correction`, `--no-gap-fill`, `--holdout`, `--quant height|area`, `--keep-cache`,
@@ -143,5 +148,5 @@ RT is in minutes everywhere; residuals in the QC files are in seconds.
 `warp.py` / `anchors.py` / `align.py` (RT correction), `grouping.py`, `gapfill.py`, `qc.py`,
 `pipeline.py`, `__main__.py`, `synth.py` (synthetic data = test oracle), `tests/`.
 
-Tests: `PYTHONPATH=$ROOT envs/peak3d/bin/python -m pytest peak3d/tests -m "not perf"` (run on a
-compute node; `-m perf` for the speed budget test).
+Tests: `pytest peak3d/tests -m "not perf"` after `pip install -e ".[test]"` (`-m perf` for the speed budget
+test, which needs a quiet machine).
