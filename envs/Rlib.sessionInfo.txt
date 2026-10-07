@@ -1,0 +1,25 @@
+R version 4.4.2 (2024-10-31)
+Platform: x86_64-conda-linux-gnu
+Running under: Ubuntu 22.04.5 LTS
+
+Matrix products: default
+BLAS/LAPACK: /cvmfs/hpc.ucdavis.edu/sw/conda/environments/r-4.4.2/lib/libopenblasp-r0.3.29.so;  LAPACK version 3.12.0
+
+locale:
+ [1] LC_CTYPE=C.UTF-8       LC_NUMERIC=C           LC_TIME=C.UTF-8       
+ [4] LC_COLLATE=C.UTF-8     LC_MONETARY=C.UTF-8    LC_MESSAGES=C.UTF-8   
+ [7] LC_PAPER=C.UTF-8       LC_NAME=C              LC_ADDRESS=C          
+[10] LC_TELEPHONE=C         LC_MEASUREMENT=C.UTF-8 LC_IDENTIFICATION=C   
+
+time zone: US/Pacific
+tzcode source: system (glibc)
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+[1] IDSL.IPA_3.0
+
+loaded via a namespace (and not attached):
+[1] compiler_4.4.2  cli_3.6.5       parallel_4.4.2  tools_4.4.2    
+[5] base64enc_0.1-3 IDSL.MXP_2.1    xml2_1.3.8      rlang_1.1.6    

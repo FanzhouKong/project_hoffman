@@ -1,0 +1,14 @@
+--- envs/masscube_feature_grouping.py.orig	2026-09-30 20:56:00.000000000 -0700
++++ masscube/feature_grouping.py	2026-09-30 20:56:00.000000000 -0700
+@@ -396,6 +396,11 @@
+         The m/z and intensity of the isotopes.
+     """
+ 
++    # peakbench patch: the nearest MS1 scan can be empty after the MS1 intensity cut;
++    # report no isotopes instead of crashing (same result as "no isotopes found")
++    if signals is None or len(signals) == 0:
++        return np.empty((0, 2), dtype=float)
++
+     mzs = signals[:, 0]
+     intens = signals[:, 1]
+ 

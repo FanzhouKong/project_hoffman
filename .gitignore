@@ -1,0 +1,21 @@
+# data, environments, containers and outputs: too large, or not ours to redistribute
+data/
+envs/*
+!envs/*.freeze.txt
+!envs/Rlib.sessionInfo.txt
+!envs/masscube-1.2.22-empty-scan.patch
+containers/
+results/
+logs/
+manifest/*
+!manifest/manifest.tsv
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# local-only tools and the reports that quote their results
+bench/local_tools.py
+scripts/local/
+bench/diag/method_benchmark_report.py
+bench/diag/crosstool_report.py
+bench/diag/hzv029_missed_page.py
