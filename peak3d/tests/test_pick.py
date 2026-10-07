@@ -7,7 +7,7 @@ from peak3d import kernels as K
 from peak3d.estimate import estimate
 from peak3d.features import build_features
 from peak3d.pick import pick_cloud
-from peak3d.synth import Peak, make_cloud, permute_within_scans
+from peak3d.synth import Peak, _trapezoid, make_cloud, permute_within_scans
 
 DT = 0.005
 FW = 0.05           # 10 scans per FWHM
@@ -217,7 +217,7 @@ def test_acquisition_gap_not_interpolated():
     # area equals the trapezoid over the points actually present (one straight segment across the gap)
     e = cloud.eic(400.0, 5.0)
     keep = e > 0
-    assert f.area == pytest.approx(np.trapz(e[keep], cloud.rt[keep]), rel=0.02)
+    assert f.area == pytest.approx(_trapezoid(e[keep], cloud.rt[keep]), rel=0.02)
     assert f.n_gaps == 0  # the grid has no scans there, so nothing is counted as missing
 
 

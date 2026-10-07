@@ -1,7 +1,7 @@
 import numpy as np
 
 from peak3d.gapfill import fill_file
-from peak3d.synth import Peak, make_cloud
+from peak3d.synth import Peak, _trapezoid, make_cloud
 from peak3d.warp import TableWarp
 
 
@@ -21,4 +21,4 @@ def test_fill_area_is_trapezoid_over_present_scans():
     h, a, _ = fill_file(cloud, TableWarp.identity(cloud.rt), np.array([400.0]), np.array([2.0]), np.array([0.2]), 5.0)
     e = cloud.eic(400.0, 5.0)
     keep = e > 0
-    assert abs(a[0] - np.trapz(e[keep], cloud.rt[keep])) / a[0] < 1e-3
+    assert abs(a[0] - _trapezoid(e[keep], cloud.rt[keep])) / a[0] < 1e-3

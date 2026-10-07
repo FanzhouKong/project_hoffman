@@ -1,14 +1,14 @@
 # data, environments, containers and outputs: too large, or not ours to redistribute
-data/
-envs/*
-!envs/*.freeze.txt
-!envs/Rlib.sessionInfo.txt
-!envs/masscube-1.2.22-empty-scan.patch
-containers/
-results/
-logs/
-manifest/*
-!manifest/manifest.tsv
+/data/
+/envs/*
+!/envs/*.freeze.txt
+!/envs/Rlib.sessionInfo.txt
+!/envs/masscube-1.2.22-empty-scan.patch
+/containers/
+/results/
+/logs/
+/manifest/*
+!/manifest/manifest.tsv
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -22,5 +22,5 @@ bench/diag/hzv029_missed_page.py
 
 # packaging
 *.egg-info/
-build/
-dist/
+/build/
+/dist/
