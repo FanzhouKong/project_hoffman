@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="peak3d-token" content="{{TOKEN}}">
+<title>peak3d</title>
+<style>
+@font-face { font-family: "Roboto"; font-style: normal; font-weight: 100 900; font-display: swap; src: url(/static/roboto-latin.woff2) format("woff2"); }
+</style>
+<link rel="stylesheet" href="/static/m3.css?v={{VERSION}}">
+</head>
+<body>
+<div class="app">
+  <nav class="nav-rail" aria-label="Main">
+    <div class="brand-mark" id="brand" title="peak3d {{VERSION}}"></div>
+    <button class="rail-item" data-page="run" type="button"><span class="indicator"></span><span class="label">Run</span></button>
+    <button class="rail-item" data-page="results" type="button"><span class="indicator"></span><span class="label">Results</span></button>
+    <div class="bottom" id="rail-bottom"></div>
+  </nav>
+  <div class="app-main">
+    <header class="top-app-bar" id="bar">
+      <div class="title"><span class="title-large" id="page-title">peak3d</span><span class="subtitle body-medium" id="page-sub"></span></div>
+      <span id="bar-actions" class="row"></span>
+    </header>
+    <div class="app-body" id="scroll"><div id="page"></div></div>
+  </div>
+</div>
+<dialog class="dialog" id="browse"></dialog>
+<dialog class="dialog" id="confirm"></dialog>
+{{SCRIPTS}}
+</body>
+</html>

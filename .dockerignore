@@ -1,0 +1,8 @@
+# the image needs the package only
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!peak3d/
+peak3d/tests/
+**/__pycache__/

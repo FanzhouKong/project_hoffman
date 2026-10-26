@@ -36,3 +36,6 @@ version = { attr = "peak3d.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["peak3d", "peak3d.*"]
+
+[tool.setuptools.package-data]
+"peak3d.web" = ["static/*"]

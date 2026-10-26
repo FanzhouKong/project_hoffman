@@ -1,0 +1,34 @@
+name: tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install ".[test]"
+      - name: Unit tests
+        run: pytest peak3d/tests -m "not perf" -q
+      - name: Demo (end to end, timed)
+        shell: bash
+        run: |
+          start=$(date +%s)
+          peak3d demo --output demo_out --cores 2
+          echo "demo took $(( $(date +%s) - start )) s on ${{ matrix.os }}"
+          test -f demo_out/peak3d_out/report.html
+      - name: Front-end scripts parse
+        shell: bash
+        run: for f in peak3d/web/static/*.js; do node --check "$f"; done

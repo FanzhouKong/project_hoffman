@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="peak3d">
+<title>{{TITLE}}</title>
+<style>
+@font-face { font-family: "Roboto"; font-style: normal; font-weight: 100 900; font-display: swap; src: url(data:font/woff2;base64,{{FONT}}) format("woff2"); }
+{{CSS}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="app-main">
+    <header class="top-app-bar" id="bar">
+      <div class="brand-mark" id="brand"></div>
+      <div class="title" style="margin-left:12px"><span class="title-large">peak3d results</span><span class="subtitle body-medium" id="subtitle"></span></div>
+      <span id="actions"></span>
+    </header>
+    <div class="app-body" id="scroll">
+      <div id="viewer"><div class="loading"><svg class="spinner" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20"/></svg><span class="body-medium">Opening results…</span></div></div>
+    </div>
+  </div>
+</div>
+<script id="peak3d-data" type="application/octet-stream">{{DATA}}</script>
+<script>
+{{JS}}
+</script>
+<script>
+(async function () {
+  "use strict";
+  const P3 = window.P3, el = document.getElementById("viewer"), scroll = document.getElementById("scroll");
+  document.getElementById("brand").appendChild(P3.icon("science"));
+  document.getElementById("actions").appendChild(P3.themeButton());
+  scroll.addEventListener("scroll", () => document.getElementById("bar").classList.toggle("scrolled", scroll.scrollTop > 0));
+  try {
+    const raw = P3.b64bytes(document.getElementById("peak3d-data").textContent);
+    const bundle = await P3.loadBundle(raw);
+    document.getElementById("subtitle").textContent = bundle.header.title;
+    P3.viewer.mount(el, bundle, {});
+  } catch (e) {
+    el.replaceChildren(P3.h("div.page", P3.h("div.banner.error", { style: { marginTop: "24px" } }, P3.icon("error"), P3.h("div", String(e.message || e)))));
+  }
+})();
+</script>
+</body>
+</html>

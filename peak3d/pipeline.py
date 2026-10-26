@@ -370,6 +370,20 @@ def _write_params(output: Path, args, res: AlignResult | None, stage_times: dict
     (output / "params.json").write_text(json.dumps(p, indent=1, default=str))
 
 
+def _write_report(output: Path, cache_dir: Path, args):
+    """report.html next to the tables, while the cache (chromatograms) still exists; never fails the run"""
+    if getattr(args, "no_report", False):
+        return
+    tic = time.perf_counter()
+    try:
+        from .web.report import write_report
+        log("writing report.html")
+        path = write_report(output, cache_dir)
+        log(f"report: {path} ({path.stat().st_size / 1e6:.1f} MB, {time.perf_counter() - tic:.1f} s)")
+    except Exception as e:
+        log(f"report skipped: {e!r}")
+
+
 def process(files, args):
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -388,6 +402,7 @@ def process(files, args):
     stage["qc_s"] = round(time.perf_counter() - tic, 3)
     _write_params(output, args, res, stage, files, extra=dict(n_files=len(files),
                                                                 n_features_total=int(sum(r["n_features"] for r in results))))
+    _write_report(output, cache_dir, args)
     if not args.keep_cache and cache_dir == output / ".cache":
         shutil.rmtree(cache_dir, ignore_errors=True)
 
@@ -407,3 +422,4 @@ def align_existing(args):
     files = sorted(str(p) for p in (output / "features").glob("*.tsv") if not p.name.endswith("rejected.tsv")
                    and p.name != "manifest.tsv")
     _write_params(output, args, res, stage, files)
+    _write_report(output, cache_dir, args)

@@ -74,8 +74,35 @@ reuse the compiled code.
 | `rt_correction/` | per-file RT warps and a summary of the correction |
 | `qc/` | RT drift curves, residual histograms, presence histogram |
 | `params.json` | every estimated parameter and the software versions |
+| `report.html` | interactive report (feature map, feature table with chromatograms, RT alignment, run details); one self-contained file that opens in any browser, offline, and can be emailed |
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
+
+### In the browser: `peak3d gui`, or Docker without installing anything
+
+```bash
+peak3d gui                      # opens http://127.0.0.1:8765/?token=... in your browser
+```
+
+The GUI picks the mzML folder and output folder, sets the options (the same as the command line, with the
+equivalent command shown), runs peak3d with live progress, and opens the results in the same viewer as
+`report.html`. It runs on your computer: data never leave it, and the browser is only the window. Runs are
+ordinary `peak3d process` subprocesses, so results are identical to the command line. `peak3d report OUT`
+rebuilds `report.html` for an existing output.
+
+With Docker (Windows, macOS, Linux; nothing else to install), from the folder that holds your data:
+
+```bash
+docker run --rm -p 127.0.0.1:8765:8765 -v "$PWD":/data ghcr.io/fanzhoukong/peak3d
+```
+
+Open the link printed in the log. The GUI sees the current folder as `/data`; results are written there.
+On Linux add `--user "$(id -u):$(id -g)"` so the files belong to you. The same image runs the command
+line, e.g. `docker run --rm -v "$PWD":/data ghcr.io/fanzhoukong/peak3d process --input /data/mzml --output /data/out --cores 8`.
+On macOS and Windows, give Docker Desktop enough memory (Settings > Resources; about 1.5 GB per core used).
+
+On a cluster, start the GUI inside a job with `--host 0.0.0.0` and reach it through an SSH tunnel to that
+node; the access token in the link keeps other users out.
 
 ### Options
 

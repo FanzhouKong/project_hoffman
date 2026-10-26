@@ -1,10 +1,12 @@
-"""Command line: peak3d {process,pick,align,demo} ...   (or python -m peak3d ...)
+"""Command line: peak3d {process,pick,align,demo,report,gui} ...   (or python -m peak3d ...)
 
 process: pick every mzML in --input, align the runs on their own credible features, group them
-         into one table, gap-fill, write QC -> --output
+         into one table, gap-fill, write QC and report.html -> --output
 pick:    per-file feature tables only
 align:   re-run alignment/grouping/gap-fill from an existing output (features/ + .cache/)
 demo:    write three small synthetic mzML runs and process them (checks an installation)
+report:  (re)write report.html for an existing output
+gui:     local web app: choose folders, run, and browse results in the browser
 """
 from __future__ import annotations
 
@@ -64,6 +66,7 @@ def build_parser():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--cache-dir", type=Path, default=None, help="where per-file point clouds are cached (default <output>/.cache)")
     p.add_argument("--keep-cache", action="store_true")
+    p.add_argument("--no-report", action="store_true", help="do not write report.html")
     common(p)
     align_opts(p)
 
@@ -77,11 +80,32 @@ def build_parser():
     p.add_argument("--output", type=Path, required=True, help="existing output with features/ and .cache/")
     p.add_argument("--cache-dir", type=Path, default=None)
     p.add_argument("--cores", type=_positive(int), default=1)
+    p.add_argument("--no-report", action="store_true", help="do not write report.html")
     align_opts(p)
 
     p = sub.add_parser("demo", help="process three synthetic runs (checks an installation)")
     p.add_argument("--output", type=Path, required=True, help="writes OUT/demo_mzml/ and OUT/peak3d_out/")
     p.add_argument("--cores", type=_positive(int), default=1)
+
+    p = sub.add_parser("report", help="(re)write report.html for an existing output")
+    p.add_argument("output", type=Path, help="a peak3d output folder")
+    p.add_argument("--cache-dir", type=Path, default=None,
+                   help="point-cloud cache for chromatograms (default <output>/.cache, if it still exists)")
+    p.add_argument("--path", type=Path, default=None, help="write here instead of <output>/report.html")
+    p.add_argument("--eic-budget", type=_positive(int), default=None,
+                   help="chromatogram values to store (default 3,000,000; more = larger file, more features)")
+    p.add_argument("--eic-files", type=_positive(int), default=None, help="files per chromatogram plot (default 16)")
+
+    p = sub.add_parser("gui", help="local web app: run peak3d and browse results in the browser")
+    p.add_argument("--host", default="127.0.0.1", help="interface to listen on (default 127.0.0.1: this computer only)")
+    p.add_argument("--port", type=int, default=8765, help="port (default 8765; the next free one is used if taken)")
+    p.add_argument("--root", type=Path, default=None, help="limit folder browsing, inputs and outputs to this folder")
+    p.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+    p.add_argument("--token", default=os.environ.get("PEAK3D_TOKEN") or "auto",
+                   help="access token (default: random per start; env PEAK3D_TOKEN)")
+    p.add_argument("--no-token", action="store_true", help="no access token (only on a machine you alone use)")
+    p.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                   help="extra Host name to accept, e.g. a reverse proxy's (repeatable)")
     return ap
 
 
@@ -105,6 +129,17 @@ def write_demo(out: Path) -> Path:
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.cmd == "gui":
+        from .web.server import serve
+        serve(args.host, args.port, args.root, None if args.no_token else args.token, not args.no_browser,
+              args.allow_host)
+        return
+    if args.cmd == "report":
+        from .web.report import write_report
+        limits = {k: v for k, v in (("eic_budget", args.eic_budget), ("eic_files", args.eic_files)) if v}
+        path = write_report(args.output, args.cache_dir, args.path, **limits)
+        print(f"[peak3d] report: {path} ({path.stat().st_size / 1e6:.1f} MB)", flush=True)
+        return
     os.environ.setdefault("NUMBA_NUM_THREADS", str(max(1, args.cores)))
     from . import pipeline
     t0 = time.perf_counter()
