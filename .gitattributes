@@ -1,4 +1,0 @@
-# launchers: Windows batch files keep CRLF in every checkout and ZIP download; shell scripts keep LF
-*.bat -text
-*.sh text eol=lf
-*.command text eol=lf

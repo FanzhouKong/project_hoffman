@@ -9,22 +9,34 @@ This repository holds two things:
 - **`bench/` + `scripts/`**, the benchmark ("peakbench") that compares peak3d with asari, MassCube and
   IDSL.IPA on public datasets with ground truth. See [Benchmark](#benchmark-peakbench) below.
 
-## Run the peak3d app (one click, no programming)
+## Run the peak3d app (download, double-click)
 
-1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows, macOS; Docker Engine on
-   Linux) and start it once.
-2. Download this repository: on GitHub **Code > Download ZIP** and unzip it, or
-   `git clone https://github.com/FanzhouKong/project_hoffman.git`.
-3. Double-click **Start peak3d.command** (macOS) or **Start peak3d.bat** (Windows). On Linux run `./start-peak3d.sh`.
+Download the file for your computer from the
+[releases page](https://github.com/FanzhouKong/project_hoffman/releases) (newest preview build:
+[app-preview](https://github.com/FanzhouKong/project_hoffman/releases/tag/app-preview)). Nothing else to install.
 
-Your browser opens peak3d. Choose a folder of mzML files, or press **Create example data** to try it with three
-small synthetic runs, then **Run peak3d** and **Open results**. The first start downloads the app (about 300 MB)
-and the first run compiles it (about a minute); after that both take seconds. A small terminal window stays open
-while peak3d runs; close it to stop peak3d. peak3d sees your home folder (on Windows your user folder, shown as
-`/data`), and your data never leave your computer.
+| Computer | File | Start |
+|---|---|---|
+| Windows 10/11, 64-bit | `peak3d-windows-x64.zip` | unzip, open the `peak3d` folder, double-click `peak3d.exe` |
+| Mac with Apple silicon (M1 or later), macOS 14+ | `peak3d-macos-arm64.zip` | unzip, move `peak3d.app` to Applications, double-click it |
+| Mac with an Intel processor, macOS 14+ | `peak3d-macos-x64.zip` | the same |
+| Linux, x86-64 (glibc 2.35+, e.g. Ubuntu 22.04) | `peak3d-linux-x64.tar.gz` | `tar xzf peak3d-linux-x64.tar.gz` then `./peak3d/peak3d` |
 
-On macOS, if a file from the ZIP will not open ("unidentified developer"), right-click it, choose **Open**, and
-confirm; this is needed once.
+peak3d opens in your web browser, with a small window to reopen or quit it. Choose a folder of mzML files, or
+press **Create example data** to try it with three small synthetic runs, then **Run peak3d** and **Open
+results**. The first run compiles peak3d (about a minute); later runs start at once. Your data stay on your
+computer.
+
+The app is not yet signed with an Apple or Microsoft certificate, so the first start asks you to confirm:
+
+- **macOS**: double-click peak3d; when macOS says it cannot verify it, click **Done**, open **System Settings >
+  Privacy & Security**, scroll down and click **Open Anyway** next to peak3d. Or, in Terminal:
+  `xattr -dr com.apple.quarantine /Applications/peak3d.app`
+- **Windows**: on "Windows protected your PC", click **More info**, then **Run anyway**.
+
+The program is also the full command line, e.g. `peak3d.exe process --input mzml --output out --cores 8` on
+Windows, `/Applications/peak3d.app/Contents/MacOS/peak3d process ...` on macOS, `./peak3d/peak3d process ...` on
+Linux.
 
 ## Quick start: peak3d on your own mzML files
 
@@ -95,7 +107,7 @@ reuse the compiled code.
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
 
-### In the browser: `peak3d gui`, or Docker without installing anything
+### In the browser: `peak3d gui`
 
 ```bash
 peak3d gui                      # opens http://127.0.0.1:8765/?token=... in your browser
@@ -107,16 +119,7 @@ equivalent command shown), runs peak3d with live progress, and opens the results
 ordinary `peak3d process` subprocesses, so results are identical to the command line. `peak3d report OUT`
 rebuilds `report.html` for an existing output.
 
-With Docker (Windows, macOS, Linux; nothing else to install), from the folder that holds your data:
-
-```bash
-docker run --rm -p 127.0.0.1:8765:8765 -v "$PWD":/data ghcr.io/fanzhoukong/peak3d
-```
-
-Open the link printed in the log. The GUI sees the current folder as `/data`; results are written there.
-On Linux add `--user "$(id -u):$(id -g)"` so the files belong to you. The same image runs the command
-line, e.g. `docker run --rm -v "$PWD":/data ghcr.io/fanzhoukong/peak3d process --input /data/mzml --output /data/out --cores 8`.
-On macOS and Windows, give Docker Desktop enough memory (Settings > Resources; about 1.5 GB per core used).
+The standalone app above is the same GUI without a Python installation.
 
 On a cluster, start the GUI inside a job with `--host 0.0.0.0` and reach it through an SSH tunnel to that
 node; the access token in the link keeps other users out.

@@ -1,0 +1,116 @@
+name: app
+# Standalone peak3d app (PyInstaller) for Windows, macOS and Linux: build, use it as a user would, publish.
+# Branch pushes replace the "app-preview" pre-release; a v* tag makes a versioned release.
+on:
+  push:
+    branches: [main, gui-prototype]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest }
+          - { name: macos-arm64, os: macos-14 }
+          - { name: macos-x64, os: macos-15-intel }
+          - { name: linux-x64, os: ubuntu-22.04 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      BROWSER: none        # no browser windows on the build machines
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install . "pyinstaller>=6.10,<7"
+      - name: Build
+        run: pyinstaller --noconfirm --clean packaging/peak3d.spec
+      - name: Locate the program
+        run: |
+          case "${{ runner.os }}" in
+            Windows) echo "BIN=$PWD/dist/peak3d/peak3d.exe" >> "$GITHUB_ENV" ;;
+            macOS)   echo "BIN=$PWD/dist/peak3d.app/Contents/MacOS/peak3d" >> "$GITHUB_ENV" ;;
+            Linux)   echo "BIN=$PWD/dist/peak3d/peak3d" >> "$GITHUB_ENV" ;;
+          esac
+      - name: Command line inside the app (demo, cold and with the compile cache)
+        run: |
+          "$BIN" --version
+          start=$(date +%s); "$BIN" demo --output smoke1 --cores 2; echo "cold: $(( $(date +%s) - start )) s"
+          test -f smoke1/peak3d_out/report.html
+          start=$(date +%s); "$BIN" demo --output smoke2 --cores 2; echo "warm: $(( $(date +%s) - start )) s"
+      - name: GUI inside the app runs peak3d (example data, one run, results)
+        run: |
+          "$BIN" gui --no-browser --port 8799 --token ci --root "$PWD" > gui.log 2>&1 &
+          api() { curl -sf -H "X-Peak3d-Token: ci" -H "Content-Type: application/json" "$@"; }
+          for i in $(seq 60); do api http://127.0.0.1:8799/api/info > /dev/null && break; sleep 1; done
+          ex=$(api -X POST -d '{}' http://127.0.0.1:8799/api/example); echo "$ex"
+          inp=$(echo "$ex" | python -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["input"]))')
+          out=$(python -c 'import json,os; print(json.dumps(os.path.join(os.getcwd(), "gui_out")))')
+          api -X POST -d "{\"input\": $inp, \"output\": $out, \"options\": {\"cores\": 2}}" http://127.0.0.1:8799/api/runs
+          for i in $(seq 200); do
+            st=$(api http://127.0.0.1:8799/api/runs/r1 | python -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+            [ "$st" != running ] && break; sleep 3
+          done
+          api http://127.0.0.1:8799/api/runs/r1 | python -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d["log"][-8:]))'
+          echo "run: $st"; test "$st" = done && test -f gui_out/report.html
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8799/api/results/bundle?path=$(python -c 'import os,urllib.parse; print(urllib.parse.quote(os.path.join(os.getcwd(), "gui_out")))')" -H "X-Peak3d-Token: ci")
+          echo "results: HTTP $code"; test "$code" = 200
+      - name: Double-click start (no arguments) serves the app
+        run: |
+          "$BIN" > app.log 2>&1 &
+          state="$HOME/.peak3d/app.json"
+          for i in $(seq 60); do [ -f "$state" ] && break; sleep 1; done
+          url=$(python -c "import json,os; print(json.load(open(os.path.expanduser('~/.peak3d/app.json')))['url'].split('?')[0])")
+          tok=$(python -c "import json,os; print(json.load(open(os.path.expanduser('~/.peak3d/app.json')))['token'])")
+          curl -sf -H "X-Peak3d-Token: $tok" "${url}api/info"; echo
+          if [ "${{ runner.os }}" = Windows ]; then taskkill //F //IM peak3d.exe > /dev/null 2>&1 || true; else pkill -f "$BIN" || true; fi
+      - name: Package
+        run: |
+          mkdir -p upload
+          case "${{ runner.os }}" in
+            Windows) (cd dist && 7z a -tzip -mx=7 ../upload/peak3d-${{ matrix.name }}.zip peak3d > /dev/null) ;;
+            macOS)   ditto -c -k --keepParent dist/peak3d.app upload/peak3d-${{ matrix.name }}.zip ;;
+            Linux)   tar -C dist -czf upload/peak3d-${{ matrix.name }}.tar.gz peak3d ;;
+          esac
+          ls -la upload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peak3d-${{ matrix.name }}
+          path: upload/*
+          retention-days: 14
+          compression-level: 0
+
+  release:
+    needs: build
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: upload
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la upload
+          notes="Standalone peak3d app: download the file for your computer, unzip, double-click (see the README for the one-time security confirmation on macOS and Windows). Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            gh release create "$GITHUB_REF_NAME" upload/* --title "peak3d $GITHUB_REF_NAME" --notes "$notes"
+          else
+            gh release delete app-preview --yes --cleanup-tag || true
+            gh release create app-preview upload/* --prerelease --target "$GITHUB_SHA" \
+              --title "peak3d app (preview)" --notes "$notes"
+          fi

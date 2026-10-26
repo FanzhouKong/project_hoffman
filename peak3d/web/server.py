@@ -33,6 +33,8 @@ from . import bundle, report
 STATIC = report.STATIC
 APP_SCRIPTS = (*report.SCRIPTS, "app.js")
 COOKIE = "peak3d_token"
+# how to start `peak3d ...`: inside the standalone app the program itself is the command line
+PEAK3D_CMD = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "peak3d"]
 SKIP_OPTIONS = {"help", "input", "output", "cache_dir"}
 
 # stage markers in the pipeline log -> (stage, progress fraction when reached)
@@ -128,7 +130,7 @@ def _mzml_files(folder: Path) -> list[Path]:
 class Run:
     def __init__(self, rid: str, input_dir: Path, output: Path, argv: list[str], n_files: int):
         self.id, self.input, self.output, self.argv, self.n_files = rid, input_dir, output, argv, n_files
-        self.cmd = [sys.executable, "-m", "peak3d", "process", "--input", str(input_dir), "--output", str(output),
+        self.cmd = [*PEAK3D_CMD, "process", "--input", str(input_dir), "--output", str(output),
                     *argv]
         self.lines: list[str] = []
         self.state, self.stage, self.base = "running", "compile", 0.0
@@ -138,7 +140,7 @@ class Run:
     def start(self):
         env = dict(os.environ, PYTHONUNBUFFERED="1")
         kw = {"start_new_session": True} if os.name == "posix" else \
-            {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+            {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)}
         self.proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding="utf-8", errors="replace", bufsize=1, env=env, **kw)
         threading.Thread(target=self._follow, daemon=True).start()
@@ -170,7 +172,8 @@ class Run:
             except ProcessLookupError:
                 pass
         else:  # the spawned pool workers are children: end the whole tree
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True)
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     def progress(self) -> float:
         if self.state == "done":
@@ -393,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
         a = self.app
         return {"version": __version__, "platform": platform.system(), "python": platform.python_version(),
                 "cpu_count": os.cpu_count() or 1, "root": str(a.root) if a.root else None,
-                "start": str(a.root or Path.home()), "sep": os.sep, "docker": Path("/.dockerenv").exists()}
+                "start": str(a.root or Path.home()), "sep": os.sep}
 
     def _ls(self, p):
         a = self.app
@@ -489,7 +492,7 @@ def serve(host="127.0.0.1", port=8765, root=None, token="auto", open_browser=Tru
     httpd, url = make_server(host, port, root, token, allowed_hosts)
     print(f"[peak3d] GUI running; open this link in your browser:\n\n    {url}\n", flush=True)
     if host in ("0.0.0.0", "::"):
-        print("[peak3d] listening on all interfaces (in Docker, publish the port with -p 127.0.0.1:PORT:PORT)", flush=True)
+        print("[peak3d] listening on all interfaces; the token in the link keeps others out", flush=True)
     if httpd.app.root:
         print(f"[peak3d] folders limited to {httpd.app.root}", flush=True)
     print("[peak3d] press Ctrl+C to stop", flush=True)
