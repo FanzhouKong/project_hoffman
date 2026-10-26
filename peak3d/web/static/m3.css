@@ -506,6 +506,18 @@ table.data.static tbody tr:hover td { background: none; }
 .tooltip b { font-weight: 500; }
 .chart-hint { position: absolute; right: 8px; top: 4px; font: 400 11px/16px var(--md-ref-typeface); color: var(--md-sys-color-on-surface-variant); }
 
+/* ---------------------------------------------------------------- menu */
+.menu {
+  position: fixed; z-index: 30; min-width: 240px; max-width: calc(100vw - 16px); padding: 8px 0; border-radius: 4px;
+  background: var(--md-sys-color-surface-container); color: var(--md-sys-color-on-surface); box-shadow: var(--md-elev-2);
+  animation: dlg 150ms var(--md-ease-decel);
+}
+.menu-item {
+  display: flex; align-items: center; gap: 12px; width: 100%; height: 48px; padding: 0 16px; border: 0; background: none;
+  text-align: left; text-decoration: none; color: var(--md-sys-color-on-surface); font: 400 14px/20px var(--md-ref-typeface); letter-spacing: .25px;
+}
+.menu-item .icon { color: var(--md-sys-color-on-surface-variant); }
+
 /* ---------------------------------------------------------------- dialog, snackbar */
 dialog.dialog {
   border: 0; padding: 0; border-radius: 28px; width: min(560px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 48px));

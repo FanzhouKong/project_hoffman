@@ -56,6 +56,24 @@
   const banner = (text, kind) => h("div.banner" + (kind === "error" ? ".error" : ""), icon(kind === "error" ? "error" : "info"), h("div.body-medium", text));
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+  // the listed features as a tab-separated table, from the values stored in the bundle (rounded to 0.04 %)
+  const TABLE_COLS = ["group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
+    "rt_sd", "iso_offset", "charge"];
+  function bundleTable(R, rows) {
+    const a = R.a, num = (v, d) => (isFinite(v) ? v.toFixed(d) : "");
+    const parts = [TABLE_COLS.concat(a.m_q ? R.stems : []).join("\t") + "\n"];
+    let buf = [];
+    for (const g of rows) {
+      const row = [a.g_id[g], a.g_mz[g].toFixed(6), num(a.g_rt[g], 4), num(a.g_rt_min[g], 4), num(a.g_rt_max[g], 4),
+        a.g_ndet[g], a.g_nconf[g], a.g_nfill[g], num(a.g_ppm[g], 3), num(a.g_rtsd[g], 5), a.g_iso[g], a.g_z[g]];
+      if (a.m_q) for (let f = 0; f < R.N; f++) { const v = R.value(g, f); row.push(v ? String(+v.toPrecision(5)) : "0"); }
+      buf.push(row.join("\t"));
+      if (buf.length >= 2000) { parts.push(buf.join("\n") + "\n"); buf = []; }
+    }
+    if (buf.length) parts.push(buf.join("\n") + "\n");
+    return new Blob(parts, { type: "text/tab-separated-values" });
+  }
+
   // ---------------------------------------------------------------- viewer
   function mount(root, bundle, opts) {
     opts = opts || {};
@@ -161,8 +179,25 @@
         return c;
       };
       const count = h("span.body-small.muted");
+      const dl = h("button.btn.outlined.state", { type: "button", title: opts.exportTable ?
+        "The features listed here (search, filters and sort applied), with the exact values from aligned_feature_table.tsv" :
+        "The features listed here (search, filters and sort applied). Values are rounded to 0.04 %; the exact table is aligned_feature_table.tsv in the output folder." },
+        icon("download"), "Download table");
+      dl.addEventListener("click", async () => {
+        const name = `${R.h.title}_features${list.length < R.G ? "_" + list.length : ""}.tsv`;
+        dl.disabled = true;
+        try {
+          const blob = opts.exportTable ? await opts.exportTable(list.map((g) => R.a.g_id[g])) : bundleTable(R, list);
+          P3.saveBlob(blob, name);
+          P3.snack(`Downloaded ${int(list.length)} features as ${name}`);
+        } catch (e) {
+          P3.snack(String(e.message || e));
+        } finally {
+          dl.disabled = false;
+        }
+      });
       body.append(h("div.toolbar", searchField, ppmField, chip("mono", "Monoisotopic"), chip("all", "In every file"),
-        R.h.eic ? chip("withEic", "With chromatograms") : null, h("span.spacer"), count));
+        R.h.eic ? chip("withEic", "With chromatograms") : null, h("span.spacer"), count, dl));
 
       const COLS = [["id", "ID", true], ["mz", "m/z", true], ["rt", "RT (min)", true], ["width", "Width (s)", true], ["ndet", "Detected", true],
         ["nfill", "Gap-filled", true], ["max", "Max " + R.quant.toLowerCase(), true], ["cv", "CV", true], ["iso", "Isotope", false]];
@@ -408,5 +443,5 @@
     return { results: R, show, destroy: clearCharts };
   }
 
-  P3.viewer = { mount, Results };
+  P3.viewer = { mount, Results, bundleTable };
 })(window.P3 = window.P3 || {});

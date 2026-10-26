@@ -352,6 +352,36 @@
     tick();
   }
 
+  // ---------------------------------------------------------------- menu (Material 3)
+  function menuButton(iconName, label, items) {
+    const btn = h("button.icon-btn.state", { type: "button", title: label, "aria-label": label, "aria-haspopup": "menu" }, icon(iconName));
+    let menu = null;
+    const close = () => {
+      if (!menu) return;
+      menu.remove();
+      menu = null;
+      document.removeEventListener("pointerdown", outside, true);
+      document.removeEventListener("keydown", esc, true);
+    };
+    const outside = (e) => { if (menu && !menu.contains(e.target) && !btn.contains(e.target)) close(); };
+    const esc = (e) => { if (e.key === "Escape") close(); };
+    btn.addEventListener("click", () => {
+      if (menu) return close();
+      menu = h("div.menu", { role: "menu" }, items.map((it) => (it === "-" ? h("hr.divider", { style: { margin: "8px 0" } }) :
+        h(it.href ? "a.menu-item.state" : "button.menu-item.state", { role: "menuitem", href: it.href, download: it.href ? "" : null, type: it.href ? null : "button",
+          onclick: () => { close(); if (it.run) it.run(); } }, icon(it.icon), h("span", it.label)))));
+      document.body.appendChild(menu);
+      const r = btn.getBoundingClientRect();
+      menu.style.top = r.bottom + 4 + "px";
+      menu.style.left = Math.max(8, Math.min(window.innerWidth - menu.offsetWidth - 8, r.right - menu.offsetWidth)) + "px";
+      document.addEventListener("pointerdown", outside, true);
+      document.addEventListener("keydown", esc, true);
+      const first = menu.querySelector(".menu-item");
+      if (first) first.focus();
+    });
+    return btn;
+  }
+
   // ---------------------------------------------------------------- results page
   function openResults(path) { S.resultsPath = path; S.viewerTab = "overview"; go("results"); }
   async function resultsPage() {
@@ -370,10 +400,22 @@
     const path = S.resultsPath;
     setTitle("Results", path);
     const actions = document.getElementById("bar-actions");
-    actions.append(
-      h("a.icon-btn.state", { href: `/api/results/report?path=${enc(path)}`, target: "_blank", rel: "noopener", title: "Open report.html in a new tab", "aria-label": "Open report" }, icon("open_in_new")),
-      h("a.icon-btn.state", { href: `/api/results/report?path=${enc(path)}&download=1`, title: "Download report.html (self-contained; share it by email)", "aria-label": "Download report" }, icon("download")),
-      h("button.icon-btn.state", { type: "button", title: "Open other results", "aria-label": "Open other results", onclick: () => browse("results", dirname(path), (p) => openResults(p)) }, icon("folder_open")));
+    const reveal = { Darwin: "Show in Finder", Windows: "Show in File Explorer" }[S.info.platform] || "Open the output folder";
+    const fileUrl = (name) => `/api/results/file?path=${enc(path)}&name=${name}`;
+    const addActions = (quant) => {
+      const other = quant === "area" ? "height" : "area";
+      actions.replaceChildren(
+        h("a.icon-btn.state", { href: `/api/results/report?path=${enc(path)}`, target: "_blank", rel: "noopener", title: "Open report.html in a new tab", "aria-label": "Open report" }, icon("open_in_new")),
+        menuButton("download", "Download", [
+          { icon: "table_rows", label: `Feature table (${quant}s)`, href: fileUrl("aligned_feature_table.tsv") },
+          { icon: "table_rows", label: `Feature table (${other}s)`, href: fileUrl(`aligned_feature_${other}.tsv`) },
+          { icon: "description", label: "Report (one HTML file to share)", href: `/api/results/report?path=${enc(path)}&download=1` },
+          "-",
+          { icon: "folder", label: reveal, run: () => post("/api/results/reveal", { path }).catch((e) => snack(e.message)) },
+        ]),
+        h("button.icon-btn.state", { type: "button", title: "Open other results", "aria-label": "Open other results", onclick: () => browse("results", dirname(path), (p) => openResults(p)) }, icon("folder_open")));
+    };
+    addActions("height");
     const holder = h("div");
     holder.appendChild(h("div.loading", P3.spinner(), h("span.body-medium", "Opening results…")));
     pageEl.appendChild(holder);
@@ -381,7 +423,9 @@
       const raw = await api(`/api/results/bundle?path=${enc(path)}`);
       const b = await P3.loadBundle(raw);
       if (S.page !== "results" || S.resultsPath !== path) return;
-      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t) });
+      addActions(b.header.quant === "area" ? "area" : "height");
+      const exportTable = async (ids) => new Blob([await api("/api/results/table", { method: "POST", body: JSON.stringify({ path, ids }) })], { type: "text/tab-separated-values" });
+      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable });
     } catch (e) {
       holder.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "16px" } }, icon("error"), h("div", e.message))));
     }

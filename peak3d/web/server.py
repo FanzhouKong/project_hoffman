@@ -36,6 +36,9 @@ COOKIE = "peak3d_token"
 # how to start `peak3d ...`: inside the standalone app the program itself is the command line
 PEAK3D_CMD = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "peak3d"]
 SKIP_OPTIONS = {"help", "input", "output", "cache_dir"}
+# output files the viewer may download (by name, from a peak3d output folder)
+RESULT_FILES = ("aligned_feature_table.tsv", "aligned_feature_area.tsv", "aligned_feature_height.tsv", "filled_mask.tsv",
+                "presence_mask.tsv", "params.json")
 
 # stage markers in the pipeline log -> (stage, progress fraction when reached)
 STAGES = [("JIT warm-up", "pick", 0.05), ("picked ", "align", 0.80), ("alignment:", "group", 0.84),
@@ -214,6 +217,7 @@ class App:
         self.runs: dict[str, Run] = {}
         self.schema = option_schema()
         self._bundles: dict[str, tuple] = {}
+        self._tables: dict[str, tuple] = {}
         self.lock = threading.Lock()
 
     def resolve(self, p: str | None) -> Path:
@@ -237,6 +241,21 @@ class App:
             blob = gzip.compress(bundle.build(output), compresslevel=6, mtime=0)
         self._bundles[str(output)] = (key, blob)
         return blob
+
+
+    def table_lines(self, path: Path):
+        """header and {group_id: line} of an aligned table, kept as text so values stay exactly as written"""
+        mtime = path.stat().st_mtime
+        hit = self._tables.get(str(path))
+        if hit and hit[0] == mtime:
+            return hit[1]
+        with open(path, encoding="utf-8", newline="") as fh:
+            header = fh.readline()
+            rows = {line.split("\t", 1)[0]: line for line in fh}
+        if len(self._tables) > 3:
+            self._tables.clear()
+        self._tables[str(path)] = (mtime, (header, rows))
+        return header, rows
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -335,6 +354,14 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/results/bundle":
                 out = self._output(q)
                 return self._send(200, self.app.bundle_for(out), "application/octet-stream")
+            if url.path == "/api/results/file":
+                out = self._output(q)
+                name = q.get("name", [""])[0]
+                if name not in RESULT_FILES or not (out / name).exists():
+                    return self._error(404, f"no file {name!r} in {out}")
+                ctype = "application/json" if name.endswith(".json") else "text/tab-separated-values; charset=utf-8"
+                return self._send(200, (out / name).read_bytes(), ctype,
+                                  {"Content-Disposition": f'attachment; filename="{out.name}_{name}"'})
             if url.path == "/api/results/report":
                 out = self._output(q)
                 rep = out / "report.html"
@@ -367,6 +394,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._start(body)
             if url.path == "/api/example":
                 return self._example()
+            if url.path == "/api/results/table":
+                return self._table(body)
+            if url.path == "/api/results/reveal":
+                return self._reveal(body)
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
             if m and m.group(1) in self.app.runs:
                 self.app.runs[m.group(1)].cancel()
@@ -374,6 +405,10 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, "not found")
         except PermissionError as e:
             self._error(403, str(e))
+        except FileNotFoundError as e:
+            self._error(404, str(e))
+        except Exception as e:
+            self._error(500, f"{type(e).__name__}: {e}")
 
     # ---- handlers
     def _index(self):
@@ -430,6 +465,32 @@ class Handler(BaseHTTPRequestHandler):
         if not (out / "aligned_feature_table.tsv").exists():
             raise FileNotFoundError(f"no peak3d results in {out}")
         return out
+
+    def _table(self, body):
+        """the rows of an aligned table for the given group ids, in that order, exactly as in the file"""
+        out = self._output({"path": [body.get("path") or ""]})
+        name = body.get("name") or "aligned_feature_table.tsv"
+        if name not in RESULT_FILES or not name.startswith("aligned_feature"):
+            return self._error(400, f"not a feature table: {name!r}")
+        header, rows = self.app.table_lines(out / name)
+        lines = [header] + [rows[k] for k in (str(int(i)) for i in body.get("ids") or []) if k in rows]
+        self._send(200, "".join(lines).encode("utf-8"), "text/tab-separated-values; charset=utf-8")
+
+    def _reveal(self, body):
+        """open the folder in Finder / File Explorer / the desktop's file manager (the app runs on this computer)"""
+        out = self.app.resolve(body.get("path") or "")
+        if not out.is_dir():
+            raise FileNotFoundError(f"not a folder: {out}")
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(out)])
+            elif os.name == "nt":
+                os.startfile(str(out))
+            else:
+                subprocess.Popen(["xdg-open", str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            return self._error(500, f"could not open the folder: {e}")
+        self._json({"ok": True})
 
     def _example(self):
         """three small synthetic runs (the `peak3d demo` data) in <root>/peak3d_example, for a first try"""

@@ -259,6 +259,17 @@ def test_server_run_and_results(gui):
     assert code == 200 and b'id="peak3d-data"' in page and "attachment" in hdr["Content-Disposition"]
     code, again = c.json("/api/runs", {"input": str(d), "output": str(root / "o")})
     assert code == 409 and again["confirm"] == "overwrite"
+    # downloads: whole files by name, and chosen rows exactly as in the file
+    out_q = quote(str(root / "o"))
+    code, raw, hdr = c.req(f"/api/results/file?path={out_q}&name=aligned_feature_table.tsv")
+    assert code == 200 and raw == (root / "o" / "aligned_feature_table.tsv").read_bytes()
+    assert "attachment" in hdr["Content-Disposition"] and "o_aligned_feature_table.tsv" in hdr["Content-Disposition"]
+    assert c.req(f"/api/results/file?path={out_q}&name=../../x")[0] == 404
+    lines = (root / "o" / "aligned_feature_table.tsv").read_text().splitlines(keepends=True)
+    ids = [int(lines[3].split("\t")[0]), int(lines[1].split("\t")[0]), 999999]
+    code, raw, _ = c.req("/api/results/table", {"path": str(root / "o"), "ids": ids})
+    assert code == 200 and raw.decode() == lines[0] + lines[3] + lines[1]
+    assert c.json("/api/results/reveal", {"path": str(root.parent)})[0] == 403          # outside --root
     code, ex = c.json("/api/example", {})
     assert code == 200 and ex["n_mzml"] == 3 and Path(ex["input"]).parent == (root / "peak3d_example").resolve()
     assert c.json(f"/api/results/bundle?path={quote(str(d))}")[0] == 404

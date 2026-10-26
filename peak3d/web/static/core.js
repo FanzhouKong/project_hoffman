@@ -112,6 +112,15 @@
   }
   function css(name, el) { return getComputedStyle(el || document.documentElement).getPropertyValue(name).trim(); }
 
+  // ---- downloads
+  function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = h("a", { href: url, download: name, style: { display: "none" } });
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+  }
+
   // ---- snackbar
   let snackTimer = null;
   function snack(text, action) {
@@ -155,5 +164,5 @@
   }
   async function loadBundle(gzBytes) { return parseBundle(await gunzip(gzBytes)); }
 
-  Object.assign(P3, { h, append, icon, spinner, fixed, int, compact, sci, duration, theme, applyTheme, cycleTheme, onTheme, themeButton, css, snack, loadBundle, b64bytes, storeGet, storeSet });
+  Object.assign(P3, { h, append, icon, spinner, saveBlob, fixed, int, compact, sci, duration, theme, applyTheme, cycleTheme, onTheme, themeButton, css, snack, loadBundle, b64bytes, storeGet, storeSet });
 })(window.P3 = window.P3 || {});
