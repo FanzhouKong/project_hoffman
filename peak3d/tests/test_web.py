@@ -259,4 +259,6 @@ def test_server_run_and_results(gui):
     assert code == 200 and b'id="peak3d-data"' in page and "attachment" in hdr["Content-Disposition"]
     code, again = c.json("/api/runs", {"input": str(d), "output": str(root / "o")})
     assert code == 409 and again["confirm"] == "overwrite"
+    code, ex = c.json("/api/example", {})
+    assert code == 200 and ex["n_mzml"] == 3 and Path(ex["input"]).parent == (root / "peak3d_example").resolve()
     assert c.json(f"/api/results/bundle?path={quote(str(d))}")[0] == 404

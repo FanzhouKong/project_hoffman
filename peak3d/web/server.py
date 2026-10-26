@@ -362,6 +362,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/api/runs":
                 return self._start(body)
+            if url.path == "/api/example":
+                return self._example()
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
             if m and m.group(1) in self.app.runs:
                 self.app.runs[m.group(1)].cancel()
@@ -425,6 +427,16 @@ class Handler(BaseHTTPRequestHandler):
         if not (out / "aligned_feature_table.tsv").exists():
             raise FileNotFoundError(f"no peak3d results in {out}")
         return out
+
+    def _example(self):
+        """three small synthetic runs (the `peak3d demo` data) in <root>/peak3d_example, for a first try"""
+        from ..__main__ import write_demo
+        out = self.app.resolve("peak3d_example")
+        try:
+            data = write_demo(out)
+        except OSError as e:
+            return self._error(403, f"cannot write example data in {out.parent}: {e.strerror or e}")
+        return self._json({"input": str(data), "output": str(out / "peak3d_out"), "n_mzml": len(_mzml_files(data))})
 
     def _start(self, body):
         a = self.app

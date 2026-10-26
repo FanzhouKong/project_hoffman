@@ -9,6 +9,23 @@ This repository holds two things:
 - **`bench/` + `scripts/`**, the benchmark ("peakbench") that compares peak3d with asari, MassCube and
   IDSL.IPA on public datasets with ground truth. See [Benchmark](#benchmark-peakbench) below.
 
+## Run the peak3d app (one click, no programming)
+
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows, macOS; Docker Engine on
+   Linux) and start it once.
+2. Download this repository: on GitHub **Code > Download ZIP** and unzip it, or
+   `git clone https://github.com/FanzhouKong/project_hoffman.git`.
+3. Double-click **Start peak3d.command** (macOS) or **Start peak3d.bat** (Windows). On Linux run `./start-peak3d.sh`.
+
+Your browser opens peak3d. Choose a folder of mzML files, or press **Create example data** to try it with three
+small synthetic runs, then **Run peak3d** and **Open results**. The first start downloads the app (about 300 MB)
+and the first run compiles it (about a minute); after that both take seconds. A small terminal window stays open
+while peak3d runs; close it to stop peak3d. peak3d sees your home folder (on Windows your user folder, shown as
+`/data`), and your data never leave your computer.
+
+On macOS, if a file from the ZIP will not open ("unidentified developer"), right-click it, choose **Open**, and
+confirm; this is needed once.
+
 ## Quick start: peak3d on your own mzML files
 
 ### 1. Install

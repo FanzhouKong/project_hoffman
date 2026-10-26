@@ -220,7 +220,28 @@
       refresh();
     }
 
-    page.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Data")), h("div.stack", inField.el, outField.el)));
+    const exBtn = h("button.btn.tonal.state", { type: "button" }, icon("science"), "Create example data");
+    exBtn.addEventListener("click", async () => {
+      exBtn.disabled = true;
+      exBtn.replaceChildren(P3.spinner(18), "Writing example data…");
+      try {
+        const r = await post("/api/example");
+        inField.input.value = r.input;
+        await setInput(r.input);
+        S.output = S.autoOutput = r.output;
+        outField.input.value = r.output;
+        refresh();
+        snack(`Example data ready: ${r.n_mzml} synthetic runs. Press Run peak3d.`);
+      } catch (e) {
+        snack(e.message);
+      } finally {
+        exBtn.disabled = false;
+        exBtn.replaceChildren(icon("science"), "Create example data");
+      }
+    });
+    page.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Data")), h("div.stack", inField.el, outField.el),
+      h("div.row.wrap", { style: { marginTop: "4px", gap: "12px" } }, exBtn,
+        h("span.body-small.muted", { style: { flex: "1", minWidth: "220px" } }, "No mzML files at hand? This writes three small synthetic LC-MS runs into a peak3d_example folder so you can try everything."))));
 
     const basic = h("div.form"), adv = h("div.form");
     for (const f of S.schema) (BASIC.includes(f.dest) ? basic : adv).appendChild(fieldFor(f, refresh));

@@ -37,6 +37,27 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)" = 403
           docker logs gui
           docker rm -f gui
+      - name: Launcher (Linux) starts the app, makes example data and runs it
+        run: |
+          mkdir -p launch_home
+          export PEAK3D_IMAGE=peak3d:test PEAK3D_DATA="$PWD/launch_home" PEAK3D_NO_WAIT=1
+          out=$(bash start-peak3d.sh); echo "$out"
+          url=$(echo "$out" | grep -o 'http://127.0.0.1:[0-9]*/?token=[0-9a-f]*' | head -n 1)
+          base=${url%%/\?*}; tok=${url##*token=}
+          api() { curl -sf -H "X-Peak3d-Token: $tok" -H "Content-Type: application/json" "$@"; }
+          api "$base/api/info"
+          ex=$(api -X POST -d '{}' "$base/api/example"); echo "$ex"
+          inp=$(echo "$ex" | python3 -c 'import json,sys; print(json.load(sys.stdin)["input"])')
+          api -X POST -d "{\"input\": \"$inp\", \"output\": \"$PWD/launch_home/out\", \"options\": {\"cores\": 2}}" "$base/api/runs"
+          for i in $(seq 300); do
+            st=$(api "$base/api/runs/r1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+            [ "$st" != running ] && break; sleep 2
+          done
+          echo "run state: $st"; test "$st" = done
+          test -f launch_home/out/report.html && test -O launch_home/out/report.html      # written as this user
+          ls launch_home/out
+          bash start-peak3d.sh > second.txt; cat second.txt; grep -q "already running" second.txt   # a second start reopens it
+          docker stop peak3d-gui
       - uses: docker/metadata-action@v5
         id: meta
         with:
