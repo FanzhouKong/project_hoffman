@@ -265,7 +265,8 @@ def test_server_run_and_results(gui):
     assert code == 200 and raw == (root / "o" / "aligned_feature_table.tsv").read_bytes()
     assert "attachment" in hdr["Content-Disposition"] and "o_aligned_feature_table.tsv" in hdr["Content-Disposition"]
     assert c.req(f"/api/results/file?path={out_q}&name=../../x")[0] == 404
-    lines = (root / "o" / "aligned_feature_table.tsv").read_text().splitlines(keepends=True)
+    # the file's own line endings (CRLF where pandas writes os.linesep, i.e. on Windows)
+    lines = (root / "o" / "aligned_feature_table.tsv").read_bytes().decode("utf-8").splitlines(keepends=True)
     ids = [int(lines[3].split("\t")[0]), int(lines[1].split("\t")[0]), 999999]
     code, raw, _ = c.req("/api/results/table", {"path": str(root / "o"), "ids": ids})
     assert code == 200 and raw.decode() == lines[0] + lines[3] + lines[1]

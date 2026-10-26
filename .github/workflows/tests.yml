@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install ".[test]"
+        run: pip install ".[test]" pytest-github-actions-annotate-failures   # failures show as annotations
       - name: Unit tests
         run: pytest peak3d/tests -m "not perf" -q
       - name: Demo (end to end, timed)
