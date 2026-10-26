@@ -16,7 +16,8 @@ jobs:
         include:
           - { name: windows-x64, os: windows-latest }
           - { name: macos-arm64, os: macos-14 }
-          - { name: macos-x64, os: macos-15-intel }
+          # the last numba/llvmlite with Intel-Mac wheels (newer releases build for Apple silicon only)
+          - { name: macos-x64, os: macos-15-intel, pins: "numba==0.62.1 llvmlite==0.45.1" }
           - { name: linux-x64, os: ubuntu-22.04 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -31,7 +32,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install . "pyinstaller>=6.10,<7"
+        run: pip install ${{ matrix.pins }} . "pyinstaller>=6.10,<7"
       - name: Build
         run: pyinstaller --noconfirm --clean packaging/peak3d.spec
       - name: Locate the program
