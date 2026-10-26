@@ -28,6 +28,23 @@ def user_cache() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "peak3d"
 
 
+def _log_to_file() -> None:
+    """a double-clicked app has no console: keep its messages and any traceback in peak3d.log for support"""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        path = user_cache() / "peak3d.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > 2_000_000:
+            path.replace(path.with_suffix(".old.log"))
+        fh = open(path, "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or fh
+        sys.stderr = sys.stderr or fh
+        print(f"--- peak3d app started {time.strftime('%Y-%m-%d %H:%M:%S')} ({sys.platform})", flush=True)
+    except OSError:
+        pass
+
+
 def prepare_env() -> None:
     """before numba or matplotlib are imported; inherited by runs and their workers"""
     cache = user_cache()
@@ -66,12 +83,19 @@ def _forget() -> None:
 
 def _control_window(url: str, httpd) -> bool:
     """the small Open / Quit window; False when there is no display or no Tk (then the console is the UI)"""
+    if os.name == "nt":                      # sharp text on scaled (high-DPI) Windows displays
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
     try:
         import tkinter as tk
         from tkinter import font as tkfont
         from tkinter import messagebox, ttk
         root = tk.Tk()
-    except Exception:
+    except Exception as e:
+        print(f"no control window ({e!r}); serving without it", flush=True)
         return False
     from . import __version__
 
@@ -130,6 +154,7 @@ def main(argv=None) -> None:
         from .__main__ import main as cli
         cli(argv)
         return
+    _log_to_file()
     url = _running_url()
     if url:                                                   # already running: show it again
         webbrowser.open(url)
@@ -138,6 +163,7 @@ def main(argv=None) -> None:
     httpd, url = make_server("127.0.0.1", 8765, None, "auto")
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     _remember(url, httpd.app.token)
+    print(f"serving {url.split('?')[0]}", flush=True)
     signal.signal(signal.SIGTERM, _interrupt)        # logout / kill: clean up as on Ctrl+C
     threading.Timer(0.3, webbrowser.open, args=(url,)).start()
     try:

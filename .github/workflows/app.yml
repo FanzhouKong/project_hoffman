@@ -74,6 +74,47 @@ jobs:
           tok=$(python -c "import json,os; print(json.load(open(os.path.expanduser('~/.peak3d/app.json')))['token'])")
           curl -sf -H "X-Peak3d-Token: $tok" "${url}api/info"; echo
           if [ "${{ runner.os }}" = Windows ]; then taskkill //F //IM peak3d.exe > /dev/null 2>&1 || true; else pkill -f "$BIN" || true; fi
+      - name: Windows double-click (no console, as from Explorer), screenshots
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force check | Out-Null
+          Remove-Item -Force "$HOME\.peak3d\app.json" -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $env:BIN -PassThru            # no redirection: no console handles, like a double-click
+          for ($i = 0; $i -lt 60 -and -not (Test-Path "$HOME\.peak3d\app.json"); $i++) { Start-Sleep 1 }
+          $state = Get-Content "$HOME\.peak3d\app.json" | ConvertFrom-Json
+          $base = $state.url.Split("?")[0].TrimEnd("/"); $h = @{ "X-Peak3d-Token" = $state.token }
+          $info = Invoke-RestMethod "$base/api/info" -Headers $h
+          Start-Sleep 3
+          $win = (Get-Process -Id $p.Id).MainWindowTitle
+          $ex = Invoke-RestMethod "$base/api/example" -Method Post -Headers $h -ContentType "application/json" -Body "{}"
+          $body = @{ input = $ex.input; output = "$PWD\check\run"; options = @{ cores = 2 } } | ConvertTo-Json
+          $run = Invoke-RestMethod "$base/api/runs" -Method Post -Headers $h -ContentType "application/json" -Body $body
+          for ($i = 0; $i -lt 200; $i++) { $st = Invoke-RestMethod "$base/api/runs/$($run.id)" -Headers $h; if ($st.state -ne "running") { break }; Start-Sleep 3 }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$PWD\check\windows-desktop.png")
+          $edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          if (-not (Test-Path $edge)) { $edge = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe" }
+          & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --virtual-time-budget=4000 --screenshot="$PWD\check\windows-app.png" "$($state.url)" | Out-Null
+          $rep = (Resolve-Path "check\run\report.html").Path.Replace("\", "/")
+          & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --virtual-time-budget=4000 --screenshot="$PWD\check\windows-report.png" "file:///$rep" | Out-Null
+          $log = Get-Content "$env:LOCALAPPDATA\peak3d\cache\peak3d.log" -ErrorAction SilentlyContinue
+          @("window title: '$win'", "app: $($info.version) on $($info.platform)", "run: $($st.state) in $([math]::Round($st.elapsed)) s",
+            "log:", $log, "run log tail:", ($st.log | Select-Object -Last 6)) | Out-File -Encoding utf8 check\windows-check.txt
+          Get-Content check\windows-check.txt
+          Stop-Process -Id $p.Id -Force
+          if ($win -ne "peak3d") { throw "no control window" }
+          if ($st.state -ne "done") { throw "run did not finish" }
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && always()
+        with:
+          name: ci-check-windows
+          path: check/*.*
+          retention-days: 7
       - name: Package
         run: |
           mkdir -p upload
@@ -100,6 +141,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: upload
+          pattern: peak3d-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: checks
+          pattern: ci-check-*
           merge-multiple: true
       - name: Publish
         env:
@@ -114,4 +161,9 @@ jobs:
             gh release delete app-preview --yes --cleanup-tag || true
             gh release create app-preview upload/* --prerelease --target "$GITHUB_SHA" \
               --title "peak3d app (preview)" --notes "$notes"
+          fi
+          if ls checks/* > /dev/null 2>&1; then          # screenshots and notes from the platform checks (not for users)
+            gh release delete ci-checks --yes --cleanup-tag || true
+            gh release create ci-checks checks/* --prerelease --target "$GITHUB_SHA" --title "CI checks (not a download)" \
+              --notes "Screenshots and notes from the app checks of ${GITHUB_SHA::7}. Not for users."
           fi

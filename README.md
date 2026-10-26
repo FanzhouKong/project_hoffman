@@ -17,7 +17,7 @@ Download the file for your computer from the
 
 | Computer | File | Start |
 |---|---|---|
-| Windows 10/11, 64-bit | `peak3d-windows-x64.zip` | unzip, open the `peak3d` folder, double-click `peak3d.exe` |
+| Windows 10/11, 64-bit | `peak3d-windows-x64.zip` | right-click > **Extract All**, open the `peak3d` folder, double-click `peak3d.exe` |
 | Mac with Apple silicon (M1 or later), macOS 14+ | `peak3d-macos-arm64.zip` | unzip, move `peak3d.app` to Applications, double-click it |
 | Mac with an Intel processor, macOS 14+ | `peak3d-macos-x64.zip` | the same |
 | Linux, x86-64 (glibc 2.35+, e.g. Ubuntu 22.04) | `peak3d-linux-x64.tar.gz` | `tar xzf peak3d-linux-x64.tar.gz` then `./peak3d/peak3d` |
@@ -32,7 +32,11 @@ The app is not yet signed with an Apple or Microsoft certificate, so the first s
 - **macOS**: double-click peak3d; when macOS says it cannot verify it, click **Done**, open **System Settings >
   Privacy & Security**, scroll down and click **Open Anyway** next to peak3d. Or, in Terminal:
   `xattr -dr com.apple.quarantine /Applications/peak3d.app`
-- **Windows**: on "Windows protected your PC", click **More info**, then **Run anyway**.
+- **Windows**: on "Windows protected your PC", click **More info**, then **Run anyway**. Extract the ZIP first:
+  started from inside the ZIP, `peak3d.exe` cannot find its `_internal` folder.
+
+If the app does not start, its log says why: `%LOCALAPPDATA%\peak3d\cache\peak3d.log` (Windows),
+`~/Library/Caches/peak3d/peak3d.log` (macOS).
 
 The program is also the full command line, e.g. `peak3d.exe process --input mzml --output out --cores 8` on
 Windows, `/Applications/peak3d.app/Contents/MacOS/peak3d process ...` on macOS, `./peak3d/peak3d process ...` on
