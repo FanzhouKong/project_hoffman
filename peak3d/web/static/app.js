@@ -55,13 +55,12 @@
   const dirname = (p) => { const parts = p.split(/[\\/]/); parts.pop(); return parts.join(S.info.sep) || S.info.sep; };
 
   // ---------------------------------------------------------------- navigation
-  const rail = document.querySelectorAll(".rail-item");
+  const rail = document.querySelectorAll(".nav-item");
   rail.forEach((b) => {
-    b.querySelector(".indicator").appendChild(icon(b.dataset.page === "run" ? "play_arrow" : "insights"));
+    b.querySelector(".ic").appendChild(icon(b.dataset.page === "run" ? "play_arrow" : "insights"));
     b.addEventListener("click", () => go(b.dataset.page));
   });
-  document.getElementById("brand").appendChild(icon("science"));
-  document.getElementById("rail-bottom").appendChild(P3.themeButton());
+  document.getElementById("logo").replaceWith(P3.logo());
 
   function go(page) {
     S.page = page;
@@ -96,7 +95,7 @@
     const input = h("input", { type: "checkbox", role: "switch", "aria-label": label });
     input.checked = !!checked;
     input.addEventListener("change", () => onchange(input.checked));
-    return h("label.switch-row", h("div.text", h("div.body-large", label), help ? h("div.supporting", help) : null),
+    return h("label.switch-row", h("div.text", h("div", label), help ? h("div.supporting", help) : null),
       h("span.switch", input, h("span.track"), h("span.handle")));
   }
   function segmented(options, value, onchange) {
@@ -121,8 +120,8 @@
       return switchRow(label, help, inv ? !S.form[f.dest] : S.form[f.dest], (on) => set(inv ? !on : on));
     }
     if (SEGMENTS[f.dest]) {
-      return h("div", { style: { padding: "4px 0 12px" } }, h("div.label-large", { style: { marginBottom: "8px" } }, label),
-        segmented(SEGMENTS[f.dest], S.form[f.dest], set), help && f.dest !== "quant" ? h("div.body-small.muted", { style: { marginTop: "6px" } }, help) : null);
+      return h("div", h("div.label-medium", { style: { color: "var(--ink-2)", marginBottom: "6px" } }, label),
+        segmented(SEGMENTS[f.dest], S.form[f.dest], set), help && f.dest !== "quant" ? h("div.body-small.muted", { style: { marginTop: "5px" } }, help) : null);
     }
     if (f.kind === "choice") {
       const sel = h("select", f.choices.map((c) => h("option", { value: c }, c)));
@@ -172,16 +171,24 @@
   // ---------------------------------------------------------------- run page
   function runPage() {
     setTitle("New run");
-    const page = h("div.page.narrow");
+    const page = h("div.page");
     pageEl.appendChild(page);
-    page.appendChild(h("div", { style: { margin: "8px 0 24px" } },
-      h("p.body-large.muted", "Choose a folder of centroided MS1 .mzML files. peak3d picks every file, aligns the runs on their own features, and writes one feature table plus an interactive report.")));
+    page.appendChild(h("p.page-intro", "Choose a folder of centroided MS1 .mzML files. peak3d picks every file, aligns the runs on their own features, and writes one feature table with an interactive report."));
+    const main = h("div.stack"), side = h("div.run-side");
+    page.appendChild(h("div.run-layout", main, side));
 
-    const runBtn = h("button.btn.filled.lg.state", { type: "button" }, icon("play_arrow"), "Run peak3d");
+    const runBtn = h("button.btn.filled.lg.block.state", { type: "button" }, icon("play_arrow"), "Run peak3d");
     const cmd = h("code");
+    const sumIn = h("dd"), sumOut = h("dd", { style: { fontFamily: "var(--mono)", fontSize: "12px" } }), sumCores = h("dd");
     const refresh = () => {
       cmd.textContent = argvPreview();
-      const bad = !S.inputInfo || !S.inputInfo.n_mzml || !S.output || Object.values(S.formErrors).some(Boolean);
+      const n = S.inputInfo && S.inputInfo.n_mzml;
+      sumIn.textContent = n ? `${int(n)} mzML file${n > 1 ? "s" : ""}` : "No folder chosen";
+      sumIn.style.color = n ? "" : "var(--ink-3)";
+      sumOut.textContent = S.output ? basename(S.output) : "–";
+      sumOut.title = S.output || "";
+      sumCores.textContent = S.form.cores != null ? String(S.form.cores) : "–";
+      const bad = !n || !S.output || Object.values(S.formErrors).some(Boolean);
       runBtn.disabled = bad;
     };
 
@@ -239,24 +246,26 @@
         exBtn.replaceChildren(icon("science"), "Create example data");
       }
     });
-    page.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Data")), h("div.stack", inField.el, outField.el),
-      h("div.row.wrap", { style: { marginTop: "4px", gap: "12px" } }, exBtn,
-        h("span.body-small.muted", { style: { flex: "1", minWidth: "220px" } }, "No mzML files at hand? This writes three small synthetic LC-MS runs into a peak3d_example folder so you can try everything."))));
+    main.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Data")), h("div.form", inField.el, outField.el),
+      h("div.row", { style: { marginTop: "16px", gap: "12px", alignItems: "center" } }, exBtn,
+        h("span.body-small.muted", { style: { flex: "1", minWidth: "200px" } }, "No mzML files at hand? This writes three small synthetic LC-MS runs into a peak3d_example folder."))));
 
     const basic = h("div.form"), adv = h("div.form");
     for (const f of S.schema) (BASIC.includes(f.dest) ? basic : adv).appendChild(fieldFor(f, refresh));
-    page.appendChild(h("section.card.elevated", { style: { marginTop: "16px" } }, h("div.card-head", h("h3.title-medium", "Settings")), basic,
-      h("details.expand", { style: { marginTop: "8px" } }, h("summary.state", icon("tune"), "Advanced options", h("span.spacer"), icon("expand_more", "chev")), h("div", { style: { padding: "8px 0 0" } }, adv))));
+    main.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Settings")), basic,
+      h("details.expand", { style: { marginTop: "14px" } }, h("summary.state", icon("tune"), "Advanced options", h("span.spacer"), icon("expand_more", "chev")), h("div.form", { style: { padding: "12px 0 0" } }, adv))));
 
     const copyBtn = h("button.icon-btn.state", { type: "button", title: "Copy command", "aria-label": "Copy the equivalent command", onclick: () => {
       (navigator.clipboard ? navigator.clipboard.writeText(cmd.textContent) : Promise.reject()).then(() => snack("Command copied"), () => snack("Copy failed; select the text instead"));
     } }, icon("content_copy"));
-    page.appendChild(h("div", { style: { margin: "20px 0 8px" } }, h("div.label-medium.muted", { style: { margin: "0 0 6px 4px" } }, "Equivalent command"), h("div.cmd", cmd, copyBtn)));
-    page.appendChild(h("div.row", { style: { margin: "16px 0 8px" } }, runBtn));
+    side.appendChild(h("section.card.elevated.summary", h("div.card-head", h("h3.title-medium", "Run")),
+      h("dl.kv.body-medium", h("dt", "Input"), sumIn, h("dt", "Output"), sumOut, h("dt", "CPU cores"), sumCores),
+      runBtn,
+      h("div.label-medium.muted", { style: { margin: "16px 0 6px" } }, "Equivalent command"), h("div.cmd", cmd, copyBtn)));
     runBtn.addEventListener("click", () => start(false));
 
-    const runsBox = h("div.stack#runs");
-    page.appendChild(h("div", h("h2.title-large.section-title", { style: { marginTop: "32px" } }, "Runs"), runsBox));
+    const runsBox = h("div.stack#runs", { style: { gap: "12px" } });
+    side.appendChild(h("div", h("h2.title-medium", { style: { margin: "4px 2px 10px" } }, "Runs"), runsBox));
     renderRuns();
 
     async function start(overwrite) {
@@ -297,36 +306,34 @@
     const box = document.getElementById("runs");
     if (!box) return;
     const list = [...S.runs.values()].sort((a, b) => b.status.started - a.status.started);
-    if (!list.length) { box.replaceChildren(h("p.body-medium.muted", "No runs yet in this session.")); return; }
+    if (!list.length) { box.replaceChildren(h("p.body-small.muted", { style: { margin: "0 2px" } }, "Runs you start appear here, with live progress.")); return; }
     box.replaceChildren(...list.map(runCard));
   }
   function runCard(R) {
     const s = R.status;
     const running = s.state === "running";
     const stIdx = Math.max(0, STEPS.findIndex(([k]) => k === (s.stage === "write" ? "fill" : s.stage)));
-    const head = h("div.row",
-      running ? P3.spinner(24) : icon(s.state === "done" ? "check_circle" : s.state === "failed" ? "error" : "cancel"),
-      h("div", { style: { flex: 1, minWidth: 0 } }, h("div.title-medium", `${basename(s.input)} · ${int(s.n_files)} files`),
-        h("div.body-small.muted.mono", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: s.output }, "→ " + s.output)),
-      h("span.chip.static" + (s.state === "done" ? ".ok" : s.state === "failed" ? ".warn" : ".info"), s.state === "done" ? "Done" : s.state === "failed" ? "Failed" : s.state === "cancelled" ? "Cancelled" : "Running"),
-      h("span.body-medium.muted.num", { style: { minWidth: "72px", textAlign: "right" } }, duration(s.elapsed)));
+    const head = h("div.row", { style: { alignItems: "flex-start" } },
+      h("div", { style: { flex: 1, minWidth: 0 } }, h("div.title-small", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, `${basename(s.input)} · ${int(s.n_files)} files`),
+        h("div.body-small.muted", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: s.output }, "→ " + basename(s.output))),
+      h("span.chip.static" + (s.state === "done" ? ".ok" : s.state === "failed" ? ".warn" : ".info"), s.state === "done" ? "Done" : s.state === "failed" ? "Failed" : s.state === "cancelled" ? "Cancelled" : duration(s.elapsed)));
     const prog = h("div.progress" + (running && s.stage === "compile" ? ".indeterminate" : ""), h("div.bar", { style: { width: `${Math.round(100 * s.progress)}%` } }));
     const steps = h("div.steps", STEPS.map(([k, label], i) => {
       const done = s.state === "done" || i < stIdx, active = running && i === stIdx;
       return h("span.step" + (done ? ".done" : active ? ".active" : ""), done ? icon("check") : h("span.dot"),
         k === "pick" && s.picked != null && running && i === stIdx ? `${label} ${s.picked}/${s.n_files}` : label);
     }));
-    const text = h("p.body-medium.muted", STAGE_TEXT[s.stage] || s.stage);
+    const text = h("p.body-small.muted", s.state === "done" ? `Finished in ${duration(s.elapsed)}` : STAGE_TEXT[s.stage] || s.stage);
     const logPre = h("pre.log", R.log.slice(-400).join("\n"));
     const logBox = h("details.expand", { open: R.logOpen || null, ontoggle: (e) => (R.logOpen = e.target.open) }, h("summary.state", icon("description"), "Log", h("span.spacer"), icon("expand_more", "chev")), logPre);
-    const actions = h("div.row.wrap", { style: { marginTop: "12px" } });
+    const actions = h("div.row.wrap", { style: { marginTop: "10px" } });
     if (running) actions.appendChild(h("button.btn.text.state", { type: "button", onclick: async () => { await post(`/api/runs/${s.id}/cancel`); snack("Cancelling…"); } }, icon("stop"), "Cancel"));
     if (s.state === "done") {
-      actions.append(h("button.btn.filled.state", { type: "button", onclick: () => openResults(s.output) }, icon("insights"), "Open results"),
+      actions.append(h("button.btn.filled.state", { type: "button", onclick: () => openResults(s.output) }, "Open results"),
         h("a.btn.outlined.state", { href: `/api/results/report?path=${enc(s.output)}`, target: "_blank", rel: "noopener" }, icon("open_in_new"), "Report"));
     }
     const failed = s.state === "failed" ? h("div.banner.error", { style: { marginTop: "12px" } }, icon("error"), h("pre.mono", { style: { margin: 0, whiteSpace: "pre-wrap" } }, R.log.slice(-6).join("\n"))) : null;
-    const el = h("section.card.elevated", head, h("div", { style: { marginTop: "16px" } }, prog), steps, text, failed, actions, logBox);
+    const el = h("section.card.elevated.run-card", head, h("div", { style: { marginTop: "12px" } }, prog), running ? steps : null, text, failed, actions, logBox);
     requestAnimationFrame(() => { if (R.logOpen) logPre.scrollTop = logPre.scrollHeight; });
     return el;
   }
@@ -352,7 +359,7 @@
     tick();
   }
 
-  // ---------------------------------------------------------------- menu (Material 3)
+  // ---------------------------------------------------------------- menu
   function menuButton(iconName, label, items) {
     const btn = h("button.icon-btn.state", { type: "button", title: label, "aria-label": label, "aria-haspopup": "menu" }, icon(iconName));
     let menu = null;

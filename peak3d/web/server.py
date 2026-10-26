@@ -419,10 +419,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, page.encode(), "text/html; charset=utf-8")
 
     def _static(self, name):
-        allowed = {p.name for p in STATIC.iterdir() if p.suffix in (".js", ".css", ".woff2")}
+        allowed = {p.name for p in STATIC.iterdir() if p.suffix in (".js", ".css")}
         if name not in allowed:
             return self._error(404, "not found")
-        ctype = "font/woff2" if name.endswith(".woff2") else mimetypes.guess_type(name)[0] or "application/octet-stream"
+        ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         if ctype.startswith("text/") or name.endswith(".js"):
             ctype = ("text/javascript" if name.endswith(".js") else ctype) + "; charset=utf-8"
         self._send(200, (STATIC / name).read_bytes(), ctype)

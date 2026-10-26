@@ -1,4 +1,4 @@
-// Shared helpers for the peak3d viewer and GUI: DOM building, icons, number formats, theme, snackbar,
+// Shared helpers for the peak3d viewer and GUI: DOM building, icons, the logo, number formats, toasts,
 // and decoding of the results bundle (see peak3d/web/bundle.py for the layout).
 (function (P3) {
   "use strict";
@@ -79,36 +79,17 @@
     return Math.floor(m / 60) + " h " + (m % 60) + " min";
   }
 
-  // ---- theme: "auto" follows the OS; the toggle stamps data-theme on <html>
+  // light theme only; charts subscribe in case the palette ever changes at run time
   const listeners = new Set();
+  function onTheme(f) { listeners.add(f); return () => listeners.delete(f); }
   function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
-  function applyTheme(mode) {
-    if (mode === "light" || mode === "dark") document.documentElement.setAttribute("data-theme", mode);
-    else document.documentElement.removeAttribute("data-theme");
-    storeSet("peak3d-theme", mode);
-    listeners.forEach((f) => f());
-  }
-  function theme() { return storeGet("peak3d-theme") || "auto"; }
-  function cycleTheme() {
-    const order = ["auto", "light", "dark"];
-    applyTheme(order[(order.indexOf(theme()) + 1) % 3]);
-    return theme();
-  }
-  function onTheme(f) { listeners.add(f); return () => listeners.delete(f); }
-  if (window.matchMedia) {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    (mq.addEventListener ? mq.addEventListener.bind(mq, "change") : mq.addListener.bind(mq))(() => listeners.forEach((f) => f()));
-  }
-  // only a saved choice stamps the page; otherwise leave any theme the host page set (or none: follow the OS)
-  if (theme() !== "auto") applyTheme(theme());
-  function themeButton() {
-    const names = { auto: ["contrast", "Theme: follow system"], light: ["light_mode", "Theme: light"], dark: ["dark_mode", "Theme: dark"] };
-    const b = h("button.icon-btn.state", { type: "button" });
-    const paint = () => { const [ic, t] = names[theme()]; b.replaceChildren(icon(ic)); b.title = t; b.setAttribute("aria-label", t); };
-    b.addEventListener("click", () => { cycleTheme(); paint(); });
-    paint();
-    return b;
+
+  // the mark: a chromatographic peak on a blue tile
+  function logo() {
+    const el = h("span.logo", { "aria-hidden": "true" });
+    el.innerHTML = '<svg viewBox="0 0 28 28"><path d="M4 21.5h3.2c2.2 0 3.1-1.2 4-4.6l1.3-5.4c.4-1.6.9-2.4 1.5-2.4s1.1.8 1.5 2.4l1.3 5.4c.9 3.4 1.8 4.6 4 4.6H24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    return el;
   }
   function css(name, el) { return getComputedStyle(el || document.documentElement).getPropertyValue(name).trim(); }
 
@@ -164,5 +145,5 @@
   }
   async function loadBundle(gzBytes) { return parseBundle(await gunzip(gzBytes)); }
 
-  Object.assign(P3, { h, append, icon, spinner, saveBlob, fixed, int, compact, sci, duration, theme, applyTheme, cycleTheme, onTheme, themeButton, css, snack, loadBundle, b64bytes, storeGet, storeSet });
+  Object.assign(P3, { h, append, icon, spinner, saveBlob, logo, fixed, int, compact, sci, duration, onTheme, css, snack, loadBundle, b64bytes, storeGet, storeSet });
 })(window.P3 = window.P3 || {});

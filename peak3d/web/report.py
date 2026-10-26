@@ -21,12 +21,10 @@ def _inline(text: str) -> str:
 
 def render(blob_gz: bytes, title: str) -> str:
     page = (STATIC / "report.html").read_text(encoding="utf-8")
-    css = (STATIC / "m3.css").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
     js = "\n".join(_inline((STATIC / f).read_text(encoding="utf-8")) for f in SCRIPTS)
-    font = base64.b64encode((STATIC / "roboto-latin.woff2").read_bytes()).decode("ascii")
     data = base64.b64encode(blob_gz).decode("ascii")
-    for key, val in (("{{TITLE}}", html.escape(title)), ("{{FONT}}", font), ("{{CSS}}", css), ("{{JS}}", js),
-                     ("{{DATA}}", data)):
+    for key, val in (("{{TITLE}}", html.escape(title)), ("{{CSS}}", css), ("{{JS}}", js), ("{{DATA}}", data)):
         page = page.replace(key, val)
     return page
 

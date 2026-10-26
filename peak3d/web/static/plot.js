@@ -73,7 +73,7 @@
       return { surface: g("--viz-surface"), ink: g("--viz-ink"), ink2: g("--viz-ink-2"), muted: g("--viz-muted"),
         grid: g("--viz-grid"), axis: g("--viz-axis"), s1: g("--viz-series-1"), s2: g("--viz-series-2"),
         from: g("--viz-ramp-from"), to: g("--viz-ramp-to"), neutral: g("--viz-neutral"),
-        font: g("--md-ref-typeface") || "system-ui, sans-serif" };
+        font: g("--font-viz") || "system-ui, sans-serif" };
     }
     color(c, P) { return !c ? P.s1 : c.startsWith("--") ? css(c, this.el) : c; }
     layout(P, yFmt, yt) {

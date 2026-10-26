@@ -89,7 +89,7 @@
     const tabs = h("div.tabs", { role: "tablist" }, tabsDef.map(([id, ic, label]) =>
       h("button.tab.state", { type: "button", role: "tab", "data-tab": id, "aria-selected": "false", onclick: () => show(id) }, icon(ic), label)));
     const body = h("div.page");
-    root.append(tabs, body);
+    root.append(h("div.tabbar", tabs), body);
 
     function show(id) {
       state.tab = id;
@@ -169,10 +169,10 @@
 
     function features() {
       const a = R.a;
-      const search = h("input", { type: "search", placeholder: " ", value: state.query, "aria-label": "Search m/z or #group id" });
+      const search = h("input", { type: "search", placeholder: "Search m/z or #id", value: state.query, "aria-label": "Search m/z or #group id" });
       const searchField = h("div.field.dense", h("div.box", h("span.lead", icon("search", "sm")), search, h("label", "m/z or #id")));
-      const ppmIn = h("input", { type: "number", placeholder: " ", min: "0.1", step: "1", value: String(state.ppm) });
-      const ppmField = h("div.field.dense", { style: { width: "96px" } }, h("div.box", ppmIn, h("label", "± ppm")));
+      const ppmIn = h("input", { type: "number", placeholder: "ppm", min: "0.1", step: "1", value: String(state.ppm), title: "m/z search tolerance (ppm)" });
+      const ppmField = h("div.field.dense", { style: { width: "84px" } }, h("div.box", ppmIn, h("span.trail.body-small", { style: { paddingRight: "8px" } }, "ppm"), h("label", "m/z tolerance (ppm)")));
       const chip = (key, label) => {
         const c = h("button.chip.state", { type: "button", "aria-pressed": String(state[key]) }, state[key] ? icon("check") : null, label);
         c.addEventListener("click", () => { state[key] = !state[key]; features_refresh(); c.setAttribute("aria-pressed", String(state[key])); c.replaceChildren(...(state[key] ? [icon("check")] : []), label); });
