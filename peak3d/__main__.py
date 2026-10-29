@@ -1,12 +1,15 @@
-"""Command line: peak3d {process,pick,align,demo,report,gui} ...   (or python -m peak3d ...)
+"""Command line: peak3d {process,pick,align,identify,external,demo,report,gui} ...   (or python -m peak3d ...)
 
-process: pick every mzML in --input, align the runs on their own credible features, group them
-         into one table, gap-fill, write QC and report.html -> --output
-pick:    per-file feature tables only
-align:   re-run alignment/grouping/gap-fill from an existing output (features/ + .cache/)
-demo:    write three small synthetic mzML runs and process them (checks an installation)
-report:  (re)write report.html for an existing output
-gui:     local web app: choose folders, run, and browse results in the browser
+process:  pick every mzML in --input, align the runs on their own credible features, group them
+          into one table, gap-fill, map MS2 spectra to the features, write QC and report.html -> --output
+          (with --library: identity search of the features' MS2 in an .msp or .pkl library)
+pick:     per-file feature tables only
+align:    re-run alignment/grouping/gap-fill from an existing output (features/ + .cache/)
+identify: (re)run the identity search of an existing output against an .msp or .pkl library
+external: run asari or MassCube instead of the peak3d picker, into the same output layout
+demo:     write three small synthetic mzML runs and process them (checks an installation)
+report:   (re)write report.html for an existing output
+gui:      local web app: choose folders, run, and browse results in the browser
 """
 from __future__ import annotations
 
@@ -48,6 +51,8 @@ def build_parser():
                        help="keep only this polarity (required for polarity-switching files)")
         p.add_argument("--model", type=Path, default=None, help="pickled re-scorer (optional)")
         p.add_argument("--keep-rejected", action="store_true", help="also write rejected candidates")
+        p.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                       help="override a fixed picker parameter, e.g. --set merge_test=noise (repeatable)")
 
     def align_opts(p):
         p.add_argument("--ppm", type=_positive(float), default=5.0, help="m/z tolerance for anchors/grouping")
@@ -61,6 +66,19 @@ def build_parser():
         p.add_argument("--quant", choices=["height", "area"], default="height",
                        help="value in the main aligned table (default height; the other is written too)")
 
+    def identify_opts(p, required=False):
+        from .library import METHODS
+        p.add_argument("--library", type=Path, default=None, required=required,
+                       help="spectral library, .msp or a MassCube .pkl: identity search of every feature's MS2 spectrum" +
+                            ("" if required else " (optional)"))
+        p.add_argument("--similarity", choices=list(METHODS), default="weighted_entropy",
+                       help="spectral similarity score (default weighted_entropy)")
+        p.add_argument("--min-similarity", type=_unit, default=0.7, help="lowest score reported as a hit (default 0.7)")
+        p.add_argument("--precursor-ppm", type=_positive(float), default=10.0,
+                       help="feature m/z vs library precursor m/z tolerance (ppm, default 10)")
+        p.add_argument("--fragment-tol", type=_positive(float), default=0.02,
+                       help="fragment m/z tolerance (Da, default 0.02)")
+
     p = sub.add_parser("process", help="pick + align + group + gap-fill")
     p.add_argument("--input", type=Path, required=True, help="directory of .mzML files")
     p.add_argument("--output", type=Path, required=True)
@@ -69,6 +87,7 @@ def build_parser():
     p.add_argument("--no-report", action="store_true", help="do not write report.html")
     common(p)
     align_opts(p)
+    identify_opts(p)
 
     p = sub.add_parser("pick", help="per-file feature tables only")
     p.add_argument("files", nargs="+", type=Path)
@@ -82,6 +101,21 @@ def build_parser():
     p.add_argument("--cores", type=_positive(int), default=1)
     p.add_argument("--no-report", action="store_true", help="do not write report.html")
     align_opts(p)
+
+    p = sub.add_parser("identify", help="identity search of an existing output's MS2 spectra in an .msp or .pkl library")
+    p.add_argument("output", type=Path, help="a peak3d output folder (with ms2_spectra.msp)")
+    identify_opts(p, required=True)
+
+    p = sub.add_parser("external", help="run asari or MassCube instead of the peak3d picker (same output layout)")
+    p.add_argument("--kernel", choices=["asari", "masscube"], required=True)
+    p.add_argument("--input", type=Path, required=True, help="directory of .mzML files")
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--cores", type=_positive(int), default=1, help="worker processes (default 1)")
+    p.add_argument("--polarity", choices=["pos", "neg"], default=None,
+                   help="ion mode (default: read from the first file)")
+    p.add_argument("--keep-cache", action="store_true", help="keep the point-cloud cache (.cache/)")
+    p.add_argument("--no-report", action="store_true", help="do not write report.html")
+    identify_opts(p)
 
     p = sub.add_parser("demo", help="process three synthetic runs (checks an installation)")
     p.add_argument("--output", type=Path, required=True, help="writes OUT/demo_mzml/ and OUT/peak3d_out/")
@@ -140,7 +174,20 @@ def main(argv=None):
         path = write_report(args.output, args.cache_dir, args.path, **limits)
         print(f"[peak3d] report: {path} ({path.stat().st_size / 1e6:.1f} MB)", flush=True)
         return
-    os.environ.setdefault("NUMBA_NUM_THREADS", str(max(1, args.cores)))
+    os.environ.setdefault("NUMBA_NUM_THREADS", str(max(1, getattr(args, "cores", 1))))
+    if args.cmd == "identify":
+        from .library import identify
+        t0 = time.perf_counter()
+        if not (args.output / "aligned_feature_table.tsv").exists():
+            sys.exit(f"not a peak3d output folder: {args.output}")
+        if not args.library.expanduser().is_file():
+            sys.exit(f"--library: no such file: {args.library}")
+        identify(args.output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity)
+        from .web.report import refresh_ids
+        if refresh_ids(args.output):            # report.html shows the new hits (its chromatograms are kept)
+            print("[peak3d] report.html updated", flush=True)
+        print(f"[peak3d] done in {time.perf_counter() - t0:.1f} s", flush=True)
+        return
     from . import pipeline
     t0 = time.perf_counter()
     if args.cmd == "demo":
@@ -155,6 +202,15 @@ def main(argv=None):
         if not files:
             sys.exit(f"no .mzML files in {args.input}")
         pipeline.process(files, args)
+        print(f"[peak3d] {len(files)} files -> {args.output / 'aligned_feature_table.tsv'}", flush=True)
+    elif args.cmd == "external":
+        from .external import run_external
+        if not args.input.is_dir():
+            sys.exit(f"--input must be a directory of .mzML files: {args.input}")
+        files = sorted(p for p in args.input.iterdir() if p.suffix.lower() == ".mzml")
+        if not files:
+            sys.exit(f"no .mzML files in {args.input}")
+        run_external(files, args)
         print(f"[peak3d] {len(files)} files -> {args.output / 'aligned_feature_table.tsv'}", flush=True)
     elif args.cmd == "pick":
         pipeline.pick_files(args.files, args.output, args)

@@ -5,6 +5,7 @@ has run a parallel kernel (the JIT warm-up), and forked children deadlock. Spawn
 the compiled kernels from the on-disk numba cache instead."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pickle
@@ -20,9 +21,11 @@ import pandas as pd
 from . import __version__
 from .align import AlignParams, AlignResult, FileAlignment, align_run, anchors_table, summary_table
 from .features import COLUMNS, build_features, precise_mz, write_features
+from .estimate import apply_scan_gains, estimate, parse_overrides, refit_after_gains, scan_gains, variant_label
 from .gapfill import fill_file
 from .grouping import consensus, group_features, merge_complementary
 from .io import Cloud, load_cloud
+from .ms2 import Collector, from_collected, save as save_ms2
 from .pick import pick_cloud
 from .warp import FitDiag, TableWarp
 
@@ -35,6 +38,16 @@ def log(msg):
 
 
 # ------------------------------------------------------------------ picking ----
+BLAS_ENV = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+def _limit_library_threads(threads: int) -> None:
+    """worker processes are spawned after this and read it at import: each worker's numpy / scipy linear algebra
+    gets its share of the cores, not every core of the node (8 workers x 8 BLAS threads spin against each other)"""
+    for k in BLAS_ENV:
+        os.environ[k] = str(threads)
+
+
 def _warm_jit():
     from .synth import Peak, make_cloud
     cloud, _ = make_cloud([Peak(300.0, 0.5, 1e5, 0.05), Peak(400.0, 0.7, 5e4, 0.05, iso=(0.1,))],
@@ -63,19 +76,34 @@ def _apply_model(feats, model):
 
 
 def _pick_one(job):
-    path, features_dir, cache_dir, min_score, keep_rejected, polarity, threads, model_path = job
+    path, features_dir, cache_dir, min_score, keep_rejected, polarity, threads, model_path, overrides, ms2_dir = job
     import numba
     numba.set_num_threads(max(1, int(threads)))
     t = {}
     tic = time.perf_counter()
-    cloud = load_cloud(path, polarity)
+    spectra = Collector()
+    cloud = load_cloud(path, polarity, spectra)     # MS2 spectra come along in the same pass
     t["parse"] = time.perf_counter() - tic
     stem = cloud.name
+    if spectra:
+        save_ms2(from_collected(spectra, cloud.polarity), Path(ms2_dir) / f"{stem}.npz")
+    tic = time.perf_counter()
+    P = estimate(cloud, overrides=overrides)
+    t["estimate"] = time.perf_counter() - tic
+    if P.scan_gain:
+        # correct the scan-wide gain before anything else, then refit what it changes (floor, noise law) on the
+        # corrected cloud; the cache holds the corrected cloud, so gap filling and alignment see the same intensities
+        tic = time.perf_counter()
+        g, g_sd, g_n = scan_gains(cloud, P)
+        apply_scan_gains(cloud, g)
+        P = refit_after_gains(cloud, P)
+        P.gain_sd, P.n_gain_scans = g_sd, g_n
+        t["scan_gain"] = time.perf_counter() - tic
     tic = time.perf_counter()
     cloud.save_npz(Path(cache_dir) / f"{stem}.npz")
     t["cache"] = time.perf_counter() - tic
     tic = time.perf_counter()
-    b = pick_cloud(cloud)
+    b = pick_cloud(cloud, P)
     t.update({f"pick_{k}": v for k, v in b.timings.items()})
     t["pick"] = time.perf_counter() - tic
     tic = time.perf_counter()
@@ -96,7 +124,7 @@ def _pick_one(job):
                   peak3d_version=__version__)
     (Path(features_dir) / f"{stem}.params.json").write_text(json.dumps(params, indent=1))
     return dict(stem=stem, path=str(path), n_features=int(len(feats)), n_centroids=int(cloud.n_points),
-                n_scans=int(cloud.n_scans), parse_s=round(t["parse"], 3), pick_s=round(t["pick"], 3),
+                n_scans=int(cloud.n_scans), n_ms2=len(spectra), parse_s=round(t["parse"], 3), pick_s=round(t["pick"], 3),
                 features_s=round(t["features"], 3))
 
 
@@ -104,8 +132,10 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
     output = Path(output)
     features_dir = output / "features"
     cache_dir = Path(cache_dir or getattr(args, "cache_dir", None) or output / ".cache")
+    ms2_dir = output / "ms2"
     features_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    ms2_dir.mkdir(parents=True, exist_ok=True)
     files = [Path(f) for f in files]
     stems = [f.stem for f in files]
     if len(set(stems)) != len(stems):
@@ -113,13 +143,16 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
     for s in stems:
         if s in RESERVED:
             raise ValueError(f"file stem {s!r} collides with a reserved column name")
+        (ms2_dir / f"{s}.npz").unlink(missing_ok=True)      # a re-run must not inherit an earlier run's spectra
+    overrides = parse_overrides(getattr(args, "set", None))   # fail before any work on a bad --set
     n_workers = max(1, min(len(files), args.cores))
     threads = max(1, args.cores // n_workers)
+    _limit_library_threads(threads)
     tic = time.perf_counter()
     _warm_jit()
     log(f"JIT warm-up {time.perf_counter() - tic:.1f} s; picking {len(files)} files with {n_workers} workers x {threads} threads")
     jobs = [(str(f), str(features_dir), str(cache_dir), args.min_score, args.keep_rejected, args.polarity, threads,
-             str(args.model) if args.model else None) for f in files]
+             str(args.model) if args.model else None, overrides, str(ms2_dir)) for f in files]
     tic = time.perf_counter()
     if n_workers == 1:
         results = [_pick_one(j) for j in jobs]
@@ -360,6 +393,15 @@ def _write_params(output: Path, args, res: AlignResult | None, stage_times: dict
              pandas=pd.__version__, command=" ".join(sys.argv), options={k: (str(v) if isinstance(v, Path) else v)
                                                                             for k, v in vars(args).items() if k != "cmd"},
              input_files=[str(f) for f in files], stage_times_s=stage_times)
+    if hasattr(args, "set"):    # process / pick: the picker variant behind these tables
+        p["variant"] = variant_label(parse_overrides(args.set))
+    else:                       # align regroups tables picked earlier: keep the variant that picked them
+        try:
+            old = json.loads((output / "params.json").read_text()).get("variant")
+        except (OSError, ValueError):
+            old = None
+        if old:
+            p["variant"] = old
     if res is not None:
         p.update(alignment=("skipped (single file)" if res.skipped and len(res.files) == 1 else
                             ("disabled" if args.no_rt_correction else "ok")),
@@ -384,7 +426,54 @@ def _write_report(output: Path, cache_dir: Path, args):
         log(f"report skipped: {e!r}")
 
 
+def check_library(args):
+    """fail before any work when --library names no readable file"""
+    lib = getattr(args, "library", None)
+    if lib and not Path(lib).expanduser().is_file():
+        sys.exit(f"--library: no such file: {lib}")
+
+
+def ms2_and_identify(output: Path, args, stage: dict) -> None:
+    """MS2 spectra -> features (when the files had any), then the identity search when --library is given;
+    neither fails a finished run"""
+    tic = time.perf_counter()
+    try:
+        from .ms2 import map_to_groups
+        map_to_groups(output)
+    except Exception as e:
+        log(f"ms2 mapping skipped: {e!r}")
+    stage["ms2_s"] = round(time.perf_counter() - tic, 3)
+    if getattr(args, "library", None):
+        tic = time.perf_counter()
+        try:
+            from .library import identify
+            identify(output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity)
+        except Exception as e:
+            log(f"identify failed: {e!r}")
+        stage["identify_s"] = round(time.perf_counter() - tic, 3)
+
+
+def _reidentify(output: Path, stage: dict) -> None:
+    """after a regroup the group ids change: repeat the last identity search with its own settings, or drop it"""
+    path = output / "identifications.json"
+    if not path.exists():
+        return
+    try:
+        s = json.loads(path.read_text())
+        if not Path(s["library"]).is_file():
+            raise FileNotFoundError(s["library"])
+        args = argparse.Namespace(library=s["library"], similarity=s["method"], precursor_ppm=s["precursor_ppm"],
+                                  fragment_tol=s["fragment_tol"], min_similarity=s["min_score"])
+    except (OSError, ValueError, KeyError) as e:
+        for name in ("identifications.tsv", "identifications.msp", "identifications.json"):
+            (output / name).unlink(missing_ok=True)
+        log(f"identifications removed (groups changed, library not available: {e!r})")
+        return
+    ms2_and_identify(output, args, stage)
+
+
 def process(files, args):
+    check_library(args)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(args.cache_dir) if args.cache_dir else output / ".cache"
@@ -400,6 +489,7 @@ def process(files, args):
     except Exception as e:  # QC plots never fail the run
         log(f"qc plots skipped: {e!r}")
     stage["qc_s"] = round(time.perf_counter() - tic, 3)
+    ms2_and_identify(output, args, stage)
     _write_params(output, args, res, stage, files, extra=dict(n_files=len(files),
                                                                 n_features_total=int(sum(r["n_features"] for r in results))))
     _write_report(output, cache_dir, args)
@@ -421,5 +511,9 @@ def align_existing(args):
         log(f"qc plots skipped: {e!r}")
     files = sorted(str(p) for p in (output / "features").glob("*.tsv") if not p.name.endswith("rejected.tsv")
                    and p.name != "manifest.tsv")
+    if (output / "identifications.json").exists():
+        _reidentify(output, stage)
+    else:
+        ms2_and_identify(output, args, stage)
     _write_params(output, args, res, stage, files)
     _write_report(output, cache_dir, args)

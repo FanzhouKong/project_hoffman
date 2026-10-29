@@ -8,10 +8,12 @@ localhost (blocks DNS rebinding), and ``--root`` confines browsing, inputs and o
 from __future__ import annotations
 
 import gzip
+import html
 import ipaddress
 import json
 import mimetypes
 import os
+import pickle
 import platform
 import re
 import secrets
@@ -28,6 +30,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import __version__
+from ..estimate import VARIANT, VARIANT_SETS
+from ..library import LIBRARY_SUFFIXES
 from . import bundle, report
 
 STATIC = report.STATIC
@@ -35,15 +39,22 @@ APP_SCRIPTS = (*report.SCRIPTS, "app.js")
 COOKIE = "peak3d_token"
 # how to start `peak3d ...`: inside the standalone app the program itself is the command line
 PEAK3D_CMD = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "peak3d"]
-SKIP_OPTIONS = {"help", "input", "output", "cache_dir"}
+# set: picker overrides stay on the command line, so a GUI run is always the variant the bar shows
+SKIP_OPTIONS = {"help", "input", "output", "cache_dir", "set", "kernel"}
+KERNELS = ("peak3d", "asari", "masscube")      # peak3d runs `process`; the others `external --kernel NAME`
+VARIANT_NOTE = " ".join(f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in VARIANT_SETS.items())
 # output files the viewer may download (by name, from a peak3d output folder)
 RESULT_FILES = ("aligned_feature_table.tsv", "aligned_feature_area.tsv", "aligned_feature_height.tsv", "filled_mask.tsv",
-                "presence_mask.tsv", "params.json")
+                "presence_mask.tsv", "params.json", "ms2_spectra.msp", "ms2_map.tsv", "identifications.tsv")
+RT_COLS = ("rt", "rt_min", "rt_max", "rt_sd")    # minutes in the tables; the GUI shows and exports seconds
 
 # stage markers in the pipeline log -> (stage, progress fraction when reached)
 STAGES = [("JIT warm-up", "pick", 0.05), ("picked ", "align", 0.80), ("alignment:", "group", 0.84),
           ("grouped ", "fill", 0.88), ("gap-filled", "write", 0.93), ("presence rule", "write", 0.95),
-          ("report", "report", 0.97)]
+          ("report", "report", 0.97),
+          # external kernels (peak3d external): the tool's own run, then conversion, chromatograms and MS2
+          ("kernel: running", "pick", 0.05), ("kernel: converting", "group", 0.70),
+          ("for chromatograms and MS2", "fill", 0.75), ("ms2:", "fill", 0.90), ("identify:", "fill", 0.93)]
 
 
 # ------------------------------------------------------------------ options ----
@@ -54,13 +65,16 @@ def _probe(conv, text):
         return None
 
 
-def option_schema():
-    """the ``process`` options as form fields, read from the CLI parser so the two cannot drift apart"""
+def option_schema(command: str = "process"):
+    """the options of ``peak3d <command>`` (process, or external for the other kernels) as form fields, read from
+    the CLI parser so the two cannot drift apart"""
     from ..__main__ import build_parser
     ap = build_parser()
     sub = next(a for a in ap._actions if a.__class__.__name__ == "_SubParsersAction")
+    if command not in sub.choices:
+        return []
     fields = []
-    for a in sub.choices["process"]._actions:
+    for a in sub.choices[command]._actions:
         if a.dest in SKIP_OPTIONS or not a.option_strings:
             continue
         f = {"dest": a.dest, "flag": max(a.option_strings, key=len), "help": a.help or "",
@@ -130,11 +144,16 @@ def _mzml_files(folder: Path) -> list[Path]:
         return []
 
 
+def command_args(kernel: str) -> list[str]:
+    """the peak3d subcommand (and kernel flag) that runs this kernel"""
+    return ["process"] if kernel == "peak3d" else ["external", "--kernel", kernel]
+
+
 class Run:
-    def __init__(self, rid: str, input_dir: Path, output: Path, argv: list[str], n_files: int):
+    def __init__(self, rid: str, input_dir: Path, output: Path, argv: list[str], n_files: int, kernel: str = "peak3d"):
         self.id, self.input, self.output, self.argv, self.n_files = rid, input_dir, output, argv, n_files
-        self.cmd = [*PEAK3D_CMD, "process", "--input", str(input_dir), "--output", str(output),
-                    *argv]
+        self.kernel = kernel
+        self.cmd = [*PEAK3D_CMD, *command_args(kernel), "--input", str(input_dir), "--output", str(output), *argv]
         self.lines: list[str] = []
         self.state, self.stage, self.base = "running", "compile", 0.0
         self.t0, self.t1, self.returncode, self.proc = time.time(), None, None, None
@@ -181,7 +200,7 @@ class Run:
     def progress(self) -> float:
         if self.state == "done":
             return 1.0
-        if self.stage == "pick" and self.n_files:
+        if self.stage == "pick" and self.n_files and self.kernel == "peak3d":
             fd = self.output / "features"
             try:
                 k = sum(1 for p in fd.glob("*.tsv") if p.name != "manifest.tsv" and not p.name.endswith(".rejected.tsv")
@@ -194,9 +213,9 @@ class Run:
 
     def status(self, since: int = 0) -> dict:
         p = self.progress()
-        return {"id": self.id, "input": str(self.input), "output": str(self.output), "argv": self.argv,
-                "command": " ".join(["peak3d", "process", "--input", _q(self.input), "--output", _q(self.output),
-                                     *map(_q, self.argv)]),
+        return {"id": self.id, "kernel": self.kernel, "input": str(self.input), "output": str(self.output), "argv": self.argv,
+                "command": " ".join(["peak3d", *command_args(self.kernel), "--input", _q(self.input), "--output",
+                                     _q(self.output), *map(_q, self.argv)]),
                 "state": self.state, "stage": self.stage, "progress": round(p, 4), "n_files": self.n_files,
                 "picked": getattr(self, "picked", None), "started": self.t0,
                 "elapsed": (self.t1 or time.time()) - self.t0, "returncode": self.returncode,
@@ -208,6 +227,33 @@ def _q(s) -> str:
     return s if re.fullmatch(r"[\w./:=+@%,\\-]+", s) else '"' + s.replace('"', '\\"') + '"'
 
 
+def _seconds(v: str) -> str:
+    """a retention time cell in minutes -> seconds (empty and nan stay as they are)"""
+    try:
+        x = float(v)
+    except ValueError:
+        return v
+    return f"{x * 60:.6g}" if x == x else v
+
+
+def _identity_columns(out: Path) -> dict:
+    """MS2 count and best library hit per group id, as extra export columns (none when the output has no MS2)"""
+    head = ("n_ms2", "identity", "identity_score", "identity_adduct", "identity_inchikey")
+    map_path, hits_path = out / "ms2_map.tsv", out / "identifications.tsv"
+    if not map_path.exists() or not (out / "ms2_spectra.msp").exists():
+        return {"header": (), "rows": {}, "empty": []}
+    import pandas as pd
+    m = pd.read_csv(map_path, sep="\t", usecols=["group_id"])["group_id"].value_counts()
+    best = {}
+    if hits_path.exists():
+        h = pd.read_csv(hits_path, sep="\t", dtype={"name": str, "precursor_type": str, "inchikey": str})
+        h = h.fillna({"name": "", "precursor_type": "", "inchikey": ""})
+        for r in h[h["rank"] == 1].itertuples():
+            best[int(r.group_id)] = [r.name, f"{r.score:.4f}", r.precursor_type, r.inchikey]
+    rows = {int(g): [str(int(n))] + best.get(int(g), ["", "", "", ""]) for g, n in m.items()}
+    return {"header": head, "rows": rows, "empty": ["0", "", "", "", ""]}
+
+
 # ------------------------------------------------------------------ app ----
 class App:
     def __init__(self, root: Path | None, token: str | None, allowed_hosts=()):
@@ -216,7 +262,10 @@ class App:
         self.allowed_hosts = {h.lower() for h in allowed_hosts}
         self.runs: dict[str, Run] = {}
         self.schema = option_schema()
+        self.schemas = {"peak3d": self.schema, "external": option_schema("external")}
         self._bundles: dict[str, tuple] = {}
+        self._ms2: dict[str, tuple] = {}
+        self._searching: dict[str, threading.Lock] = {}     # one identity search per output folder at a time
         self._tables: dict[str, tuple] = {}
         self.lock = threading.Lock()
 
@@ -242,6 +291,17 @@ class App:
         self._bundles[str(output)] = (key, blob)
         return blob
 
+
+    def ms2_blob(self, output: Path) -> bytes:
+        """gzip'd MS2 + identification parts of the bundle, rebuilt when those files change"""
+        key = tuple((output / n).stat().st_mtime if (output / n).exists() else 0
+                    for n in ("ms2_spectra.msp", "ms2_map.tsv", "identifications.tsv", "identifications.msp"))
+        hit = self._ms2.get(str(output))
+        if hit and hit[0] == key:
+            return hit[1]
+        blob = bundle.ms2_ids_blob(output)
+        self._ms2[str(output)] = (key, blob)
+        return blob
 
     def table_lines(self, path: Path):
         """header and {group_id: line} of an aligned table, kept as text so values stay exactly as written"""
@@ -340,9 +400,10 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/info":
                 return self._json(self._info())
             if url.path == "/api/schema":
-                return self._json(self.app.schema)
+                kernel = q.get("kernel", ["peak3d"])[0]
+                return self._json(self.app.schemas["peak3d" if kernel == "peak3d" else "external"])
             if url.path == "/api/ls":
-                return self._json(self._ls(q.get("path", [""])[0]))
+                return self._json(self._ls(q.get("path", [""])[0], q.get("ext", [""])[0]))
             if url.path == "/api/runs":
                 return self._json([r.status(len(r.lines)) for r in self.app.runs.values()])
             m = re.fullmatch(r"/api/runs/(\w+)", url.path)
@@ -354,12 +415,15 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/results/bundle":
                 out = self._output(q)
                 return self._send(200, self.app.bundle_for(out), "application/octet-stream")
+            if url.path == "/api/results/ms2ids":
+                return self._send(200, self.app.ms2_blob(self._output(q)), "application/octet-stream")
             if url.path == "/api/results/file":
                 out = self._output(q)
                 name = q.get("name", [""])[0]
                 if name not in RESULT_FILES or not (out / name).exists():
                     return self._error(404, f"no file {name!r} in {out}")
-                ctype = "application/json" if name.endswith(".json") else "text/tab-separated-values; charset=utf-8"
+                ctype = ("application/json" if name.endswith(".json") else "text/plain; charset=utf-8"
+                         if name.endswith(".msp") else "text/tab-separated-values; charset=utf-8")
                 return self._send(200, (out / name).read_bytes(), ctype,
                                   {"Content-Disposition": f'attachment; filename="{out.name}_{name}"'})
             if url.path == "/api/results/report":
@@ -398,6 +462,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._table(body)
             if url.path == "/api/results/reveal":
                 return self._reveal(body)
+            if url.path == "/api/results/identify":
+                return self._identify(body)
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
             if m and m.group(1) in self.app.runs:
                 self.app.runs[m.group(1)].cancel()
@@ -415,6 +481,7 @@ class Handler(BaseHTTPRequestHandler):
         page = (STATIC / "index.html").read_text(encoding="utf-8")
         tags = "\n".join(f'<script src="/static/{s}?v={__version__}"></script>' for s in APP_SCRIPTS)
         page = page.replace("{{SCRIPTS}}", tags).replace("{{VERSION}}", __version__) \
+            .replace("{{VARIANT}}", html.escape(VARIANT)).replace("{{VARIANT_NOTE}}", html.escape(VARIANT_NOTE)) \
             .replace("{{TOKEN}}", self.app.token or "")       # POSTs echo it in a header; the cookie is HttpOnly
         self._send(200, page.encode(), "text/html; charset=utf-8")
 
@@ -429,26 +496,43 @@ class Handler(BaseHTTPRequestHandler):
 
     def _info(self):
         a = self.app
-        return {"version": __version__, "platform": platform.system(), "python": platform.python_version(),
+        try:
+            from ..external import kernel_status
+            kernels = kernel_status()
+        except ImportError:
+            kernels = {"peak3d": {"available": True, "version": __version__, "variant": VARIANT}}
+        try:
+            from ..library import METHODS
+        except ImportError:
+            METHODS = {}
+        return {"version": __version__, "variant": VARIANT, "variant_sets": VARIANT_SETS, "kernels": kernels,
+                "methods": METHODS,
+                "platform": platform.system(), "python": platform.python_version(),
                 "cpu_count": os.cpu_count() or 1, "root": str(a.root) if a.root else None,
                 "start": str(a.root or Path.home()), "sep": os.sep}
 
-    def _ls(self, p):
+    def _ls(self, p, ext=""):
         a = self.app
         if os.name == "nt" and p == "::drives" and a.root is None:
             drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-            return {"path": "", "parent": None, "dirs": drives, "n_mzml": 0, "mzml": [], "is_output": False}
+            return {"path": "", "parent": None, "dirs": drives, "n_mzml": 0, "mzml": [], "is_output": False, "files": []}
         path = a.resolve(p)
         if not path.is_dir():
             raise FileNotFoundError(f"not a folder: {path}")
-        dirs = []
+        dirs, files = [], []
+        suffix = LIBRARY_SUFFIXES if ext == "msp" else None            # file picking: spectral libraries only
         try:
             for e in os.scandir(path):
-                if not e.name.startswith(".") and e.is_dir(follow_symlinks=True):
+                if e.name.startswith("."):
+                    continue
+                if e.is_dir(follow_symlinks=True):
                     dirs.append(e.name)
+                elif suffix and e.name.lower().endswith(suffix) and e.is_file():
+                    files.append(e.name)
         except PermissionError:
             pass
         dirs.sort(key=str.lower)
+        files.sort(key=str.lower)
         mz = _mzml_files(path)
         if a.root is not None and path == a.root:
             parent = None
@@ -458,7 +542,7 @@ class Handler(BaseHTTPRequestHandler):
             parent = str(path.parent)
         return {"path": str(path), "parent": parent, "dirs": dirs, "n_mzml": len(mz), "mzml": [f.name for f in mz[:8]],
                 "is_output": (path / "aligned_feature_table.tsv").exists(), "has_report": (path / "report.html").exists(),
-                "writable": os.access(path, os.W_OK)}
+                "writable": os.access(path, os.W_OK), "files": files[:2000]}
 
     def _output(self, q) -> Path:
         out = self.app.resolve(q.get("path", [""])[0])
@@ -467,14 +551,62 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def _table(self, body):
-        """the rows of an aligned table for the given group ids, in that order, exactly as in the file"""
+        """the rows of an aligned table for the given group ids, in that order, as in the file except retention times
+        in seconds (columns renamed rt_s, ...), plus the MS2 count and best library hit when the output has them"""
         out = self._output({"path": [body.get("path") or ""]})
         name = body.get("name") or "aligned_feature_table.tsv"
         if name not in RESULT_FILES or not name.startswith("aligned_feature"):
             return self._error(400, f"not a feature table: {name!r}")
         header, rows = self.app.table_lines(out / name)
-        lines = [header] + [rows[k] for k in (str(int(i)) for i in body.get("ids") or []) if k in rows]
+        cols = header.rstrip("\r\n").split("\t")
+        eol = header[len(header.rstrip("\r\n")):] or "\n"
+        rt_at = [i for i, c in enumerate(cols) if c in RT_COLS]
+        extra = _identity_columns(out)
+        lines = ["\t".join([f"{c}_s" if c in RT_COLS else c for c in cols] + list(extra["header"])) + eol]
+        for k in (str(int(i)) for i in body.get("ids") or []):
+            if k not in rows:
+                continue
+            v = rows[k].rstrip("\r\n").split("\t")
+            for i in rt_at:
+                v[i] = _seconds(v[i])
+            lines.append("\t".join(v + extra["rows"].get(int(k), extra["empty"])) + eol)
         self._send(200, "".join(lines).encode("utf-8"), "text/tab-separated-values; charset=utf-8")
+
+    def _identify(self, body):
+        """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify); rewrites
+        identifications.* and refreshes report.html, then answers with the search summary"""
+        from ..library import METHODS, identify
+        out = self._output({"path": [body.get("path") or ""]})
+        lib = self.app.resolve(body.get("library") or "")
+        if lib.suffix.lower() not in LIBRARY_SUFFIXES or not lib.is_file():
+            return self._error(400, f"not a spectral library (.msp or .pkl): {lib}")
+        method = body.get("method") or "weighted_entropy"
+        if method not in METHODS:
+            return self._error(400, f"unknown similarity {method!r}")
+        try:
+            ppm, tol, min_score = (float(body.get(k, d)) for k, d in
+                                   (("precursor_ppm", 10.0), ("fragment_tol", 0.02), ("min_score", 0.7)))
+        except (TypeError, ValueError):
+            return self._error(400, "tolerances and minimum score must be numbers")
+        if not (ppm > 0 and tol > 0 and 0 <= min_score <= 1):
+            return self._error(400, "tolerances must be > 0 and the minimum score within [0, 1]")
+        with self.app.lock:
+            lock = self.app._searching.setdefault(str(out), threading.Lock())
+        if not lock.acquire(blocking=False):
+            return self._error(409, "a search is already running for these results")
+        try:
+            try:
+                identify(out, lib, method=method, precursor_ppm=ppm, fragment_tol=tol, min_score=min_score)
+            except (pickle.UnpicklingError, ValueError, EOFError) as e:     # a .pkl that is not a library we can read
+                return self._error(400, f"could not read the library {lib.name}: {e}")
+            try:
+                report.refresh_ids(out)
+            except OSError:
+                pass                              # a read-only results folder: the GUI still shows the hits
+        finally:
+            lock.release()
+        meta = out / "identifications.json"
+        self._json(json.loads(meta.read_text()) if meta.exists() else {})
 
     def _reveal(self, body):
         """open the folder in Finder / File Explorer / the desktop's file manager (the app runs on this computer)"""
@@ -504,6 +636,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _start(self, body):
         a = self.app
+        kernel = body.get("kernel") or "peak3d"
+        if kernel not in KERNELS:
+            return self._error(400, f"unknown kernel {kernel!r}")
+        if kernel != "peak3d":
+            st = self._info()["kernels"].get(kernel) or {}
+            if not st.get("available"):
+                return self._error(400, f"{kernel} is not available here. {st.get('note') or ''}".strip())
         inp = a.resolve(body.get("input") or "")
         files = _mzml_files(inp)
         if not files:
@@ -515,13 +654,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(409, "a run is already writing to this folder")
         if (out / "aligned_feature_table.tsv").exists() and not body.get("overwrite"):
             return self._json({"error": "this folder already holds peak3d results", "confirm": "overwrite"}, 409)
-        argv = options_to_argv(body.get("options") or {}, a.schema)
-        msg = validate_argv(["process", "--input", str(inp), "--output", str(out), *argv])
+        argv = options_to_argv(body.get("options") or {}, a.schemas["peak3d" if kernel == "peak3d" else "external"])
+        msg = validate_argv([*command_args(kernel), "--input", str(inp), "--output", str(out), *argv])
         if msg:
             return self._error(400, msg)
         with a.lock:
             rid = f"r{len(a.runs) + 1}"
-            run = Run(rid, inp, out, argv, len(files))
+            run = Run(rid, inp, out, argv, len(files), kernel)
             a.runs[rid] = run
         run.start()
         self._json(run.status(), 201)

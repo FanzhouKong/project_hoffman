@@ -177,20 +177,51 @@ def _scan_rt_minutes(spec) -> float:
     return t  # unknown unit: caller applies the seconds guard on the whole run
 
 
-def load_cloud(path, polarity: str | None = None) -> Cloud:
+def _precursor_mz(spec) -> float:
+    """the selected ion's m/z of an MS2 spectrum, else its isolation window target (nan if neither is given)"""
+    try:
+        prec = spec["precursorList"]["precursor"][0]
+    except (KeyError, IndexError, TypeError):
+        return float("nan")
+    try:
+        return float(prec["selectedIonList"]["selectedIon"][0]["selected ion m/z"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        pass
+    try:
+        return float(prec["isolationWindow"]["isolation window target m/z"])
+    except (KeyError, TypeError, ValueError):
+        return float("nan")
+
+
+def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cloud:
     """Read MS1 centroids of an mzML file into a Cloud.
 
     polarity: None = require a single polarity in the file (raise on polarity switching),
-    "pos"/"neg" = keep only that polarity."""
+    "pos"/"neg" = keep only that polarity.
+    ms2: a list to collect the file's centroided MS2 spectra into, in the same pass (the parser decodes them
+    anyway): (scan id, rt, precursor m/z, polarity, m/z array, intensity array) with rt in minutes by the same
+    rule as the MS1 scans. Empty and profile-mode MS2 spectra are skipped and counted in ``ms2.n_skipped`` when
+    the collector has that attribute (ms2.Collector)."""
     from pyteomics import mzml
 
     want = {"pos": "positive scan", "neg": "negative scan"}.get(polarity)
     rts, mzs, intens = [], [], []
     seen = set()
     n_ms1 = n_profile = 0
+    found = []
     with mzml.read(str(path), use_index=False) as reader:
         for s in reader:
-            if s.get("ms level") != 1:
+            level = s.get("ms level")
+            if level != 1:
+                if ms2 is not None and level == 2 and (want is None or want in s):
+                    m = s.get("m/z array")
+                    if "profile spectrum" in s or m is None or len(m) == 0:
+                        if hasattr(ms2, "n_skipped"):
+                            ms2.n_skipped += 1
+                        continue
+                    pol = "neg" if "negative scan" in s else ("pos" if "positive scan" in s else "")
+                    found.append((str(s.get("id", "")), _scan_rt_minutes(s), _precursor_mz(s), pol,
+                                  np.asarray(m, dtype=np.float64), np.asarray(s["intensity array"], dtype=np.float32)))
                 continue
             n_ms1 += 1
             n_profile += "profile spectrum" in s
@@ -208,7 +239,10 @@ def load_cloud(path, polarity: str | None = None) -> Cloud:
     if polarity is None and len(pols) > 1:
         raise ValueError(f"{path}: both polarities present; pass polarity='pos' or 'neg'")
     rt = np.asarray(rts, dtype=np.float64)
-    if len(rt) and rt.max() > 200:  # a run longer than 200 min is implausible: these are seconds
+    seconds = bool(len(rt) and rt.max() > 200)   # a run longer than 200 min is implausible: these are seconds
+    if seconds:
         rt = rt / 60.0
+    if ms2 is not None:
+        ms2.extend((sid, t / 60.0 if seconds else t, p, pl, m, i) for sid, t, p, pl, m, i in found)
     pol = polarity or (next(iter(pols)) if pols else "")
     return from_scans(Path(path).stem, rt, mzs, intens, pol)

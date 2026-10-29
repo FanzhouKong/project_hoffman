@@ -138,6 +138,13 @@ h1, h2, h3, h4, p { margin: 0; }
 .top-app-bar .title { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; white-space: nowrap; overflow: hidden; }
 .top-app-bar .title > :first-child { font: 600 17px/1.3 var(--font); letter-spacing: -.01em; }
 .top-app-bar .subtitle { color: var(--ink-3); font: 400 12px/1.3 var(--mono); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* the picker variant this app runs (estimate.VARIANT), always at the bar's right end */
+.top-app-bar .variant {
+  flex: none; margin-left: 6px; display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 9px;
+  border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface);
+  color: var(--ink); font: 600 11px/1 var(--mono); letter-spacing: .02em; cursor: default;
+}
+.top-app-bar .variant-k { color: var(--ink-3); font: 400 10px/1 var(--font); letter-spacing: .04em; text-transform: uppercase; }
 
 @media (max-width: 760px) {
   .app { flex-direction: column; }
@@ -454,3 +461,34 @@ dialog.dialog::backdrop { background: rgba(28, 28, 30, .28); backdrop-filter: bl
 .summary dl { margin: 4px 0 16px; }
 .run-card { padding: 16px 18px; }
 @media (max-width: 1000px) { .run-layout { grid-template-columns: minmax(0, 1fr); } .run-side { position: static; } }
+
+/* features: m/z and RT windows, the identity column, identity search and the hit list */
+.range {
+  display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 4px 0 10px; border-radius: var(--r);
+  border: 1px solid var(--line-strong); background: var(--surface); box-shadow: inset 0 1px 1px rgba(20, 20, 24, .03);
+}
+.range:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+.range input { width: 74px; height: 26px; border: 0; outline: 0; background: none; padding: 0 4px; font: 400 12.5px/1 var(--font); color: var(--ink); }
+.range input:focus-visible { box-shadow: none; }
+.range input::placeholder { color: var(--ink-4); }
+.range-label { font: 500 12px/1 var(--font); color: var(--ink-2); margin-right: 2px; }
+.range-sep, .range-unit { color: var(--ink-3); font: 400 12px/1 var(--font); }
+.range-unit { padding-right: 6px; }
+td.ident { max-width: 220px; white-space: nowrap; }
+td.ident .id-name { display: inline-block; max-width: 170px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+td.ident .id-score { margin-left: 8px; color: var(--success); font-size: 11.5px; }
+td.muted { color: var(--ink-4); }
+.id-card { margin: 4px 0 14px; }
+.id-form { display: grid; grid-template-columns: minmax(220px, 2.4fr) minmax(170px, 1.4fr) repeat(3, minmax(92px, .7fr)) auto; gap: 0 12px; align-items: end; }
+.id-form .id-go { padding-bottom: 1px; }
+.id-status { margin-top: 10px; display: flex; align-items: center; gap: 6px; }
+.id-status.err { color: var(--danger); }
+.id-best { margin-top: 4px; color: var(--ink-2); }
+.hits { margin-top: 12px; }
+.hits tbody tr { cursor: pointer; }
+.hits td.ident .id-name { max-width: 240px; }
+@media (max-width: 1100px) { .id-form { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; } }
+/* run page: kernel choice */
+.kernel-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 14px; }
+.tab .tab-note { font: 400 10.5px/1 var(--mono); color: var(--ink-3); margin-left: 2px; }
+.list-item[aria-selected="true"] { background: var(--accent-soft); }

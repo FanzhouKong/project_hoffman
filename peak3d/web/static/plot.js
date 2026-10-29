@@ -473,6 +473,104 @@
     return /^#/.test(col) ? mix(col, P.ink.startsWith("#") ? P.ink : "#000000", 0.25) : col;
   }
 
+  // ---------------------------------------------------------------- mirror (an MS2 spectrum against a library hit)
+  // spec: top / bottom = { mz, inten } (bottom optional), tol = fragment tolerance (Da) for the matched colouring.
+  // Each side is scaled to its own base peak (100); peaks with a partner on the other side within tol are drawn
+  // in the series colour, the rest in the neutral grey.
+  class Mirror extends Chart {
+    prep() {
+      const s = this.spec, sides = [s.top, s.bottom].filter(Boolean);
+      this.sides = sides.map((r) => {
+        let m = 0;
+        for (let i = 0; i < r.inten.length; i++) if (r.inten[i] > m) m = r.inten[i];
+        return { mz: r.mz, rel: Float32Array.from(r.inten, (v) => (m > 0 ? 100 * v / m : 0)), hit: new Uint8Array(r.mz.length) };
+      });
+      if (this.sides.length === 2 && s.tol > 0) {
+        const [A, B] = this.sides;
+        const oa = Array.from(A.mz.keys()).sort((i, j) => A.mz[i] - A.mz[j]), ob = Array.from(B.mz.keys()).sort((i, j) => B.mz[i] - B.mz[j]);
+        let j = 0;
+        for (const i of oa) {
+          while (j < ob.length && B.mz[ob[j]] < A.mz[i] - s.tol) j++;
+          for (let k = j; k < ob.length && B.mz[ob[k]] <= A.mz[i] + s.tol; k++) { A.hit[i] = 1; B.hit[ob[k]] = 1; }
+        }
+      }
+    }
+    draw() {
+      if (!this.w) return;
+      const s = this.spec, P = this.pal(), ctx = this.ctx;
+      this.prep();
+      const two = this.sides.length === 2;
+      let x0 = Infinity, x1 = -Infinity;
+      for (const r of this.sides) for (let i = 0; i < r.mz.length; i++) { if (r.mz[i] < x0) x0 = r.mz[i]; if (r.mz[i] > x1) x1 = r.mz[i]; }
+      if (!isFinite(x0)) { x0 = 50; x1 = 500; }
+      const pad = Math.max(5, (x1 - x0) * 0.05);
+      this.xd = [Math.max(0, x0 - pad), x1 + pad];
+      this.yd = two ? [-112, 112] : [0, 112];
+      const yFmt = (v) => P3.fixed(Math.abs(v), 0);
+      const yt = { values: two ? [-100, -50, 0, 50, 100] : [0, 25, 50, 75, 100], digits: 0 };
+      this.layout(P, yFmt, yt);
+      const xt = ticks(this.xd[0], this.xd[1], Math.max(2, Math.floor((this.box.x1 - this.box.x0) / 80)));
+      this.clear(P);
+      this.axes(P, xt, yt, (v, d) => P3.fixed(v, Math.min(d, 1)), yFmt);
+      const b = this.box, zero = Math.round(this.sy(0)) + 0.5;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(b.x0, b.y0 - 2, b.x1 - b.x0, b.y1 - b.y0 + 2); ctx.clip();
+      const cols = [P.s1, P.s2];
+      this.sides.forEach((r, si) => {
+        const sign = si ? -1 : 1;
+        ctx.lineWidth = 1.5;
+        for (const matched of two ? [0, 1] : [1]) {      // unmatched first, matched on top
+          ctx.strokeStyle = matched ? cols[si] : P.neutral;
+          ctx.beginPath();
+          for (let i = 0; i < r.mz.length; i++) {
+            if (two && r.hit[i] !== matched) continue;
+            const x = Math.round(this.sx(r.mz[i])) + 0.5;
+            ctx.moveTo(x, zero); ctx.lineTo(x, this.sy(sign * r.rel[i]));
+          }
+          ctx.stroke();
+        }
+        // the four strongest peaks carry their m/z
+        const top4 = Array.from(r.rel.keys()).sort((i, j) => r.rel[j] - r.rel[i]).slice(0, 4);
+        ctx.font = `400 10px ${P.font}`;
+        ctx.fillStyle = P.muted;
+        ctx.textAlign = "center";
+        ctx.textBaseline = si ? "top" : "bottom";
+        for (const i of top4) if (r.rel[i] > 5) ctx.fillText(P3.fixed(r.mz[i], 4), this.sx(r.mz[i]), this.sy(sign * r.rel[i]) + (si ? 3 : -3));
+      });
+      ctx.strokeStyle = P.axis;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(b.x0, zero); ctx.lineTo(b.x1, zero); ctx.stroke();
+      if (this.hoverPk) {
+        const [si, i] = this.hoverPk, r = this.sides[si];
+        const x = Math.round(this.sx(r.mz[i])) + 0.5;
+        ctx.strokeStyle = P.ink;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(x, zero); ctx.lineTo(x, this.sy((si ? -1 : 1) * r.rel[i])); ctx.stroke();
+      }
+      ctx.restore();
+      ctx.font = `500 11px ${P.font}`;
+      ctx.fillStyle = P.ink2;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      if (s.topLabel) ctx.fillText(s.topLabel, b.x0 + 6, b.y0 + 2);
+      if (two && s.bottomLabel) { ctx.textBaseline = "bottom"; ctx.fillText(s.bottomLabel, b.x0 + 6, b.y1 - 2); }
+    }
+    onMove([px, py]) {
+      if (!this.box || !this.sides) return;
+      const upper = py <= this.sy(0), si = upper || this.sides.length < 2 ? 0 : 1, r = this.sides[si];
+      let best = -1, bd = 7;
+      for (let i = 0; i < r.mz.length; i++) { const d = Math.abs(this.sx(r.mz[i]) - px); if (d < bd) { bd = d; best = i; } }
+      const prev = this.hoverPk;
+      this.hoverPk = best >= 0 ? [si, best] : null;
+      if (String(prev) !== String(this.hoverPk)) this.draw();
+      if (best < 0) return this.hideTip();
+      const name = si ? this.spec.bottomLabel || "library" : this.spec.topLabel || "query";
+      this.showTip(this.sx(r.mz[best]), this.sy((si ? -1 : 1) * r.rel[best]),
+        `<b>m/z ${P3.fixed(r.mz[best], 4)}</b><br>${P3.fixed(r.rel[best], 1)} % · ${name}${this.sides.length === 2 ? (r.hit[best] ? " · matched" : " · unmatched") : ""}`);
+    }
+    onLeave() { this.hideTip(); if (this.hoverPk) { this.hoverPk = null; this.draw(); } }
+  }
+
   // ---------------------------------------------------------------- legend
   function legend(items) {
     return h("div.chart-legend", items.map((it) => {
@@ -490,6 +588,7 @@
     line: (el, spec) => new Line(el, spec),
     scatter: (el, spec) => new Scatter(el, spec),
     bars: (el, spec) => new Bars(el, spec),
+    mirror: (el, spec) => new Mirror(el, spec),
     legend, mix, ticks,
   };
 })(window.P3 = window.P3 || {});

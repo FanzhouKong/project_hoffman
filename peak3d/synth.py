@@ -142,42 +142,78 @@ def permute_within_scans(cloud: Cloud, seed: int = 0) -> Cloud:
     return from_scans(cloud.name, cloud.rt, mzs, ins, cloud.polarity)
 
 
-def write_mzml(cloud: Cloud, path) -> None:
+def write_mzml(cloud: Cloud, path, ms2=None, rt_unit: str | None = "minute") -> None:
     """Write a minimal centroid MS1 mzML (zlib + base64, 64-bit m/z, 32-bit intensity, scan
-    start time in minutes) that pyteomics reads back into the same Cloud. Test helper only."""
+    start time in minutes) that pyteomics reads back into the same Cloud. Test helper only.
+    ms2: optional MS2 spectra (rt in minutes, precursor m/z, m/z array, intensity array), each written after the
+    last MS1 scan at or before its time; rt_unit "second" writes seconds with their unit, None seconds without one."""
     import base64
     import zlib
 
     def enc(a):
         return base64.b64encode(zlib.compress(a.tobytes())).decode()
 
+    def t_param(t_min):
+        if rt_unit == "minute":
+            return (f'<cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{t_min:.6f}" '
+                    'unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>')
+        if rt_unit == "second":
+            return (f'<cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{t_min * 60:.4f}" '
+                    'unitCvRef="UO" unitAccession="UO:0000010" unitName="second"/>')
+        return f'<cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{t_min * 60:.4f}"/>'
+
+    def arrays(mz, it):
+        return ('<binaryDataArrayList count="2">'
+                f'<binaryDataArray encodedLength="{len(enc(mz))}"><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float" value=""/>'
+                '<cvParam cvRef="MS" accession="MS:1000574" name="zlib compression" value=""/>'
+                '<cvParam cvRef="MS" accession="MS:1000514" name="m/z array" value=""/>'
+                f'<binary>{enc(mz)}</binary></binaryDataArray>'
+                f'<binaryDataArray encodedLength="{len(enc(it))}"><cvParam cvRef="MS" accession="MS:1000521" name="32-bit float" value=""/>'
+                '<cvParam cvRef="MS" accession="MS:1000574" name="zlib compression" value=""/>'
+                '<cvParam cvRef="MS" accession="MS:1000515" name="intensity array" value=""/>'
+                f'<binary>{enc(it)}</binary></binaryDataArray>'
+                '</binaryDataArrayList>')
+
     pol = {"pos": '<cvParam cvRef="MS" accession="MS:1000130" name="positive scan" value=""/>',
            "neg": '<cvParam cvRef="MS" accession="MS:1000129" name="negative scan" value=""/>'}.get(cloud.polarity, "")
+    ms2 = sorted(ms2 or [], key=lambda x: x[0])
+    after = np.searchsorted(cloud.rt, [x[0] for x in ms2], side="right") - 1 if ms2 else np.zeros(0, int)
+    n = cloud.n_scans + len(ms2)
     out = ['<?xml version="1.0" encoding="utf-8"?>',
            '<mzML xmlns="http://psi.hupo.org/ms/mzml" version="1.1.0">',
            '<cvList count="1"><cv id="MS" fullName="PSI-MS" URI="https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"/></cvList>',
            '<fileDescription><fileContent><cvParam cvRef="MS" accession="MS:1000579" name="MS1 spectrum" value=""/>'
            '<cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum" value=""/></fileContent></fileDescription>',
-           '<run id="run">', f'<spectrumList count="{cloud.n_scans}">']
-    for s in range(cloud.n_scans):
-        a, b = cloud.off[s], cloud.off[s + 1]
-        mz = np.ascontiguousarray(cloud.mz[a:b], dtype="<f8")
-        it = np.ascontiguousarray(cloud.inten[a:b], dtype="<f4")
-        out.append(
-            f'<spectrum index="{s}" id="scan={s + 1}" defaultArrayLength="{b - a}">'
-            '<cvParam cvRef="MS" accession="MS:1000579" name="MS1 spectrum" value=""/>'
-            '<cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="1"/>'
-            '<cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum" value=""/>' + pol +
-            f'<scanList count="1"><scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{cloud.rt[s]:.6f}" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/></scan></scanList>'
-            '<binaryDataArrayList count="2">'
-            f'<binaryDataArray encodedLength="{len(enc(mz))}"><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float" value=""/>'
-            '<cvParam cvRef="MS" accession="MS:1000574" name="zlib compression" value=""/>'
-            '<cvParam cvRef="MS" accession="MS:1000514" name="m/z array" value=""/>'
-            f'<binary>{enc(mz)}</binary></binaryDataArray>'
-            f'<binaryDataArray encodedLength="{len(enc(it))}"><cvParam cvRef="MS" accession="MS:1000521" name="32-bit float" value=""/>'
-            '<cvParam cvRef="MS" accession="MS:1000574" name="zlib compression" value=""/>'
-            '<cvParam cvRef="MS" accession="MS:1000515" name="intensity array" value=""/>'
-            f'<binary>{enc(it)}</binary></binaryDataArray>'
-            '</binaryDataArrayList></spectrum>')
+           '<run id="run">', f'<spectrumList count="{n}">']
+    idx, k = 0, 0
+    for s in range(-1, cloud.n_scans):
+        if s >= 0:
+            a, b = cloud.off[s], cloud.off[s + 1]
+            mz = np.ascontiguousarray(cloud.mz[a:b], dtype="<f8")
+            it = np.ascontiguousarray(cloud.inten[a:b], dtype="<f4")
+            out.append(
+                f'<spectrum index="{idx}" id="scan={idx + 1}" defaultArrayLength="{b - a}">'
+                '<cvParam cvRef="MS" accession="MS:1000579" name="MS1 spectrum" value=""/>'
+                '<cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="1"/>'
+                '<cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum" value=""/>' + pol +
+                f'<scanList count="1"><scan>{t_param(cloud.rt[s])}</scan></scanList>' + arrays(mz, it) + '</spectrum>')
+            idx += 1
+        while k < len(ms2) and after[k] == s:
+            t, prec, m2, i2 = ms2[k]
+            m2 = np.ascontiguousarray(m2, dtype="<f8")
+            i2 = np.ascontiguousarray(i2, dtype="<f4")
+            out.append(
+                f'<spectrum index="{idx}" id="scan={idx + 1}" defaultArrayLength="{len(m2)}">'
+                '<cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum" value=""/>'
+                '<cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="2"/>'
+                '<cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum" value=""/>' + pol +
+                f'<scanList count="1"><scan>{t_param(t)}</scan></scanList>'
+                '<precursorList count="1"><precursor><isolationWindow>'
+                f'<cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="{prec:.6f}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>'
+                '</isolationWindow><selectedIonList count="1"><selectedIon>'
+                f'<cvParam cvRef="MS" accession="MS:1000744" name="selected ion m/z" value="{prec:.6f}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>'
+                '</selectedIon></selectedIonList></precursor></precursorList>' + arrays(m2, i2) + '</spectrum>')
+            idx += 1
+            k += 1
     out += ['</spectrumList>', '</run>', '</mzML>']
     Path(path).write_text("\n".join(out))

@@ -1,6 +1,7 @@
 """Browser front end: results bundle, report.html and the local GUI server (no browser needed)."""
 import gzip
 import json
+import pickle
 import subprocess
 import sys
 import threading
@@ -154,10 +155,26 @@ def test_not_an_output(tmp_path):
 
 
 # ------------------------------------------------------------------ server ----
+RT = ("rt", "rt_min", "rt_max", "rt_sd")
+
+
+def _in_seconds(header, line):
+    """what /api/results/table makes of a table line: retention-time columns in seconds (header renamed *_s)"""
+    cols = header.rstrip("\r\n").split("\t")
+    eol = header[len(header.rstrip("\r\n")):]
+    if line is None:
+        return "\t".join(c + "_s" if c in RT else c for c in cols) + eol
+    v = line.rstrip("\r\n").split("\t")
+    for i, c in enumerate(cols):
+        if c in RT and v[i] not in ("", "nan"):
+            v[i] = f"{float(v[i]) * 60:.6g}"
+    return "\t".join(v) + eol
+
+
 def test_schema_and_argv():
     sch = {f["dest"]: f for f in server.option_schema()}
     assert {"cores", "min_score", "polarity", "ppm", "no_rt_correction", "no_gap_fill", "quant", "no_report"} <= set(sch)
-    assert "input" not in sch and "output" not in sch
+    assert "input" not in sch and "output" not in sch and "set" not in sch   # GUI runs are always the named variant
     assert sch["cores"]["kind"] == "int" and sch["cores"]["min_exclusive"] == 0
     assert sch["min_score"]["kind"] == "float" and sch["min_score"]["max"] == 1
     assert sch["polarity"]["kind"] == "choice" and sch["no_gap_fill"]["kind"] == "flag"
@@ -220,10 +237,12 @@ def test_server_guards(gui):
     assert c.req("/api/info", host="localhost:1")[0] == 200
     code, page, _ = c.req("/")
     assert code == 200 and b"t0ken" in page and b"/static/app.js" in page
+    assert b'id="variant"' in page and b">GLRS</span>" in page and b"narrow_rule=local_median" in page
     assert c.req("/static/app.js")[0] == 200 and c.req("/static/../server.py")[0] == 404
     assert c.req("/static/style.css")[2]["Content-Type"].startswith("text/css")
     code, info = c.json("/api/info")
     assert info["root"] == str(root.resolve()) and info["cpu_count"] >= 1
+    assert info["variant"] == "GLRS" and info["variant_sets"]["min_scans_rule"] == "local"
     assert c.json("/api/ls?path=/")[0] == 403                               # outside --root
     assert c.req("/api/runs", {"input": str(root)}, token=False)[0] == 403
     code, err = c.json("/api/runs", {"input": str(root)}, token=False, cookie=True)   # cookie alone: no CSRF
@@ -269,8 +288,113 @@ def test_server_run_and_results(gui):
     lines = (root / "o" / "aligned_feature_table.tsv").read_bytes().decode("utf-8").splitlines(keepends=True)
     ids = [int(lines[3].split("\t")[0]), int(lines[1].split("\t")[0]), 999999]
     code, raw, _ = c.req("/api/results/table", {"path": str(root / "o"), "ids": ids})
-    assert code == 200 and raw.decode() == lines[0] + lines[3] + lines[1]
+    assert code == 200 and raw.decode() == "".join(_in_seconds(lines[0], ln) for ln in (None, lines[3], lines[1]))
     assert c.json("/api/results/reveal", {"path": str(root.parent)})[0] == 403          # outside --root
     code, ex = c.json("/api/example", {})
     assert code == 200 and ex["n_mzml"] == 3 and Path(ex["input"]).parent == (root / "peak3d_example").resolve()
     assert c.json(f"/api/results/bundle?path={quote(str(d))}")[0] == 404
+
+
+# ------------------------------------------------------------------ MS2, identity search, kernels ----
+QUERY = [(72.04, 10.0), (110.06, 100.0), (163.06, 40.0)]
+LIBRARY = """NAME: Glucose
+PRECURSORMZ: 180.0634
+PRECURSORTYPE: [M+H]+
+IONMODE: Positive
+FORMULA: C6H12O6
+INCHIKEY: WQZGKKKJIJFFOK-GASJEMHNSA-N
+Num Peaks: 3
+72.04\t10
+110.06\t100
+163.06\t40
+
+NAME: Not this one
+PRECURSORMZ: 180.0636
+IONMODE: Positive
+Num Peaks: 2
+91.05\t100
+119.05\t30
+
+NAME: Far precursor
+PRECURSORMZ: 250.1000
+IONMODE: Positive
+Num Peaks: 1
+110.06\t100
+"""
+
+
+def _ms2_output(out: Path):
+    """a two-feature output with one representative MS2 spectrum (feature 1), as process writes it"""
+    out.mkdir(parents=True)
+    pd.DataFrame({"group_id": [1, 2], "mz": [180.0634, 300.2], "rt": [2.0, 4.0], "rt_min": [1.95, 3.95],
+                  "rt_max": [2.05, 4.05], "n_detected": [2, 1], "n_confirmed": [0, 0], "n_filled": [0, 1],
+                  "mz_ppm_spread": [1.0, np.nan], "rt_sd": [0.01, np.nan], "iso_offset": [0, 0], "charge": [1, 1],
+                  "A": [2e6, 5e5], "B": [1.8e6, 0.0]}).to_csv(out / "aligned_feature_table.tsv", sep="\t", index=False)
+    (out / "params.json").write_text("{}")
+    peaks = "".join(f"{m}\t{i}\n" for m, i in QUERY)
+    (out / "ms2_spectra.msp").write_text("NAME: feature_1\nPRECURSORMZ: 180.0634\nRETENTIONTIME: 2.0\nIONMODE: Positive\n"
+                                         f"Comment: group_id=1 file=A scan=11 rt_s=120.5 tic=150 n_ms2=3\nNum Peaks: 3\n{peaks}\n")
+    pd.DataFrame({"group_id": [1, 1, 1], "file": ["A", "A", "B"], "scan": ["11", "12", "9"], "rt_s": [120.5, 121.0, 119.0],
+                  "precursor_mz": [180.0634] * 3, "tic": [150.0, 90.0, 80.0], "n_peaks": [3, 3, 2],
+                  "representative": [1, 0, 0]}).to_csv(out / "ms2_map.tsv", sep="\t", index=False)
+    return out
+
+
+def test_identity_search_through_the_server(gui):
+    c, root, _ = gui
+    out = _ms2_output(root / "res")
+    (root / "libs").mkdir()
+    (root / "libs" / "mini.msp").write_text(LIBRARY)
+    (root / "libs" / "notes.txt").write_text("x")
+    (root / "libs" / "Other.pkl").write_bytes(pickle.dumps({"not": "a library"}))
+    code, ls = c.json(f"/api/ls?path={quote(str(root / 'libs'))}&ext=msp")
+    assert code == 200 and ls["files"] == ["mini.msp", "Other.pkl"]
+    code, info = c.json("/api/info")
+    assert len(info["methods"]) == 5 and "reverse_entropy" in info["methods"] and set(info["kernels"]) >= {"peak3d", "asari", "masscube"}
+    q = quote(str(out))
+    # before a search: the representative spectrum only
+    h, a = bundle.unpack(gzip.decompress(c.req(f"/api/results/ms2ids?path={q}")[1]))
+    assert h["ms2"]["n"] == 1 and h["ms2"]["scan"] == ["11"] and h["ids"] is None and list(a["ms2_row"]) == [0]
+    assert np.allclose(a["ms2_mz"], [m for m, _ in QUERY]) and a["ms2_n"][0] == 3
+    bad = {"path": str(out), "library": str(root / "libs" / "notes.txt")}
+    assert c.json("/api/results/identify", bad)[0] == 400
+    code, err = c.json("/api/results/identify", {**bad, "library": str(root / "libs" / "Other.pkl")})
+    assert code == 400 and "could not read the library Other.pkl" in err["error"]
+    assert c.json("/api/results/identify", {**bad, "library": str(root / "libs" / "mini.msp"), "method": "cosine"})[0] == 400
+    report.write_report(out)                                # a report from before the search (no cache: no chromatograms)
+    for method in ("weighted_entropy", "entropy", "dot", "weighted_dot", "reverse_entropy"):
+        code, meta = c.json("/api/results/identify", {"path": str(out), "library": str(root / "libs" / "mini.msp"),
+                                                      "method": method, "min_score": 0.5})
+        assert code == 200 and meta["method"] == method and meta["n_queries"] == 1 and meta["n_identified"] == 1, meta
+        h, a = bundle.unpack(gzip.decompress(c.req(f"/api/results/ms2ids?path={q}")[1]))
+        assert h["ids"]["name"][0] == "Glucose" and a["id_score"][0] == pytest.approx(1.0, abs=1e-4), method
+        assert "Far precursor" not in h["ids"]["name"] and list(a["id_row"]) == [0] * len(a["id_row"])
+        assert h["ids"]["spectra"] and np.allclose(a["id_mz"][:3], [m for m, _ in QUERY])
+    # the report now carries the hits too
+    rh, _ = bundle.unpack(gzip.decompress(report.read_bundle(out / "report.html")))
+    assert rh["ids"]["method"] == "reverse_entropy" and rh["ms2"]["n"] == 1
+    # export: seconds, MS2 count and the best hit
+    code, raw, _ = c.req("/api/results/table", {"path": str(out), "ids": [1, 2]})
+    rows = [ln.split("\t") for ln in raw.decode().splitlines()]
+    head = rows[0]
+    assert head[:5] == ["group_id", "mz", "rt_s", "rt_min_s", "rt_max_s"] and "rt_sd_s" in head
+    assert head[-5:] == ["n_ms2", "identity", "identity_score", "identity_adduct", "identity_inchikey"]
+    assert rows[1][2] == "120" and rows[1][-5:-3] == ["3", "Glucose"] and rows[1][-2] == "[M+H]+"
+    assert rows[2][-5:] == ["0", "", "", "", ""]
+    assert c.req(f"/api/results/file?path={q}&name=identifications.tsv")[0] == 200
+    full = bundle.unpack(bundle.build(out))[0]
+    assert full["ids"]["n"] >= 1 and full["kernel"] == "peak3d"
+
+
+def test_kernel_choice(gui):
+    c, root, _ = gui
+    ext = {f["dest"] for f in c.json("/api/schema?kernel=asari")[1]}
+    assert {"cores", "polarity", "library", "similarity"} <= ext and not ext & {"kernel", "input", "output", "min_score"}
+    d = _study(root / "kd", n_files=1, n=5)
+    code, err = c.json("/api/runs", {"kernel": "xcms", "input": str(d), "output": str(root / "k")})
+    assert code == 400 and "kernel" in err["error"]
+    info = c.json("/api/info")[1]
+    if not info["kernels"]["asari"]["available"]:
+        code, err = c.json("/api/runs", {"kernel": "asari", "input": str(d), "output": str(root / "k")})
+        assert code == 400 and "not available" in err["error"]
+    assert server.command_args("masscube") == ["external", "--kernel", "masscube"] and server.command_args("peak3d") == ["process"]

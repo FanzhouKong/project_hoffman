@@ -21,7 +21,13 @@
   const enc = encodeURIComponent;
 
   // ---------------------------------------------------------------- state
-  const S = { info: null, schema: [], form: {}, input: "", output: "", inputInfo: null, runs: new Map(), page: "run", resultsPath: null, viewer: null, viewerTab: "overview" };
+  const S = { info: null, schemas: { peak3d: [], external: [] }, kernel: "peak3d", form: {}, input: "", output: "", inputInfo: null, runs: new Map(), page: "run", resultsPath: null, viewer: null, viewerTab: "overview" };
+  // feature detection kernels: peak3d runs `peak3d process`, the others `peak3d external --kernel NAME` (their own
+  // workflow, then the same tables, chromatograms, MS2 mapping and report)
+  const KERNELS = [["peak3d", "peak3d", "scatter_plot"], ["asari", "asari", "dataset"], ["masscube", "MassCube", "experiment"]];
+  const KNAME = Object.fromEntries(KERNELS.map(([k, n]) => [k, n]));
+  const schemaOf = (k) => S.schemas[k === "peak3d" ? "peak3d" : "external"] || [];
+  const kernelInfo = (k) => (S.info.kernels || {})[k] || { available: k === "peak3d" };
   const pageEl = document.getElementById("page");
   const scroll = document.getElementById("scroll");
   const bar = document.getElementById("bar");
@@ -33,6 +39,8 @@
     rt_tol_max: "Maximum RT tolerance (min)", no_rt_correction: "RT correction", no_gap_fill: "Gap filling",
     min_presence: "Minimum files per feature", holdout: "Held-out anchor check", quant: "Main table value",
     keep_cache: "Keep the point-cloud cache", no_report: "Interactive report (report.html)",
+    library: "Spectral library (.msp or .pkl, optional)", similarity: "Similarity score", min_similarity: "Minimum similarity",
+    precursor_ppm: "Precursor tolerance (ppm)", fragment_tol: "Fragment tolerance (Da)",
   };
   const HELP = {
     cores: "Files are picked in parallel; each worker holds one file in memory (about 0.5–1.5 GB).",
@@ -41,9 +49,10 @@
     keep_cache: "Keeps .cache/ (large) so `peak3d align` can re-run alignment without re-picking.",
     set: "One NAME=VALUE per line; advanced picker parameters.",
     no_report: "A single HTML file with these views and chromatograms; opens in any browser, easy to share.",
+    library: "MS2 spectra are mapped to the features; with a library, each is searched against it after the run.",
   };
   const INVERTED = new Set(["no_rt_correction", "no_gap_fill", "no_report"]);
-  const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill"];
+  const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];
   const SEGMENTS = { polarity: [[null, "Auto"], ["pos", "Positive"], ["neg", "Negative"]], quant: [["height", "Height"], ["area", "Area"]] };
 
   function stamp() {
@@ -70,6 +79,17 @@
     pageEl.replaceChildren();
     scroll.scrollTop = 0;
     (page === "run" ? runPage : resultsPage)();
+  }
+  // the badge at the top right: the picker variant for peak3d, else the kernel and its version
+  let variantNote = null;
+  function paintVariant() {
+    const chip = document.getElementById("variant");
+    if (!chip) return;
+    if (variantNote == null) variantNote = chip.title;
+    const k = S.kernel, st = kernelInfo(k);
+    chip.querySelector(".variant-k").textContent = k === "peak3d" ? "variant" : "kernel";
+    document.getElementById("variant-v").textContent = k === "peak3d" ? S.info.variant : `${KNAME[k]} ${st.version || ""}`.trim();
+    chip.title = k === "peak3d" ? variantNote : `Feature detection by ${KNAME[k]}${st.version ? " " + st.version : ""}${st.available ? "" : " (not available on this computer)"}`;
   }
   function setTitle(t, sub) {
     document.getElementById("page-title").textContent = t;
@@ -123,8 +143,19 @@
       return h("div", h("div.label-medium", { style: { color: "var(--ink-2)", marginBottom: "6px" } }, label),
         segmented(SEGMENTS[f.dest], S.form[f.dest], set), help && f.dest !== "quant" ? h("div.body-small.muted", { style: { marginTop: "5px" } }, help) : null);
     }
+    if (f.dest === "library") {
+      const t = textField(label, S.form.library, {
+        lead: "description", help,
+        trail: h("button.icon-btn.state", { type: "button", title: "Browse", "aria-label": "Browse for a .msp or .pkl library",
+          onclick: () => browse("msp", S.form.library ? dirname(S.form.library) : S.input, (p) => { t.input.value = p; setLib(p); }) }, icon("folder_open")),
+        oninput: (v) => setLib(v.trim()),
+      });
+      const setLib = (v) => { S.form.library = v || null; P3.storeSet("peak3d-id-library", v || ""); onAny(); };
+      return t.el;
+    }
     if (f.kind === "choice") {
-      const sel = h("select", f.choices.map((c) => h("option", { value: c }, c)));
+      const names = f.dest === "similarity" ? S.info.methods || {} : {};
+      const sel = h("select", f.choices.map((c) => h("option", { value: c }, names[c] || c)));
       sel.value = S.form[f.dest];
       sel.addEventListener("change", () => set(sel.value));
       return h("div.field", h("div.box", sel, h("label", label), h("span.select-arrow", icon("expand_more"))), h("div.support", help));
@@ -157,8 +188,8 @@
   }
 
   function argvPreview() {
-    const parts = ["peak3d", "process", "--input", q(S.input || "<folder>"), "--output", q(S.output || "<folder>")];
-    for (const f of S.schema) {
+    const parts = ["peak3d", ...(S.kernel === "peak3d" ? ["process"] : ["external", "--kernel", S.kernel]), "--input", q(S.input || "<folder>"), "--output", q(S.output || "<folder>")];
+    for (const f of schemaOf(S.kernel)) {
       const v = S.form[f.dest];
       if (f.kind === "flag") { if (v) parts.push(f.flag); }
       else if (f.kind === "list") (v || []).forEach((x) => parts.push(f.flag, q(x)));
@@ -169,15 +200,31 @@
   const q = (s) => (/^[\w./:=+@%,\\-]+$/.test(String(s)) ? String(s) : `"${String(s).replace(/"/g, '\\"')}"`);
 
   // ---------------------------------------------------------------- run page
+  const INTRO = {
+    peak3d: "Choose a folder of centroided .mzML files. peak3d picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library.",
+    asari: "Choose a folder of centroided .mzML files. asari detects and aligns the features with its own defaults; peak3d then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
+    masscube: "Choose a folder of centroided .mzML files. MassCube runs its default untargeted workflow; peak3d then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
+  };
   function runPage() {
     setTitle("New run");
+    paintVariant();
     const page = h("div.page");
     pageEl.appendChild(page);
-    page.appendChild(h("p.page-intro", "Choose a folder of centroided MS1 .mzML files. peak3d picks every file, aligns the runs on their own features, and writes one feature table with an interactive report."));
+    const kst = kernelInfo(S.kernel);
+    const tabs = h("div.tabs.kernel-tabs", { role: "tablist", "aria-label": "Kernel" }, KERNELS.map(([k, name, ic]) => {
+      const st = kernelInfo(k);
+      return h("button.tab.state", { type: "button", role: "tab", "aria-selected": String(k === S.kernel), title: st.available ? `${name} ${st.version || ""}`.trim() : `${name}: not available on this computer`,
+        onclick: () => { if (k !== S.kernel) { S.kernel = k; P3.storeSet("peak3d-kernel", k); go("run"); } } },
+        icon(ic), name, st.version && k !== "peak3d" ? h("span.tab-note", st.version) : null, st.available ? null : h("span.tab-note", "off"));
+    }));
+    page.appendChild(h("div.kernel-bar", h("span.label-medium.muted", "Kernel"), tabs));
+    page.appendChild(h("p.page-intro", INTRO[S.kernel]));
+    if (!kst.available) page.appendChild(h("div.banner.error", { style: { marginBottom: "16px" } }, icon("error"),
+      h("div.body-medium", `${KNAME[S.kernel]} is not available on this computer. ${kst.note || ""}`)));
     const main = h("div.stack"), side = h("div.run-side");
     page.appendChild(h("div.run-layout", main, side));
 
-    const runBtn = h("button.btn.filled.lg.block.state", { type: "button" }, icon("play_arrow"), "Run peak3d");
+    const runBtn = h("button.btn.filled.lg.block.state", { type: "button" }, icon("play_arrow"), "Run " + KNAME[S.kernel]);
     const cmd = h("code");
     const sumIn = h("dd"), sumOut = h("dd", { style: { fontFamily: "var(--mono)", fontSize: "12px" } }), sumCores = h("dd");
     const refresh = () => {
@@ -188,7 +235,7 @@
       sumOut.textContent = S.output ? basename(S.output) : "–";
       sumOut.title = S.output || "";
       sumCores.textContent = S.form.cores != null ? String(S.form.cores) : "–";
-      const bad = !n || !S.output || Object.values(S.formErrors).some(Boolean);
+      const bad = !n || !S.output || !kst.available || schemaOf(S.kernel).some((f) => S.formErrors[f.dest]);
       runBtn.disabled = bad;
     };
 
@@ -251,7 +298,7 @@
         h("span.body-small.muted", { style: { flex: "1", minWidth: "200px" } }, "No mzML files at hand? This writes three small synthetic LC-MS runs into a peak3d_example folder."))));
 
     const basic = h("div.form"), adv = h("div.form");
-    for (const f of S.schema) (BASIC.includes(f.dest) ? basic : adv).appendChild(fieldFor(f, refresh));
+    for (const f of schemaOf(S.kernel)) (BASIC.includes(f.dest) ? basic : adv).appendChild(fieldFor(f, refresh));
     main.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Settings")), basic,
       h("details.expand", { style: { marginTop: "14px" } }, h("summary.state", icon("tune"), "Advanced options", h("span.spacer"), icon("expand_more", "chev")), h("div.form", { style: { padding: "12px 0 0" } }, adv))));
 
@@ -259,7 +306,8 @@
       (navigator.clipboard ? navigator.clipboard.writeText(cmd.textContent) : Promise.reject()).then(() => snack("Command copied"), () => snack("Copy failed; select the text instead"));
     } }, icon("content_copy"));
     side.appendChild(h("section.card.elevated.summary", h("div.card-head", h("h3.title-medium", "Run")),
-      h("dl.kv.body-medium", h("dt", "Input"), sumIn, h("dt", "Output"), sumOut, h("dt", "CPU cores"), sumCores),
+      h("dl.kv.body-medium", h("dt", "Kernel"), h("dd", `${KNAME[S.kernel]} ${S.kernel === "peak3d" ? "(" + S.info.variant + ")" : kst.version || ""}`.trim()),
+        h("dt", "Input"), sumIn, h("dt", "Output"), sumOut, h("dt", "CPU cores"), sumCores),
       runBtn,
       h("div.label-medium.muted", { style: { margin: "16px 0 6px" } }, "Equivalent command"), h("div.cmd", cmd, copyBtn)));
     runBtn.addEventListener("click", () => start(false));
@@ -271,7 +319,7 @@
     async function start(overwrite) {
       runBtn.disabled = true;
       try {
-        const r = await post("/api/runs", { input: S.input, output: S.output, options: S.form, overwrite });
+        const r = await post("/api/runs", { kernel: S.kernel, input: S.input, output: S.output, options: S.form, overwrite });
         S.runs.set(r.id, { status: r, log: r.log || [] });
         renderRuns();
         poll(r.id);
@@ -297,6 +345,9 @@
 
   // ---------------------------------------------------------------- runs
   const STEPS = [["compile", "Compile"], ["pick", "Pick files"], ["align", "Align"], ["group", "Group"], ["fill", "Gap-fill"], ["report", "Report"]];
+  const stepsOf = (k) => (!k || k === "peak3d" ? STEPS : [["pick", "Run " + KNAME[k]], ["group", "Convert"], ["fill", "Chromatograms & MS2"], ["report", "Report"]]);
+  const EXTERNAL_TEXT = { compile: () => "Starting…", pick: (k) => `Running ${KNAME[k]} (its own progress is in the log)…`, group: () => "Converting the feature table…",
+    fill: () => "Reading the files for chromatograms and MS2…" };
   const STAGE_TEXT = {
     compile: "Compiling the picker (the first run on a machine takes about a minute)…", pick: "Picking features in each file…",
     align: "Aligning retention times…", group: "Grouping features across files…", fill: "Filling gaps from the chromatograms…",
@@ -312,18 +363,21 @@
   function runCard(R) {
     const s = R.status;
     const running = s.state === "running";
-    const stIdx = Math.max(0, STEPS.findIndex(([k]) => k === (s.stage === "write" ? "fill" : s.stage)));
+    const steps0 = stepsOf(s.kernel);
+    const stIdx = Math.max(0, steps0.findIndex(([k]) => k === (s.stage === "write" ? "fill" : s.stage)));
     const head = h("div.row", { style: { alignItems: "flex-start" } },
-      h("div", { style: { flex: 1, minWidth: 0 } }, h("div.title-small", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, `${basename(s.input)} · ${int(s.n_files)} files`),
+      h("div", { style: { flex: 1, minWidth: 0 } }, h("div.title-small", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+        `${basename(s.input)} · ${int(s.n_files)} files${s.kernel && s.kernel !== "peak3d" ? " · " + KNAME[s.kernel] : ""}`),
         h("div.body-small.muted", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: s.output }, "→ " + basename(s.output))),
       h("span.chip.static" + (s.state === "done" ? ".ok" : s.state === "failed" ? ".warn" : ".info"), s.state === "done" ? "Done" : s.state === "failed" ? "Failed" : s.state === "cancelled" ? "Cancelled" : duration(s.elapsed)));
     const prog = h("div.progress" + (running && s.stage === "compile" ? ".indeterminate" : ""), h("div.bar", { style: { width: `${Math.round(100 * s.progress)}%` } }));
-    const steps = h("div.steps", STEPS.map(([k, label], i) => {
+    const steps = h("div.steps", steps0.map(([k, label], i) => {
       const done = s.state === "done" || i < stIdx, active = running && i === stIdx;
       return h("span.step" + (done ? ".done" : active ? ".active" : ""), done ? icon("check") : h("span.dot"),
         k === "pick" && s.picked != null && running && i === stIdx ? `${label} ${s.picked}/${s.n_files}` : label);
     }));
-    const text = h("p.body-small.muted", s.state === "done" ? `Finished in ${duration(s.elapsed)}` : STAGE_TEXT[s.stage] || s.stage);
+    const ext = s.kernel && s.kernel !== "peak3d" && EXTERNAL_TEXT[s.stage];
+    const text = h("p.body-small.muted", s.state === "done" ? `Finished in ${duration(s.elapsed)}` : ext ? ext(s.kernel) : STAGE_TEXT[s.stage] || s.stage);
     const logPre = h("pre.log", R.log.slice(-400).join("\n"));
     const logBox = h("details.expand", { open: R.logOpen || null, ontoggle: (e) => (R.logOpen = e.target.open) }, h("summary.state", icon("description"), "Log", h("span.spacer"), icon("expand_more", "chev")), logPre);
     const actions = h("div.row.wrap", { style: { marginTop: "10px" } });
@@ -409,13 +463,16 @@
     const actions = document.getElementById("bar-actions");
     const reveal = { Darwin: "Show in Finder", Windows: "Show in File Explorer" }[S.info.platform] || "Open the output folder";
     const fileUrl = (name) => `/api/results/file?path=${enc(path)}&name=${name}`;
-    const addActions = (quant) => {
+    const addActions = (quant, hd) => {
       const other = quant === "area" ? "height" : "area";
+      hd = hd || {};
       actions.replaceChildren(
         h("a.icon-btn.state", { href: `/api/results/report?path=${enc(path)}`, target: "_blank", rel: "noopener", title: "Open report.html in a new tab", "aria-label": "Open report" }, icon("open_in_new")),
         menuButton("download", "Download", [
           { icon: "table_rows", label: `Feature table (${quant}s)`, href: fileUrl("aligned_feature_table.tsv") },
-          { icon: "table_rows", label: `Feature table (${other}s)`, href: fileUrl(`aligned_feature_${other}.tsv`) },
+          ...(!hd.kernel || hd.kernel === "peak3d" ? [{ icon: "table_rows", label: `Feature table (${other}s)`, href: fileUrl(`aligned_feature_${other}.tsv`) }] : []),
+          ...(hd.ms2 ? [{ icon: "bar_chart", label: "MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_spectra.msp") }] : []),
+          ...(hd.ids ? [{ icon: "table_rows", label: "Library hits (identifications.tsv)", href: fileUrl("identifications.tsv") }] : []),
           { icon: "description", label: "Report (one HTML file to share)", href: `/api/results/report?path=${enc(path)}&download=1` },
           "-",
           { icon: "folder", label: reveal, run: () => post("/api/results/reveal", { path }).catch((e) => snack(e.message)) },
@@ -429,10 +486,26 @@
     try {
       const raw = await api(`/api/results/bundle?path=${enc(path)}`);
       const b = await P3.loadBundle(raw);
+      const ms2 = async () => P3.loadBundle(await api(`/api/results/ms2ids?path=${enc(path)}`));
+      try {      // the MS2 and library hits as they are now (the report's copy can predate a search)
+        const m = await ms2();
+        for (const k of Object.keys(b.a)) if (k.startsWith("ms2_") || k.startsWith("id_")) delete b.a[k];
+        Object.assign(b.a, m.a);
+        b.header.ms2 = m.header.ms2;
+        b.header.ids = m.header.ids;
+      } catch (e) { /* keep the bundle's own copy */ }
       if (S.page !== "results" || S.resultsPath !== path) return;
-      addActions(b.header.quant === "area" ? "area" : "height");
+      const quant = b.header.quant === "area" ? "area" : "height";
+      addActions(quant, b.header);
       const exportTable = async (ids) => new Blob([await api("/api/results/table", { method: "POST", body: JSON.stringify({ path, ids }) })], { type: "text/tab-separated-values" });
-      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable });
+      const identify = async (params) => {
+        await post("/api/results/identify", Object.assign({ path }, params));
+        const m = await ms2();
+        addActions(quant, Object.assign({}, b.header, m.header));
+        return m;
+      };
+      const browseLibrary = (start, done) => browse("msp", start ? dirname(start) : S.input || "", done);
+      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, identify, browseLibrary, methods: S.info.methods || {} });
     } catch (e) {
       holder.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "16px" } }, icon("error"), h("div", e.message))));
     }
@@ -441,8 +514,8 @@
   // ---------------------------------------------------------------- dialogs
   function browse(mode, start, done) {
     const dlg = document.getElementById("browse");
-    const titles = { input: "Choose the mzML folder", output: "Choose where to write results", results: "Choose a results folder" };
-    let cur = null;
+    const titles = { input: "Choose the mzML folder", output: "Choose where to write results", results: "Choose a results folder", msp: "Choose a spectral library (.msp or MassCube .pkl)" };
+    let cur = null, file = null;
     const pathField = textField("Folder", start || "", { lead: "folder_open", onchange: (v) => load(v.trim()) });
     pathField.input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); load(pathField.input.value.trim()); } });
     const list = h("div.list");
@@ -450,20 +523,28 @@
     const ok = h("button.btn.filled.state", { type: "button" }, "Select");
     const cancel = h("button.btn.text.state", { type: "button", onclick: () => dlg.close() }, "Cancel");
     dlg.replaceChildren(h("div.dialog-head", h("h2.headline-small", titles[mode]), pathField.el), h("div.dialog-body", list), h("div.divider"), h("div.dialog-actions", status, cancel, ok));
-    ok.addEventListener("click", () => { if (cur) { dlg.close(); done(cur.path); } });
+    ok.addEventListener("click", () => { if (mode === "msp" ? file : cur) { dlg.close(); done(mode === "msp" ? join(cur.path, file) : cur.path); } });
     async function load(p) {
       list.replaceChildren(h("div.loading", { style: { padding: "32px" } }, P3.spinner()));
+      file = null;
       try {
-        const r = await api(`/api/ls?path=${enc(p)}`);
+        const r = await api(`/api/ls?path=${enc(p)}${mode === "msp" ? "&ext=msp" : ""}`);
         cur = r;
         pathField.input.value = r.path;
         pathField.setError(null);
         const items = [];
         if (r.parent != null) items.push(h("button.list-item.state", { type: "button", onclick: () => load(r.parent) }, icon("arrow_back"), h("div.text", h("div.headline", "Up one level"))));
         for (const d of r.dirs) items.push(h("button.list-item.state", { type: "button", onclick: () => load(r.path ? join(r.path, d) : d) }, icon("folder"), h("div.text", h("div.headline", d)), icon("chevron_right")));
-        if (!r.dirs.length) items.push(h("div.list-item", h("div.text.muted", "No subfolders")));
+        if (mode === "msp") for (const f of r.files || []) {
+          const it = h("button.list-item.state", { type: "button", "aria-selected": "false",
+            onclick: () => { file = f; list.querySelectorAll("[data-file]").forEach((e) => e.setAttribute("aria-selected", String(e === it))); ok.disabled = false; status.textContent = f; },
+            ondblclick: () => { file = f; ok.click(); }, "data-file": f }, icon("description"), h("div.text", h("div.headline", f)));
+          items.push(it);
+        }
+        if (!r.dirs.length && !(mode === "msp" && (r.files || []).length)) items.push(h("div.list-item", h("div.text.muted", mode === "msp" ? "No subfolders or library files" : "No subfolders")));
         list.replaceChildren(...items);
-        if (mode === "input") { ok.disabled = !r.n_mzml; status.textContent = r.n_mzml ? `${int(r.n_mzml)} mzML files here` : "No mzML files here"; }
+        if (mode === "msp") { ok.disabled = true; status.textContent = (r.files || []).length ? `${int(r.files.length)} library file${r.files.length > 1 ? "s" : ""} here: pick one` : "No .msp or .pkl files here"; }
+        else if (mode === "input") { ok.disabled = !r.n_mzml; status.textContent = r.n_mzml ? `${int(r.n_mzml)} mzML files here` : "No mzML files here"; }
         else if (mode === "results") { ok.disabled = !r.is_output; status.textContent = r.is_output ? "peak3d results here" : "No peak3d results here"; }
         else { ok.disabled = !r.path || r.writable === false; status.textContent = r.writable === false ? "Not writable" : "Results go in a new subfolder here"; }
       } catch (e) {
@@ -489,14 +570,17 @@
   // ---------------------------------------------------------------- start
   (async function init() {
     try {
-      [S.info, S.schema] = await Promise.all([api("/api/info"), api("/api/schema")]);
+      [S.info, S.schemas.peak3d, S.schemas.external] = await Promise.all([api("/api/info"), api("/api/schema"), api("/api/schema?kernel=asari")]);
     } catch (e) {
       pageEl.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "24px" } }, icon("error"), h("div", "Cannot reach the peak3d server: " + e.message))));
       return;
     }
     S.formErrors = {};
-    for (const f of S.schema) S.form[f.dest] = f.kind === "list" ? [] : f.default;
+    for (const f of [...S.schemas.peak3d, ...S.schemas.external]) if (!(f.dest in S.form)) S.form[f.dest] = f.kind === "list" ? [] : f.default;
     if ("cores" in S.form) S.form.cores = Math.max(1, Math.min(S.info.cpu_count || 1, 4));
+    if ("library" in S.form) S.form.library = P3.storeGet("peak3d-id-library") || null;     // search automatically with the last library
+    const k = P3.storeGet("peak3d-kernel");
+    if (k && KNAME[k]) S.kernel = k;
     try {
       for (const r of await api("/api/runs")) { S.runs.set(r.id, { status: r, log: r.log || [] }); if (r.state === "running") poll(r.id); }
     } catch (e) { /* none */ }

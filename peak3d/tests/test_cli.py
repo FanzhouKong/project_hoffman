@@ -78,7 +78,7 @@ def test_end_to_end_process_and_align(tmp_path):
     others = s[s["role"] != "medoid"]
     assert (others["mad_after_s"] < others["mad_before_s"]).all()
     p = json.loads((out / "params.json").read_text())
-    assert p["alignment"] == "ok" and "stage_times_s" in p
+    assert p["alignment"] == "ok" and "stage_times_s" in p and p["variant"] == "GLRS"
     # heights are untouched by alignment: features table height equals the matrix entry
     f0 = pd.read_csv(out / "features/S0.tsv", sep="\t")
     g = f0.iloc[0]
@@ -88,7 +88,7 @@ def test_end_to_end_process_and_align(tmp_path):
     r = _run("align", "--output", str(out2), "--no-rt-correction", "--no-gap-fill")
     assert r.returncode == 0, r.stderr + r.stdout
     p2 = json.loads((out / "params.json").read_text())
-    assert p2["alignment"] == "disabled"
+    assert p2["alignment"] == "disabled" and p2["variant"] == "GLRS"     # align keeps the variant that picked
     m = pd.read_csv(out / "filled_mask.tsv", sep="\t")
     t2 = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
     assert ((t2[["S0", "S1", "S2"]].values == 0) >= m[["S0", "S1", "S2"]].values.astype(bool)).all()

@@ -42,3 +42,23 @@ def read_bundle(report: Path) -> bytes | None:
     """the gzip'd bundle embedded in a report.html, or None"""
     m = DATA_RE.search(Path(report).read_bytes())
     return base64.b64decode(re.sub(rb"\s", b"", m.group(1))) if m else None
+
+
+def refresh_ids(output) -> bool:
+    """swap the MS2 and identification parts of <output>/report.html's bundle for the current files (after a new
+    identity search), keeping everything else, chromatograms included (their cache is usually gone by then);
+    False when there is no report to update"""
+    output = Path(output)
+    rep = output / "report.html"
+    blob = read_bundle(rep) if rep.exists() else None
+    if blob is None:
+        return False
+    header, arrays = bundle.unpack(gzip.decompress(blob))
+    arrays = {k: v for k, v in arrays.items() if not k.startswith(("ms2_", "id_"))}
+    for k in ("ms2", "ids", "ms2_note"):
+        header.pop(k, None)
+    head, extra = bundle.ms2_ids(output, arrays["g_id"])
+    arrays.update(extra)
+    blob = gzip.compress(bundle.pack(bundle._clean({**header, **head}), arrays), compresslevel=6, mtime=0)
+    rep.write_text(render(blob, f"peak3d · {output.resolve().name}"), encoding="utf-8")
+    return True
