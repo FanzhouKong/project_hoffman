@@ -193,15 +193,53 @@ def _precursor_mz(spec) -> float:
         return float("nan")
 
 
+def _isolation_window(spec):
+    """(lower, upper) m/z bounds of an MS2 spectrum's isolation window, (nan, nan) when the file does not say"""
+    try:
+        w = spec["precursorList"]["precursor"][0]["isolationWindow"]
+        t = float(w["isolation window target m/z"])
+        return t - float(w["isolation window lower offset"]), t + float(w["isolation window upper offset"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return float("nan"), float("nan")
+
+
+ISOTOPE_DA = 1.003355          # 13C - 12C
+PRECURSOR_PPM, PRECURSOR_DA = 10.0, 0.003
+
+
+def precursor_in_ms1(mz, inten, prec, lo, hi, ppm: float = PRECURSOR_PPM, da: float = PRECURSOR_DA):
+    """(intensity, purity) of an MS2 precursor in the MS1 scan before it: the strongest MS1 peak within max(ppm,
+    da) of the precursor m/z (0 when there is none), and that ion's share of all MS1 intensity in the isolation
+    window [lo, hi], counting its own 13C isotopes (charge 1) as its own; purity is nan when the window is unknown"""
+    if mz is None or not np.isfinite(prec):
+        return float("nan"), float("nan")
+    tol = max(prec * ppm * 1e-6, da)
+    near = np.abs(mz - prec) <= tol
+    p_int = float(inten[near].max()) if near.any() else 0.0
+    if not (np.isfinite(lo) and np.isfinite(hi)) or p_int <= 0:
+        return p_int, float("nan")
+    win = (mz >= lo) & (mz <= hi)
+    total = float(inten[win].sum())
+    own = p_int
+    for k in (1, 2, 3):
+        if prec + k * ISOTOPE_DA > hi:
+            break
+        iso = win & (np.abs(mz - (prec + k * ISOTOPE_DA)) <= tol)
+        if iso.any():
+            own += float(inten[iso].max())
+    return p_int, (min(1.0, own / total) if total > 0 else float("nan"))
+
+
 def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cloud:
     """Read MS1 centroids of an mzML file into a Cloud.
 
     polarity: None = require a single polarity in the file (raise on polarity switching),
     "pos"/"neg" = keep only that polarity.
     ms2: a list to collect the file's centroided MS2 spectra into, in the same pass (the parser decodes them
-    anyway): (scan id, rt, precursor m/z, polarity, m/z array, intensity array) with rt in minutes by the same
-    rule as the MS1 scans. Empty and profile-mode MS2 spectra are skipped and counted in ``ms2.n_skipped`` when
-    the collector has that attribute (ms2.Collector)."""
+    anyway): (scan id, rt, precursor m/z, polarity, precursor intensity, precursor purity, m/z array, intensity
+    array) with rt in minutes by the same rule as the MS1 scans; precursor intensity and purity are measured in the
+    last MS1 scan before the spectrum (precursor_in_ms1). Empty and profile-mode MS2 spectra are skipped and
+    counted in ``ms2.n_skipped`` when the collector has that attribute (ms2.Collector)."""
     from pyteomics import mzml
 
     want = {"pos": "positive scan", "neg": "negative scan"}.get(polarity)
@@ -209,6 +247,7 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
     seen = set()
     n_ms1 = n_profile = 0
     found = []
+    last_mz = last_int = None      # the last MS1 scan kept, for the precursor of the MS2 spectra after it
     with mzml.read(str(path), use_index=False) as reader:
         for s in reader:
             level = s.get("ms level")
@@ -220,7 +259,9 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
                             ms2.n_skipped += 1
                         continue
                     pol = "neg" if "negative scan" in s else ("pos" if "positive scan" in s else "")
-                    found.append((str(s.get("id", "")), _scan_rt_minutes(s), _precursor_mz(s), pol,
+                    prec = _precursor_mz(s)
+                    p_int, purity = precursor_in_ms1(last_mz, last_int, prec, *_isolation_window(s))
+                    found.append((str(s.get("id", "")), _scan_rt_minutes(s), prec, pol, p_int, purity,
                                   np.asarray(m, dtype=np.float64), np.asarray(s["intensity array"], dtype=np.float32)))
                 continue
             n_ms1 += 1
@@ -232,6 +273,7 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
             rts.append(_scan_rt_minutes(s))
             mzs.append(s["m/z array"])
             intens.append(s["intensity array"])
+            last_mz, last_int = mzs[-1], intens[-1]
     if n_ms1 and n_profile == n_ms1:
         raise ValueError(f"{path}: MS1 spectra are profile mode; peak3d needs centroided MS1 "
                          f"(convert with msconvert --filter \"peakPicking vendor msLevel=1\")")
@@ -243,6 +285,6 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
     if seconds:
         rt = rt / 60.0
     if ms2 is not None:
-        ms2.extend((sid, t / 60.0 if seconds else t, p, pl, m, i) for sid, t, p, pl, m, i in found)
+        ms2.extend((sid, t / 60.0 if seconds else t, *rest) for sid, t, *rest in found)
     pol = polarity or (next(iter(pols)) if pols else "")
     return from_scans(Path(path).stem, rt, mzs, intens, pol)

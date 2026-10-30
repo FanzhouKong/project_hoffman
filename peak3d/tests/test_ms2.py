@@ -34,8 +34,9 @@ def test_ms2_collected_in_the_ms1_pass(tmp_path):
     plain = load_cloud(p)
     assert back.n_scans == cloud.n_scans and np.allclose(back.mz, plain.mz) and np.allclose(back.rt, plain.rt)
     assert len(col) == 2 and col.n_skipped == 1                          # the empty spectrum is skipped
-    sid, rt, prec, pol, mz, it = col[0]
+    sid, rt, prec, pol, p_int, purity, mz, it = col[0]
     assert sid.startswith("scan=") and rt == pytest.approx(0.5, abs=1e-6) and prec == pytest.approx(300.0012)
+    assert p_int >= 0 and np.isnan(purity)                              # the test writer gives no window offsets
     assert pol == "pos" and np.allclose(mz, m) and np.allclose(it, i) and it.dtype == np.float32
     s = ms2.from_collected(col, back.polarity)
     assert len(s) == 2 and s.polarity == "pos" and np.diff(s.off).tolist() == [6, 6]
@@ -43,6 +44,7 @@ def test_ms2_collected_in_the_ms1_pass(tmp_path):
     ms2.save(s, tmp_path / "m.npz")
     r = ms2.load(tmp_path / "m.npz")
     assert r.scan.tolist() == s.scan.tolist() and np.allclose(r.mz, s.mz) and r.polarity == "pos"
+    assert np.array_equal(r.prec_int, s.prec_int) and np.isnan(r.purity).all()
 
 
 @pytest.mark.parametrize("unit", ["second", None])
@@ -66,10 +68,11 @@ def _fake_output(tmp_path):
                   "A": [1e5, 5e5, 1e5], "B": [1e5, 0.0, 1e5]}).to_csv(out / "aligned_feature_table.tsv", sep="\t", index=False)
     m, i = _frag(3)
     big = i * 10
-    a = [("scan=1", 1.01, 300.0005, "pos", m, i), ("scan=2", 2.0, 400.0, "pos", m, big),
-         ("scan=3", 2.01, 400.0, "pos", m, i), ("scan=4", 1.0, 500.0, "pos", m, i)]
-    b = [("controllerType=0 controllerNumber=1 scan=5", 0.91, 300.0005, "pos", m, i),   # 1.01 corrected
-         ("scan=6", 1.9, 400.0, "pos", m, i * 100)]                     # 1.9 native = 2.0 corrected
+    nan = float("nan")
+    a = [("scan=1", 1.01, 300.0005, "pos", nan, nan, m, i), ("scan=2", 2.0, 400.0, "pos", nan, nan, m, big),
+         ("scan=3", 2.01, 400.0, "pos", nan, nan, m, i), ("scan=4", 1.0, 500.0, "pos", nan, nan, m, i)]
+    b = [("controllerType=0 controllerNumber=1 scan=5", 0.91, 300.0005, "pos", nan, nan, m, i),   # 1.01 corrected
+         ("scan=6", 1.9, 400.0, "pos", nan, nan, m, i * 100)]                     # 1.9 native = 2.0 corrected
     ms2.save(ms2.from_collected(a, "pos"), out / "ms2" / "A.npz")
     ms2.save(ms2.from_collected(b, "pos"), out / "ms2" / "B.npz")
     (out / "rt_correction").mkdir()
@@ -97,6 +100,13 @@ def test_map_to_groups(tmp_path):
     assert np.allclose(r["mz"][r["off"][0]:r["off"][1]], m)
     lib = read_msp(out / "ms2_spectra.msp")
     assert lib.names == ["feature_11", "feature_12", "feature_13"]
+    # the consensus copy: all three spectra of feature 13 (same peaks, different scales) merge, from both files
+    c = ms2.read_representatives(out, "consensus")
+    assert c["group_id"].tolist() == [11, 12, 13] and c["n_merged"].tolist() == [1, 1, 3]
+    assert c["n_files"].tolist() == [1, 1, 2]
+    assert np.allclose(c["mz"][c["off"][2]:c["off"][3]], m, atol=1e-6)
+    assert t.loc[t["group_id"] == 13, "in_consensus"].tolist() == [1, 1, 1]
+    assert (t["rt_aligned_s"] - t["rt_s"]).abs().max() == pytest.approx(6.0)        # B's correction: +0.1 min
 
 
 def test_map_without_ms2_removes_stale_files(tmp_path):
@@ -106,6 +116,7 @@ def test_map_without_ms2_removes_stale_files(tmp_path):
         f.unlink()
     assert len(ms2.map_to_groups(out)) == 0
     assert not (out / "ms2_map.tsv").exists() and ms2.read_representatives(out) is None
+    assert not (out / "ms2_consensus.msp").exists()
 
 
 # ------------------------------------------------------------------ end to end ----
@@ -134,10 +145,14 @@ def test_process_maps_ms2_and_identifies(tmp_path):
     assert (out / "ms2" / "S0.npz").exists() and pd.read_csv(out / "features" / "manifest.tsv", sep="\t")["n_ms2"].tolist() == [12, 12]
     t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
     hits = pd.read_csv(out / "identifications.tsv", sep="\t")
-    top = hits[hits["rank"] == 1].merge(t[["group_id", "mz"]], on="group_id")
+    assert set(hits["spectrum"]) == {"consensus", "single"}
+    top = hits[(hits["rank"] == 1) & (hits["spectrum"] == "consensus")].merge(t[["group_id", "mz"]], on="group_id")
     names = {j: f"compound {j}" for j in range(len(base))}
     right = sum(any(abs(row.mz - base[j][0]) < 0.005 and row.name == names[j] for j in range(12)) for row in top.itertuples())
     assert len(top) >= 10 and right == len(top)
+    ann = pd.read_csv(out / "feature_annotations.tsv", sep="\t").set_index("group_id")
+    assert (ann.loc[top["group_id"], "annotation"] == top["name"].to_numpy()).all()
+    assert set(ann.loc[top["group_id"], "source"]) == {"library"}
     info = json.loads((out / "params.json").read_text())
     assert "ms2_s" in info["stage_times_s"] and info["options"]["similarity"] == "entropy"
     # re-search with another score through the identify command

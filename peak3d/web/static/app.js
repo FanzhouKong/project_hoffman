@@ -49,7 +49,7 @@
     keep_cache: "Keeps .cache/ (large) so `peak3d align` can re-run alignment without re-picking.",
     set: "One NAME=VALUE per line; advanced picker parameters.",
     no_report: "A single HTML file with these views and chromatograms; opens in any browser, easy to share.",
-    library: "MS2 spectra are mapped to the features; with a library, each is searched against it after the run.",
+    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with a library, both are searched after the run and the best consensus hit becomes each feature's annotation.",
   };
   const INVERTED = new Set(["no_rt_correction", "no_gap_fill", "no_report"]);
   const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];
@@ -471,8 +471,10 @@
         menuButton("download", "Download", [
           { icon: "table_rows", label: `Feature table (${quant}s)`, href: fileUrl("aligned_feature_table.tsv") },
           ...(!hd.kernel || hd.kernel === "peak3d" ? [{ icon: "table_rows", label: `Feature table (${other}s)`, href: fileUrl(`aligned_feature_${other}.tsv`) }] : []),
-          ...(hd.ms2 ? [{ icon: "bar_chart", label: "MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_spectra.msp") }] : []),
-          ...(hd.ids ? [{ icon: "table_rows", label: "Library hits (identifications.tsv)", href: fileUrl("identifications.tsv") }] : []),
+          ...(hd.ms2c ? [{ icon: "bar_chart", label: "Consensus MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_consensus.msp") }] : []),
+          ...(hd.ms2 ? [{ icon: "bar_chart", label: "Highest-TIC MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_spectra.msp") }] : []),
+          ...(hd.ids ? [{ icon: "table_rows", label: "Library hits, both spectra (identifications.tsv)", href: fileUrl("identifications.tsv") }] : []),
+          ...(hd.ids || hd.ann ? [{ icon: "table_rows", label: "Annotations (feature_annotations.tsv)", href: fileUrl("feature_annotations.tsv") }] : []),
           { icon: "description", label: "Report (one HTML file to share)", href: `/api/results/report?path=${enc(path)}&download=1` },
           "-",
           { icon: "folder", label: reveal, run: () => post("/api/results/reveal", { path }).catch((e) => snack(e.message)) },
@@ -489,23 +491,30 @@
       const ms2 = async () => P3.loadBundle(await api(`/api/results/ms2ids?path=${enc(path)}`));
       try {      // the MS2 and library hits as they are now (the report's copy can predate a search)
         const m = await ms2();
-        for (const k of Object.keys(b.a)) if (k.startsWith("ms2_") || k.startsWith("id_")) delete b.a[k];
+        for (const k of Object.keys(b.a)) if (/^(ms2_|ms2c_|id_|mk_)/.test(k)) delete b.a[k];
         Object.assign(b.a, m.a);
-        b.header.ms2 = m.header.ms2;
-        b.header.ids = m.header.ids;
+        for (const k of ["ms2", "ms2c", "ids", "ann"]) b.header[k] = m.header[k];
       } catch (e) { /* keep the bundle's own copy */ }
       if (S.page !== "results" || S.resultsPath !== path) return;
       const quant = b.header.quant === "area" ? "area" : "height";
-      addActions(quant, b.header);
+      let cur = b.header;              // the header parts the download menu reflects (a search updates them)
+      addActions(quant, cur);
       const exportTable = async (ids) => new Blob([await api("/api/results/table", { method: "POST", body: JSON.stringify({ path, ids }) })], { type: "text/tab-separated-values" });
       const identify = async (params) => {
         await post("/api/results/identify", Object.assign({ path }, params));
         const m = await ms2();
-        addActions(quant, Object.assign({}, b.header, m.header));
+        cur = Object.assign({}, b.header, m.header);
+        addActions(quant, cur);
         return m;
       };
       const browseLibrary = (start, done) => browse("msp", start ? dirname(start) : S.input || "", done);
-      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, identify, browseLibrary, methods: S.info.methods || {} });
+      const annotate = async (group_id, hit) => {
+        const r = await post("/api/results/annotate", { path, group_id, hit });
+        cur = Object.assign({}, cur, { ann: true });
+        addActions(quant, cur);
+        return r;
+      };
+      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, identify, annotate, browseLibrary, methods: S.info.methods || {} });
     } catch (e) {
       holder.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "16px" } }, icon("error"), h("div", e.message))));
     }

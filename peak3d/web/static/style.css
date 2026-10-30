@@ -51,6 +51,7 @@
   --viz-ramp-from: #86b6ef;
   --viz-ramp-to: #0d366b;
   --viz-neutral: #a3a6ae;
+  --viz-ms2: #d9480f;          /* where MS2 spectra were taken: dashed marks on the chromatograms */
   --font-viz: var(--font);
 }
 
@@ -250,6 +251,8 @@ h1, h2, h3, h4, p { margin: 0; }
 .chip.static { cursor: default; height: 22px; padding: 0 8px; border-radius: 11px; border: 0; background: var(--surface-3); color: var(--ink-2); font-size: 11.5px; }
 .chip.static .icon { width: 13px; height: 13px; margin-left: -1px; }
 .chip.ok { background: var(--success-soft); color: var(--success); }
+.chip.info { background: var(--accent-soft); color: var(--accent); }
+.chip.warn { background: #fdf1e3; color: #9a4f08; }
 .chip.warn { background: var(--danger-soft); color: var(--danger); }
 .chip.info { background: var(--accent-soft); color: var(--accent-deep); }
 
@@ -379,6 +382,9 @@ table.data.static tbody tr:hover td { background: none; }
 .chart-legend .key { display: inline-flex; align-items: center; gap: 6px; }
 .chart-legend .swatch { width: 10px; height: 10px; border-radius: 3px; }
 .chart-legend .line-key { width: 16px; height: 2px; border-radius: 1px; }
+.chart-legend .dash-key { width: 18px; height: 0; border-top: 1.5px dashed; }
+.chart-legend .dash-key.bold { border-top-width: 2.5px; }
+.chart-legend .dot-key { width: 8px; height: 8px; border-radius: 50%; }
 .chart-legend .ramp { width: 96px; height: 6px; border-radius: 3px; }
 .tooltip {
   position: absolute; z-index: 5; pointer-events: none; padding: 7px 9px; border-radius: 8px; max-width: 300px;
@@ -478,6 +484,21 @@ td.ident { max-width: 220px; white-space: nowrap; }
 td.ident .id-name { display: inline-block; max-width: 170px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 td.ident .id-score { margin-left: 8px; color: var(--success); font-size: 11.5px; }
 td.muted { color: var(--ink-4); }
+td.score { color: var(--success); font-variant-numeric: tabular-nums; }
+td.score.weak { color: var(--ink-4); }
+td.ident .id-user { margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 10.5px; }
+td.ident.unknown .id-name { font-style: italic; color: var(--ink-3); }
+/* features: mini map beside the filters */
+.filter-row { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; align-items: start; margin: 0 0 4px; }
+.minimap { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); padding: 4px 6px 0; }
+@media (max-width: 860px) { .filter-row { grid-template-columns: minmax(0, 1fr); } }
+/* features: the user's annotation and the hit list */
+.ann-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.ann-name { font: 600 15px/1.35 var(--font); color: var(--ink); }
+.ann-actions { gap: 8px; margin-top: 10px; }
+.copy-pick { margin: 4px 0 8px; }
+.hits.scroll { max-height: 320px; overflow: auto; }
+.hits tr.below td { color: var(--ink-4); }
 .id-card { margin: 4px 0 14px; }
 .id-form { display: grid; grid-template-columns: minmax(220px, 2.4fr) minmax(170px, 1.4fr) repeat(3, minmax(92px, .7fr)) auto; gap: 0 12px; align-items: end; }
 .id-form .id-go { padding-bottom: 1px; }

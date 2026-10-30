@@ -219,6 +219,23 @@
         ctx.beginPath(); ctx.moveTo(x, b.y0); ctx.lineTo(x, b.y1); ctx.stroke();
         ctx.setLineDash([]);
       }
+      // vertical marks {x, color, dash, width} (peak bounds, MS2 times) and dots {x, y, color} (apexes)
+      for (const v of s.vlines || []) {
+        if (!isFinite(v.x)) continue;
+        ctx.strokeStyle = this.color(v.color || P.muted, P);
+        ctx.setLineDash(v.dash || [4, 4]);
+        ctx.lineWidth = v.width || 1;
+        const x = Math.round(this.sx(v.x)) + 0.5;
+        ctx.beginPath(); ctx.moveTo(x, b.y0); ctx.lineTo(x, b.y1); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      for (const d of s.dots || []) {
+        if (!isFinite(d.x) || !isFinite(d.y)) continue;
+        ctx.fillStyle = this.color(d.color, P);
+        ctx.strokeStyle = P.surface;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(this.sx(d.x), this.sy(d.y), d.r || 3.5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+      }
       ctx.restore();
       if (active >= 0 && s.label) {     // direct label on the active series, at its right end
         const r = s.series[active];
@@ -314,12 +331,17 @@
         if (!d) return;
         const [ax, ay] = d.a, [bx, by] = d.b;
         if (Math.abs(ax - bx) > 6 && Math.abs(ay - by) > 6) {
-          this.view = [[this.ix(Math.min(ax, bx)), this.ix(Math.max(ax, bx))], [this.iy(Math.max(ay, by)), this.iy(Math.min(ay, by))]];
+          const xr = [this.ix(Math.min(ax, bx)), this.ix(Math.max(ax, bx))], yr = [this.iy(Math.max(ay, by)), this.iy(Math.min(ay, by))];
+          if (this.spec.onBrush) this.spec.onBrush(xr, yr);       // brush mode: the box sets a filter, the view stays
+          else this.view = [xr, yr];
           this.suppressClick = true;
         }
         this.draw();
       });
-      this.canvas.addEventListener("dblclick", () => { this.view = null; this.draw(); });
+      this.canvas.addEventListener("dblclick", () => {
+        if (this.spec.onBrush) this.spec.onBrush(null, null); else this.view = null;
+        this.draw();
+      });
       this.onClick = ([px, py]) => {
         if (this.suppressClick) { this.suppressClick = false; return; }
         const i = this.pick(px, py);
@@ -358,21 +380,37 @@
       ctx.save();
       ctx.beginPath(); ctx.rect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0); ctx.clip();
       const grid = new Map(), cell = 10;
-      const mask = s.mask;
-      let lastC = -1;
-      for (const i of this.order) {
-        if (mask && !mask[i]) continue;
-        const X = this.sx(s.x[i]), Y = this.sy(s.y[i]);
-        if (X < b.x0 - 3 || X > b.x1 + 3 || Y < b.y0 - 3 || Y > b.y1 + 3) continue;
-        const c = v ? Math.max(0, Math.min(NB - 1, Math.round((v[i] - v0) / (v1 - v0 || 1) * (NB - 1)))) : NB - 1;
-        if (c !== lastC) { ctx.fillStyle = cols[c]; lastC = c; }
-        if (n > 5000) ctx.fillRect(X - r, Y - r, 2 * r, 2 * r);           // dense maps: squares draw fastest
-        else { ctx.beginPath(); ctx.arc(X, Y, r, 0, 2 * Math.PI); ctx.fill(); }
-        const key = Math.floor(X / cell) + "," + Math.floor(Y / cell);
-        const arr = grid.get(key);
-        if (arr) arr.push(i); else grid.set(key, [i]);
+      const mask = s.mask, emph = s.emph;     // emph: 1 = drawn in colour on top, 0 = faint grey underneath
+      for (const pass of emph ? [0, 1] : [1]) {
+        let lastC = -1;
+        if (pass === 0) ctx.fillStyle = rgba(P.neutral, 0.35);
+        for (const i of this.order) {
+          if (mask && !mask[i]) continue;
+          if (emph && (emph[i] ? 1 : 0) !== pass) continue;
+          const X = this.sx(s.x[i]), Y = this.sy(s.y[i]);
+          if (X < b.x0 - 3 || X > b.x1 + 3 || Y < b.y0 - 3 || Y > b.y1 + 3) continue;
+          if (pass) {
+            const c = v ? Math.max(0, Math.min(NB - 1, Math.round((v[i] - v0) / (v1 - v0 || 1) * (NB - 1)))) : NB - 1;
+            if (c !== lastC) { ctx.fillStyle = cols[c]; lastC = c; }
+          }
+          if (n > 5000) ctx.fillRect(X - r, Y - r, 2 * r, 2 * r);           // dense maps: squares draw fastest
+          else { ctx.beginPath(); ctx.arc(X, Y, r, 0, 2 * Math.PI); ctx.fill(); }
+          const key = Math.floor(X / cell) + "," + Math.floor(Y / cell);
+          const arr = grid.get(key);
+          if (arr) arr.push(i); else grid.set(key, [i]);
+        }
       }
       this.grid = grid;
+      if (s.box) {           // the filter window [[x0, x1], [y0, y1]]; open ends run to the edge
+        const [[bx0, bx1], [by0, by1]] = s.box;
+        const X0 = isFinite(bx0) ? this.sx(bx0) : b.x0, X1 = isFinite(bx1) ? this.sx(bx1) : b.x1;
+        const Y0 = isFinite(by1) ? this.sy(by1) : b.y0, Y1 = isFinite(by0) ? this.sy(by0) : b.y1;
+        ctx.strokeStyle = P.s1;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(Math.round(X0) + 0.5, Math.round(Y0) + 0.5, Math.round(X1 - X0), Math.round(Y1 - Y0));
+        ctx.setLineDash([]);
+      }
       const sel = s.selected;
       if (sel != null && sel >= 0) {
         const X = this.sx(s.x[sel]), Y = this.sy(s.y[sel]);
@@ -398,7 +436,7 @@
         ctx.strokeRect(Math.min(ax, bx) + 0.5, Math.min(ay, by) + 0.5, Math.abs(bx - ax), Math.abs(by - ay));
       }
       ctx.restore();
-      this.hint.textContent = this.view ? "Double-click to reset zoom" : "Drag to zoom";
+      this.hint.textContent = s.onBrush ? s.brushHint || "Drag to filter" : this.view ? "Double-click to reset zoom" : "Drag to zoom";
     }
     pick(px, py) {
       if (!this.grid) return null;
@@ -423,7 +461,7 @@
       this.showTip(this.sx(this.spec.x[i]), this.sy(this.spec.y[i]), this.spec.tip ? this.spec.tip(i) : "");
     }
     onLeave() { this.hideTip(); if (this.hoverI != null) { this.hoverI = null; this.draw(); } }
-    update(spec) { if (spec.x || spec.v) this.order = null; super.update(spec); }
+    update(spec) { if (spec.x || spec.v) { this.order = null; this.view = null; } super.update(spec); }
   }
 
   // ---------------------------------------------------------------- bars
@@ -579,6 +617,8 @@
         return h("span.key", it.left || "", h("span.ramp", { style: { background: `linear-gradient(90deg, var(${it.from}), var(${it.to}))` } }), it.right || "");
       }
       if (it.kind === "line") return h("span.key", h("span.line-key", { style: { background: col } }), it.label);
+      if (it.kind === "dash") return h("span.key", h("span.dash-key" + (it.bold ? ".bold" : ""), { style: { borderColor: col } }), it.label);
+      if (it.kind === "dot") return h("span.key", h("span.dot-key", { style: { background: col } }), it.label);
       if (it.kind === "text") return h("span.key", it.label);
       return h("span.key", h("span.swatch", { style: { background: col } }), it.label);
     }));

@@ -196,30 +196,63 @@ def _take(off, arrays, idx):
 
 
 ID_TEXT = ("name", "precursor_type", "formula", "inchikey", "smiles")
+SPEC_CODE = {"consensus": 0, "single": 1}
+# what refresh_ids swaps: these arrays and header keys
+MS2_PREFIXES = ("ms2_", "ms2c_", "id_", "mk_")
+MS2_KEYS = ("ms2", "ms2c", "ids", "ann", "ms2_note")
+
+
+def _spectra(reps, row_of, prefix):
+    """one MS2 copy (ms2.read_representatives) as arrays keyed by table row, and its header part"""
+    k = np.array([i for i, g in enumerate(reps["group_id"]) if int(g) in row_of], np.int64)
+    off, (mz, inten) = _take(np.asarray(reps["off"]), (reps["mz"], reps["inten"]), k)
+    arrays = {f"{prefix}row": np.array([row_of[int(reps["group_id"][i])] for i in k], np.int32),
+              f"{prefix}n": np.clip(np.asarray(reps["n_ms2"])[k], 0, 65535).astype(np.uint16),
+              f"{prefix}merged": np.clip(np.asarray(reps["n_merged"])[k], 0, 65535).astype(np.uint16),
+              f"{prefix}files": np.clip(np.asarray(reps["n_files"])[k], 0, 65535).astype(np.uint16),
+              f"{prefix}prec": np.asarray(reps["prec_mz"], np.float64)[k],
+              f"{prefix}rt": np.asarray(reps["rt_s"], np.float32)[k], f"{prefix}off": off,
+              f"{prefix}mz": mz.astype(np.float32), f"{prefix}int": inten.astype(np.float32)}
+    return arrays, {"n": int(len(k)), "file": [str(reps["file"][i]) for i in k], "scan": [str(reps["scan"][i]) for i in k]}
+
+
+def _marks(output: Path, row_of):
+    """where the spectra of the consensus and the highest-TIC spectrum were taken, on the aligned axis (s):
+    mk_row, mk_t, mk_kind (1 in the consensus, 2 highest TIC, 3 both)"""
+    mp = output / "ms2_map.tsv"
+    if not mp.exists():
+        return {}
+    m = pd.read_csv(mp, sep="\t", dtype={"file": str, "scan": str})
+    if "in_consensus" not in m:
+        m["in_consensus"] = 0
+    t = m["rt_aligned_s"] if "rt_aligned_s" in m else m["rt_s"]
+    kind = m["in_consensus"].fillna(0).astype(int) + 2 * m["representative"].fillna(0).astype(int)
+    keep = (kind > 0) & m["group_id"].isin(list(row_of))
+    return {"mk_row": np.array([row_of[int(g)] for g in m.loc[keep, "group_id"]], np.int32),
+            "mk_t": t[keep].to_numpy(np.float32), "mk_kind": kind[keep].to_numpy(np.uint8)}
 
 
 def ms2_ids(output, group_ids) -> tuple[dict, dict]:
-    """the representative MS2 spectrum of every group that has one (ms2.read_representatives) and the hits of the last
-    identity search (identifications.tsv, .msp, .json), as header parts and arrays keyed by row of the aligned table
-    (group_ids in table order). Header keys ms2 / ids are None when the output has no MS2 / no search"""
+    """both MS2 copies of every group that has MS2 (ms2.read_representatives: the highest-TIC spectrum as ms2_*, the
+    consensus as ms2c_*), where their spectra were taken (mk_*), the hits of the last identity search on both
+    (identifications.tsv, .msp, .json; id_spec 0 consensus, 1 single) and the user's annotations, as header parts and
+    arrays keyed by row of the aligned table (group_ids in table order). Header keys ms2 / ms2c / ids are None when
+    the output has no such part; ann maps a row (as text) to the user's annotation"""
+    from ..annotations import load_user, read_hits
+    from ..ms2 import read_representatives
     output = Path(output)
     row_of = {int(g): i for i, g in enumerate(np.asarray(group_ids))}
-    head, arrays = {"ms2": None, "ids": None}, {}
-    from ..ms2 import read_representatives
-    reps = read_representatives(output)
-    if reps is not None and len(reps["group_id"]):
-        k = np.array([i for i, g in enumerate(reps["group_id"]) if int(g) in row_of], np.int64)
-        off, (mz, inten) = _take(np.asarray(reps["off"]), (reps["mz"], reps["inten"]), k)
-        arrays.update(ms2_row=np.array([row_of[int(reps["group_id"][i])] for i in k], np.int32),
-                      ms2_n=np.clip(np.asarray(reps["n_ms2"])[k], 0, 65535).astype(np.uint16),
-                      ms2_prec=np.asarray(reps["prec_mz"], np.float64)[k],
-                      ms2_rt=np.asarray(reps["rt_s"], np.float32)[k], ms2_off=off,
-                      ms2_mz=mz.astype(np.float32), ms2_int=inten.astype(np.float32))
-        head["ms2"] = {"n": int(len(k)), "file": [str(reps["file"][i]) for i in k],
-                       "scan": [str(reps["scan"][i]) for i in k]}
-    tsv = output / "identifications.tsv"
-    if head["ms2"] is not None and tsv.exists():
-        hits = pd.read_csv(tsv, sep="\t", dtype={c: str for c in ID_TEXT})
+    head, arrays = {"ms2": None, "ms2c": None, "ids": None, "ann": None}, {}
+    for which, key, prefix in (("single", "ms2", "ms2_"), ("consensus", "ms2c", "ms2c_")):
+        reps = read_representatives(output, which)
+        if reps is not None and len(reps["group_id"]):
+            a, head[key] = _spectra(reps, row_of, prefix)
+            arrays.update(a)
+    if head["ms2"] is not None:
+        arrays.update(_marks(output, row_of))
+    hits = read_hits(output) if head["ms2"] is not None else None
+    if hits is not None:
+        hits = hits.copy()                      # read_hits keeps its frame for the next caller
         meta = json.loads((output / "identifications.json").read_text()) if (output / "identifications.json").exists() else {}
         lib = None
         if (output / "identifications.msp").exists():
@@ -229,9 +262,11 @@ def ms2_ids(output, group_ids) -> tuple[dict, dict]:
                 lib = None
         hits["_row"] = [row_of.get(int(g), -1) for g in hits["group_id"]]
         hits["_hit"] = np.arange(len(hits))
-        hits = hits[hits["_row"] >= 0].sort_values(["_row", "rank"], kind="stable")
+        hits["_spec"] = hits["spectrum"].map(SPEC_CODE).fillna(1).astype(np.uint8)
+        hits = hits[hits["_row"] >= 0].sort_values(["_row", "_spec", "rank"], kind="stable")
         num = lambda c, d=np.nan: hits[c].to_numpy(np.float64) if c in hits else np.full(len(hits), d)
-        arrays.update(id_row=hits["_row"].to_numpy(np.int32), id_rank=num("rank", 1).astype(np.uint8),
+        arrays.update(id_row=hits["_row"].to_numpy(np.int32), id_spec=hits["_spec"].to_numpy(np.uint8),
+                      id_rank=np.clip(num("rank", 1), 0, 65535).astype(np.uint16),
                       id_score=num("score").astype(np.float32),
                       id_nmatch=np.clip(np.nan_to_num(num("n_matched", 0)), 0, 65535).astype(np.uint16),
                       id_ppm=num("ppm_error").astype(np.float32), id_prec=num("library_precursor_mz"))
@@ -241,6 +276,9 @@ def ms2_ids(output, group_ids) -> tuple[dict, dict]:
         head["ids"] = {**meta, "n": int(len(hits)), "spectra": lib is not None,
                        **{c: hits[c].fillna("").astype(str).tolist() if c in hits else [""] * len(hits)
                           for c in ID_TEXT}}
+    user = load_user(output)
+    if user:
+        head["ann"] = {str(row_of[g]): v for g, v in user.items() if g in row_of}
     return head, arrays
 
 
@@ -370,7 +408,7 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
         ms2_head, extra = ms2_ids(output, arrays["g_id"])
         arrays.update(extra)
     except Exception as e:   # a damaged MS2 or identification file never costs the rest of the results
-        ms2_head = {"ms2": None, "ids": None, "ms2_note": f"{type(e).__name__}: {e}"}
+        ms2_head = {**{k: None for k in MS2_KEYS}, "ms2_note": f"{type(e).__name__}: {e}"}
 
     header = {"format": FORMAT, "kind": "peak3d-results", "title": output.resolve().name,
               "kernel": params.get("kernel", "peak3d"), "kernel_label": params.get("kernel_label") or params.get("kernel", "peak3d"),

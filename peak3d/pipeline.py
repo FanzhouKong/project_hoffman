@@ -435,7 +435,11 @@ def check_library(args):
 
 def ms2_and_identify(output: Path, args, stage: dict) -> None:
     """MS2 spectra -> features (when the files had any), then the identity search when --library is given;
-    neither fails a finished run"""
+    neither fails a finished run. Called after the groups were (re)built, so the group ids of an earlier search and
+    of the user's annotations no longer hold: the user's annotations are set aside, an earlier search without a
+    library to repeat it is removed"""
+    from .annotations import retire
+    retire(output, keep_search=bool(getattr(args, "library", None)))
     tic = time.perf_counter()
     try:
         from .ms2 import map_to_groups
@@ -465,8 +469,8 @@ def _reidentify(output: Path, stage: dict) -> None:
         args = argparse.Namespace(library=s["library"], similarity=s["method"], precursor_ppm=s["precursor_ppm"],
                                   fragment_tol=s["fragment_tol"], min_similarity=s["min_score"])
     except (OSError, ValueError, KeyError) as e:
-        for name in ("identifications.tsv", "identifications.msp", "identifications.json"):
-            (output / name).unlink(missing_ok=True)
+        from .annotations import retire
+        retire(output, keep_search=False)
         log(f"identifications removed (groups changed, library not available: {e!r})")
         return
     ms2_and_identify(output, args, stage)

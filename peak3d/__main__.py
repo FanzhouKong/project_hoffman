@@ -73,7 +73,9 @@ def build_parser():
                             ("" if required else " (optional)"))
         p.add_argument("--similarity", choices=list(METHODS), default="weighted_entropy",
                        help="spectral similarity score (default weighted_entropy)")
-        p.add_argument("--min-similarity", type=_unit, default=0.7, help="lowest score reported as a hit (default 0.7)")
+        p.add_argument("--min-similarity", type=_unit, default=0.7,
+                       help="score at which a feature's best hit on its consensus spectrum becomes its annotation "
+                            "(default 0.7); every hit above 0.1 is listed")
         p.add_argument("--precursor-ppm", type=_positive(float), default=10.0,
                        help="feature m/z vs library precursor m/z tolerance (ppm, default 10)")
         p.add_argument("--fragment-tol", type=_positive(float), default=0.02,

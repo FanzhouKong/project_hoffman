@@ -45,20 +45,22 @@ def read_bundle(report: Path) -> bytes | None:
 
 
 def refresh_ids(output) -> bool:
-    """swap the MS2 and identification parts of <output>/report.html's bundle for the current files (after a new
-    identity search), keeping everything else, chromatograms included (their cache is usually gone by then);
-    False when there is no report to update"""
+    """swap the MS2, identification and annotation parts of <output>/report.html's bundle for the current files
+    (after a new identity search or annotation), keeping everything else, chromatograms included (their cache is
+    usually gone by then); False when there is no report to update"""
     output = Path(output)
     rep = output / "report.html"
     blob = read_bundle(rep) if rep.exists() else None
     if blob is None:
         return False
     header, arrays = bundle.unpack(gzip.decompress(blob))
-    arrays = {k: v for k, v in arrays.items() if not k.startswith(("ms2_", "id_"))}
-    for k in ("ms2", "ids", "ms2_note"):
+    arrays = {k: v for k, v in arrays.items() if not k.startswith(bundle.MS2_PREFIXES)}
+    for k in bundle.MS2_KEYS:
         header.pop(k, None)
     head, extra = bundle.ms2_ids(output, arrays["g_id"])
     arrays.update(extra)
     blob = gzip.compress(bundle.pack(bundle._clean({**header, **head}), arrays), compresslevel=6, mtime=0)
-    rep.write_text(render(blob, f"peak3d · {output.resolve().name}"), encoding="utf-8")
+    tmp = rep.with_name(rep.name + ".tmp")
+    tmp.write_text(render(blob, f"peak3d · {output.resolve().name}"), encoding="utf-8")
+    tmp.replace(rep)                   # a reader never sees a half-written report
     return True

@@ -6,7 +6,9 @@ kernel (peak3d, asari, MassCube): a spectrum belongs to the feature whose m/z is
 precursor and whose RT window, widened by max(2 s, a quarter of its width) on each side, holds the spectrum's time
 on the aligned axis (the file's own RT correction applied when there is one). When several features qualify, the
 one strongest in that file wins, then the one with the closest apex. Each feature keeps all its spectra in
-ms2_map.tsv and one representative, the spectrum with the highest total ion current, in ms2_spectra.msp."""
+ms2_map.tsv and two spectra for the search: the consensus of all of them, from every file (consensus.build:
+precursor-weighted, a peak needs two spectra), in ms2_consensus.msp, and the single spectrum with the highest total
+ion current (MassCube's choice) in ms2_spectra.msp."""
 from __future__ import annotations
 
 import re
@@ -17,7 +19,9 @@ import numpy as np
 import pandas as pd
 from numba import njit
 
-MAP_COLUMNS = ["group_id", "file", "scan", "rt_s", "precursor_mz", "tic", "n_peaks", "representative"]
+MAP_COLUMNS = ["group_id", "file", "scan", "rt_s", "rt_aligned_s", "precursor_mz", "precursor_intensity",
+               "precursor_purity", "tic", "n_peaks", "representative", "in_consensus", "consensus_status"]
+SPECTRA = {"consensus": "ms2_consensus.msp", "single": "ms2_spectra.msp"}      # the two copies of each feature
 
 
 class Collector(list):
@@ -35,6 +39,15 @@ class Ms2Set:
     mz: np.ndarray         # f8, ascending within a spectrum
     inten: np.ndarray      # f4
     polarity: str = ""
+    prec_int: np.ndarray | None = None   # f8, the precursor's intensity in the MS1 scan before (0: not there)
+    purity: np.ndarray | None = None     # f8, its share of the isolation window (nan: window unknown)
+
+    def __post_init__(self):
+        n = len(self.rt)
+        if self.prec_int is None:          # spectra stored before these were recorded
+            self.prec_int = np.full(n, np.nan)
+        if self.purity is None:
+            self.purity = np.full(n, np.nan)
 
     def __len__(self):
         return len(self.rt)
@@ -43,7 +56,7 @@ class Ms2Set:
 def from_collected(rows, polarity: str = "") -> Ms2Set:
     """Ms2Set of what load_cloud collected (m/z sorted within each spectrum, non-positive peaks dropped)"""
     mzs, its, counts = [], [], []
-    for _, _, _, _, m, i in rows:
+    for *_, m, i in rows:
         ok = np.isfinite(m) & np.isfinite(i) & (i > 0)
         m, i = m[ok], i[ok]
         if len(m) > 1 and np.any(np.diff(m) < 0):
@@ -59,17 +72,20 @@ def from_collected(rows, polarity: str = "") -> Ms2Set:
                   np.array([r[2] for r in rows], np.float64),
                   np.array([float(i.sum()) for i in its], np.float64), off,
                   np.concatenate(mzs) if mzs else np.zeros(0), np.concatenate(its) if its else np.zeros(0, np.float32),
-                  polarity or (next(iter(pols)) if len(pols) == 1 else ""))
+                  polarity or (next(iter(pols)) if len(pols) == 1 else ""),
+                  np.array([r[4] for r in rows], np.float64), np.array([r[5] for r in rows], np.float64))
 
 
 def save(ms: Ms2Set, path) -> None:
     np.savez(path, scan=ms.scan, rt=ms.rt, prec_mz=ms.prec_mz, tic=ms.tic, off=ms.off, mz=ms.mz, inten=ms.inten,
-             polarity=np.array(ms.polarity))
+             polarity=np.array(ms.polarity), prec_int=ms.prec_int, purity=ms.purity)
 
 
 def load(path) -> Ms2Set:
     with np.load(path, allow_pickle=False) as z:
-        return Ms2Set(z["scan"], z["rt"], z["prec_mz"], z["tic"], z["off"], z["mz"], z["inten"], str(z["polarity"]))
+        extra = [z[k] if k in z.files else None for k in ("prec_int", "purity")]
+        return Ms2Set(z["scan"], z["rt"], z["prec_mz"], z["tic"], z["off"], z["mz"], z["inten"], str(z["polarity"]),
+                      *extra)
 
 
 # ------------------------------------------------------------------ mapping ----
@@ -113,13 +129,15 @@ def _aligned_time(output: Path, stem: str, rt):
 
 
 def _stale(output: Path):
-    for name in ("ms2_map.tsv", "ms2_spectra.msp"):
+    for name in ("ms2_map.tsv", *SPECTRA.values()):
         (output / name).unlink(missing_ok=True)
 
 
-def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003) -> pd.DataFrame:
-    """assign every stored MS2 spectrum to an aligned feature; writes ms2_map.tsv (all assigned spectra) and
-    ms2_spectra.msp (the representative of each feature). Returns the map (empty when the files had no MS2)."""
+def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003, fragment_tol: float = 0.02) -> pd.DataFrame:
+    """assign every stored MS2 spectrum to an aligned feature; writes ms2_map.tsv (all assigned spectra),
+    ms2_spectra.msp (each feature's highest-TIC spectrum) and ms2_consensus.msp (each feature's consensus spectrum).
+    Returns the map (empty when the files had no MS2)."""
+    from .consensus import build
     from .library import write_msp_record
     from .pipeline import log
     output = Path(output)
@@ -144,14 +162,16 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003) -> pd.Data
             continue
         sets[s] = ms
         val = np.nan_to_num(table[s].to_numpy(np.float64), nan=0.0)
-        g = _assign(g_sorted, order, g_lo, g_hi, g_rt, val, ms.prec_mz, _aligned_time(output, s, ms.rt),
-                    float(ppm), float(da_floor))
+        t_al = _aligned_time(output, s, ms.rt)
+        g = _assign(g_sorted, order, g_lo, g_hi, g_rt, val, ms.prec_mz, t_al, float(ppm), float(da_floor))
         k = np.flatnonzero(g >= 0)
         parts.append(pd.DataFrame({"g": g[k], "group_id": g_id[g[k]], "file": s, "k": k, "scan": ms.scan[k],
-                                   "rt_s": np.round(ms.rt[k] * 60.0, 3), "precursor_mz": ms.prec_mz[k],
-                                   "tic": ms.tic[k], "n_peaks": np.diff(ms.off)[k]}))
+                                   "rt_s": np.round(ms.rt[k] * 60.0, 3), "rt_aligned_s": np.round(t_al[k] * 60.0, 3),
+                                   "precursor_mz": ms.prec_mz[k], "precursor_intensity": ms.prec_int[k],
+                                   "precursor_purity": ms.purity[k], "tic": ms.tic[k],
+                                   "n_peaks": np.diff(ms.off)[k]}))
     n_all = sum(len(m) for m in sets.values())
-    m = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["g", "k", *MAP_COLUMNS[:-1]])
+    m = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["g", "k", *MAP_COLUMNS])
     if not len(m):
         _stale(output)
         log(f"ms2: 0 of {n_all} spectra mapped to features")
@@ -159,6 +179,31 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003) -> pd.Data
     m = m.sort_values(["g", "tic"], ascending=[True, False], kind="stable").reset_index(drop=True)
     m["representative"] = (~m["g"].duplicated()).astype(int)
     n_per = m.groupby("g").size()
+    in_cons = np.zeros(len(m), np.int8)
+    status = np.full(len(m), "", dtype=object)
+    ion = {"pos": "Positive", "neg": "Negative"}
+    with open(output / "ms2_consensus.msp", "w", encoding="utf-8") as fh:
+        for gi, d in m.groupby("g", sort=True):
+            rows = d.index.to_numpy()                       # positions: m has a fresh RangeIndex
+            spectra = [(sets[f].mz[sets[f].off[k]:sets[f].off[k + 1]], sets[f].inten[sets[f].off[k]:sets[f].off[k + 1]])
+                       for f, k in zip(d["file"], d["k"])]
+            c = build(spectra, d["precursor_intensity"].to_numpy(float), d["precursor_purity"].to_numpy(float),
+                      float(g_mz[gi]), fragment_tol)
+            if c is None:
+                status[rows] = "empty"
+                continue
+            status[rows] = c.status
+            in_cons[rows[c.used]] = 1
+            t = d.iloc[c.top]
+            write_msp_record(fh, [
+                ("NAME", f"feature_{int(t['group_id'])}"), ("PRECURSORMZ", f"{g_mz[gi]:.6f}"),
+                ("RETENTIONTIME", f"{g_rt[gi]:.4f}"), ("IONMODE", ion.get(sets[t['file']].polarity, "")),
+                ("Comment", f"group_id={int(t['group_id'])} n_ms2={len(d)} n_merged={len(c.used)} "
+                            f"n_files={d['file'].iloc[c.used].nunique()} file=\"{t['file']}\" scan=\"{t['scan']}\" "
+                            f"rt_s={t['rt_s']:.3f} precursor={t['precursor_mz']:.6f} n_dropped={c.n_dropped}")],
+                c.mz, np.round(c.inten / c.inten.max() * 1000.0, 3))
+    m["in_consensus"] = in_cons
+    m["consensus_status"] = status
     m[MAP_COLUMNS].to_csv(output / "ms2_map.tsv", sep="\t", index=False, float_format="%.6g")
     with open(output / "ms2_spectra.msp", "w", encoding="utf-8") as fh:
         for r in m[m["representative"] == 1].itertuples(index=False):
@@ -183,12 +228,13 @@ def _comment(text: str) -> dict:
     return {k: a if a or not b else b for k, a, b in _COMMENT.findall(text)}
 
 
-def read_representatives(output) -> dict | None:
-    """the representative MS2 spectrum of every feature that has one (from ms2_spectra.msp), as arrays in file
-    order: group_id, n_ms2, prec_mz (the feature's m/z), rt_s (the spectrum's native time), file, scan, ion_mode,
-    off, mz, inten. None when the output has no MS2."""
+def read_representatives(output, which: str = "single") -> dict | None:
+    """one copy of every feature's MS2 spectrum (which: "single" = ms2_spectra.msp, the highest-TIC spectrum;
+    "consensus" = ms2_consensus.msp), as arrays in file order: group_id, n_ms2, n_merged (spectra in the consensus,
+    1 for single), prec_mz (the feature's m/z), rt_s (the native time of that, or the consensus's most abundant,
+    spectrum), file, scan, ion_mode, off, mz, inten. None when the output has no such file or it is empty."""
     from .library import read_msp
-    path = Path(output) / "ms2_spectra.msp"
+    path = Path(output) / SPECTRA[which]
     if not path.exists():
         return None
     lib = read_msp(path)
@@ -197,6 +243,8 @@ def read_representatives(output) -> dict | None:
     info = [_comment(c) for c in lib.comments]
     return {"group_id": np.array([int(d.get("group_id", -1)) for d in info], np.int64),
             "n_ms2": np.array([int(d.get("n_ms2", 1)) for d in info], np.int32),
+            "n_merged": np.array([int(d.get("n_merged", 1)) for d in info], np.int32),
+            "n_files": np.array([int(d.get("n_files", 1)) for d in info], np.int32),
             "prec_mz": lib.precursor_mz, "rt_s": np.array([float(d.get("rt_s", "nan")) for d in info], np.float64),
             "file": [d.get("file", "") for d in info], "scan": [d.get("scan", "") for d in info],
             "ion_mode": list(lib.ion_mode), "off": lib.off, "mz": lib.mz, "inten": lib.inten}

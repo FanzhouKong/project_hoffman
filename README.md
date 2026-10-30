@@ -83,7 +83,7 @@ ThermoRawFileParser -d data/raw -o data/mzml -f 2
 ```
 
 - Profile-mode files are refused with a message saying how to convert them.
-- MS2 scans are ignored; DDA files work as they are.
+- DDA files work as they are: MS1 is used for the features, the MS2 spectra are mapped to them (step 5).
 - Polarity-switching files: run once per polarity with `--polarity pos` and `--polarity neg`.
 
 ### 3. Run
@@ -108,8 +108,28 @@ reuse the compiled code.
 | `qc/` | RT drift curves, residual histograms, presence histogram |
 | `params.json` | every estimated parameter and the software versions |
 | `report.html` | interactive report (feature map, feature table with chromatograms, RT alignment, run details); one self-contained file that opens in any browser, offline, and can be emailed |
+| `ms2_map.tsv` | every MS2 spectrum mapped to a feature (file, scan, time, precursor intensity and purity, whether it went into the consensus) |
+| `ms2_consensus.msp`, `ms2_spectra.msp` | two MS2 spectra per feature: the consensus of all its spectra, and the single highest-TIC spectrum |
+| `identifications.tsv`, `feature_annotations.tsv` | with `--library`: every library hit above 0.1 for both spectra, and each feature's annotation (step 5) |
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
+
+### 5. MS2 and library search (DDA files)
+
+Each MS2 spectrum is assigned to the feature whose m/z and RT window hold its precursor and time. Each
+feature then gets two spectra:
+
+- **consensus** (used by default): all its spectra, from every file, merged. A peak is kept only when at least
+  two spectra hold it, so noise ions do not add up. Intensities are weighted by how abundant the precursor was
+  in the MS1 scan before each spectrum.
+- **highest TIC**: the single spectrum with the highest total ion current (MassCube's choice).
+
+With `--library` (an `.msp` file, or a MassCube `.pkl`), both are searched (`--similarity`, default weighted
+entropy). Every hit scoring above 0.1 is listed in `identifications.tsv`. A feature's best consensus hit at or
+above `--min-similarity` (default 0.7) is its annotation in `feature_annotations.tsv`. In the app you can pick
+another hit or mark a feature unknown; that choice is saved in `user_annotations.json`, kept apart from the
+search results, and used in the report and the exported tables. `peak3d identify OUT --library LIB` searches
+again without re-processing; your annotations are kept.
 
 ### In the browser: `peak3d gui`
 

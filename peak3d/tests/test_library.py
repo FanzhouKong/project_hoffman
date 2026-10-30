@@ -247,13 +247,17 @@ def test_identify_end_to_end(tmp_path):
     assert t["score"].iloc[0] == pytest.approx(1.0) and t["n_matched"].iloc[0] == 4
     assert t["ppm_error"].iloc[0] == pytest.approx(0.0, abs=0.01) and t["formula"].iloc[0] == "C6H13NO2"
     assert (t["score"].diff().dropna() <= 0).all()
+    assert set(t["spectrum"]) == {"single"}                             # no consensus file in this output
     back = read_msp(out / "identifications.msp")
-    assert back.names == t["name"].tolist() and "group_id=1 rank=1" in back.comments[0]
+    assert back.names == t["name"].tolist() and "group_id=1 spectrum=single rank=1" in back.comments[0]
     info = json.loads((out / "identifications.json").read_text())
     assert info["method"] == "weighted_entropy" and info["n_queries"] == 2 and info["n_identified"] == 1
     assert info["library_n"] == 5 and info["method_label"] == METHODS["weighted_entropy"]
-    # min_score drops the weak hits; top_k caps the rest
-    t = identify(out, lib, "dot", min_score=0.9, top_k=1)
+    # every hit above 0.1 is listed whatever min_score; min_score only decides what counts as identified
+    t = identify(out, lib, "dot", min_score=0.99)
+    assert len(t) >= 2 and (t["score"] > 0.1).all() and t["name"].iloc[0] == "Leucine"
+    assert json.loads((out / "identifications.json").read_text())["n_identified"] == 1
+    t = identify(out, lib, "dot", min_score=0.9, top_k=1)                # top_k caps the list
     assert t["name"].tolist() == ["Leucine"]
 
 

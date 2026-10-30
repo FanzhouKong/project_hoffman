@@ -62,6 +62,15 @@ def _centroid_once(mz, it, d):
 @njit(cache=True)
 def clean(mz, it, prec, tol):
     """(m/z, intensity summing to 1) of one spectrum, cleaned as in the module docstring; m/z ascending"""
+    m, i = clean_raw(mz, it, prec, tol)
+    if len(m) == 0:
+        return m, i
+    return m, i / i.sum()
+
+
+@njit(cache=True)
+def clean_raw(mz, it, prec, tol):
+    """clean() before the final normalisation: the kept peaks with their measured intensities"""
     n = len(mz)
     keep = np.zeros(n, np.bool_)
     cut = prec - PRECURSOR_MARGIN if prec > 0 else np.inf
@@ -86,9 +95,7 @@ def clean(mz, it, prec, tol):
         m, i = _centroid_once(m, i, d)
     top = i.max()
     sel = i >= NOISE * top
-    m = m[sel]
-    i = i[sel]
-    return m, i / i.sum()
+    return m[sel], i[sel]
 
 
 @njit(cache=True, parallel=True)

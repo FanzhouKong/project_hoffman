@@ -45,7 +45,10 @@ KERNELS = ("peak3d", "asari", "masscube")      # peak3d runs `process`; the othe
 VARIANT_NOTE = " ".join(f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in VARIANT_SETS.items())
 # output files the viewer may download (by name, from a peak3d output folder)
 RESULT_FILES = ("aligned_feature_table.tsv", "aligned_feature_area.tsv", "aligned_feature_height.tsv", "filled_mask.tsv",
-                "presence_mask.tsv", "params.json", "ms2_spectra.msp", "ms2_map.tsv", "identifications.tsv")
+                "presence_mask.tsv", "params.json", "ms2_spectra.msp", "ms2_consensus.msp", "ms2_map.tsv",
+                "identifications.tsv", "feature_annotations.tsv")
+CACHED_OUTPUTS = 3      # results folders whose bundles the server keeps in memory
+REFRESH_DELAY = 3.0     # s after the last annotation before report.html is rewritten (clicks come in bursts)
 RT_COLS = ("rt", "rt_min", "rt_max", "rt_sd")    # minutes in the tables; the GUI shows and exports seconds
 
 # stage markers in the pipeline log -> (stage, progress fraction when reached)
@@ -236,22 +239,35 @@ def _seconds(v: str) -> str:
     return f"{x * 60:.6g}" if x == x else v
 
 
+EXPORT_ID_COLS = ("n_ms2", "n_consensus", "annotation", "annotation_source", "annotation_score", "annotation_adduct",
+                  "annotation_formula", "annotation_inchikey", "best_hit", "best_score")
+
+
 def _identity_columns(out: Path) -> dict:
-    """MS2 count and best library hit per group id, as extra export columns (none when the output has no MS2)"""
-    head = ("n_ms2", "identity", "identity_score", "identity_adduct", "identity_inchikey")
-    map_path, hits_path = out / "ms2_map.tsv", out / "identifications.tsv"
+    """MS2 counts and the annotation in force (annotations.effective) per group id, as extra export columns (none
+    when the output has no MS2)"""
+    map_path = out / "ms2_map.tsv"
     if not map_path.exists() or not (out / "ms2_spectra.msp").exists():
         return {"header": (), "rows": {}, "empty": []}
     import pandas as pd
-    m = pd.read_csv(map_path, sep="\t", usecols=["group_id"])["group_id"].value_counts()
-    best = {}
-    if hits_path.exists():
-        h = pd.read_csv(hits_path, sep="\t", dtype={"name": str, "precursor_type": str, "inchikey": str})
-        h = h.fillna({"name": "", "precursor_type": "", "inchikey": ""})
-        for r in h[h["rank"] == 1].itertuples():
-            best[int(r.group_id)] = [r.name, f"{r.score:.4f}", r.precursor_type, r.inchikey]
-    rows = {int(g): [str(int(n))] + best.get(int(g), ["", "", "", ""]) for g, n in m.items()}
-    return {"header": head, "rows": rows, "empty": ["0", "", "", "", ""]}
+    from ..annotations import effective
+    m = pd.read_csv(map_path, sep="\t")
+    n = m["group_id"].value_counts()
+    nc = m.loc[m["in_consensus"] == 1, "group_id"].value_counts() if "in_consensus" in m else n * 0
+    score = lambda v: f"{v:.4f}" if v == v else ""
+    ann = {int(r.group_id): [r.annotation, r.source, score(r.score), r.adduct, r.formula, r.inchikey, r.best_hit,
+                             score(r.best_score)] for r in effective(out).fillna({c: "" for c in (
+                                 "annotation", "source", "adduct", "formula", "inchikey", "best_hit")}).itertuples()}
+    rows = {int(g): [str(int(k)), str(int(nc.get(g, 0)))] + ann.get(int(g), [""] * 8) for g, k in n.items()}
+    return {"header": EXPORT_ID_COLS, "rows": rows, "empty": ["0", "0"] + [""] * 8}
+
+
+def _remember(cache: dict, key: str, value) -> None:
+    """put value in a small most-recent-first cache of CACHED_OUTPUTS entries (bundles are megabytes each)"""
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > CACHED_OUTPUTS:
+        cache.pop(next(iter(cache)))
 
 
 # ------------------------------------------------------------------ app ----
@@ -267,7 +283,45 @@ class App:
         self._ms2: dict[str, tuple] = {}
         self._searching: dict[str, threading.Lock] = {}     # one identity search per output folder at a time
         self._tables: dict[str, tuple] = {}
+        self._refresh: dict[str, threading.Timer] = {}      # report refreshes waiting for a burst of annotations to end
         self.lock = threading.Lock()
+
+    def folder_lock(self, output: Path) -> threading.Lock:
+        """one search, annotation or report refresh per results folder at a time"""
+        with self.lock:
+            return self._searching.setdefault(str(output), threading.Lock())
+
+    def refresh_later(self, output: Path, delay: float = REFRESH_DELAY) -> None:
+        """rewrite report.html's MS2 and annotation part a moment after the last call for this folder"""
+        t = threading.Timer(delay, self.refresh_now, args=(output,))
+        t.daemon = True
+        with self.lock:
+            old = self._refresh.pop(str(output), None)
+            self._refresh[str(output)] = t
+        if old:
+            old.cancel()
+        t.start()
+
+    def refresh_now(self, output: Path, pending_only: bool = False) -> None:
+        """the refresh, now (a timer firing, the report being opened, a search, or the app closing)"""
+        with self.lock:
+            t = self._refresh.pop(str(output), None)
+        if t:
+            t.cancel()
+        elif pending_only:
+            return
+        with self.folder_lock(output):
+            try:
+                report.refresh_ids(output)
+            except OSError:
+                pass                              # a read-only results folder: the GUI still shows the choices
+
+    def flush(self) -> None:
+        """every refresh still waiting (on shutdown)"""
+        with self.lock:
+            pending = list(self._refresh)
+        for out in pending:
+            self.refresh_now(Path(out), pending_only=True)
 
     def resolve(self, p: str | None) -> Path:
         base = self.root or Path.home()
@@ -288,19 +342,20 @@ class App:
         blob = report.read_bundle(rep) if rep.exists() and key[1] >= key[0] else None
         if blob is None:
             blob = gzip.compress(bundle.build(output), compresslevel=6, mtime=0)
-        self._bundles[str(output)] = (key, blob)
+        _remember(self._bundles, str(output), (key, blob))
         return blob
 
 
     def ms2_blob(self, output: Path) -> bytes:
         """gzip'd MS2 + identification parts of the bundle, rebuilt when those files change"""
-        key = tuple((output / n).stat().st_mtime if (output / n).exists() else 0
-                    for n in ("ms2_spectra.msp", "ms2_map.tsv", "identifications.tsv", "identifications.msp"))
+        key = tuple((output / n).stat().st_mtime_ns if (output / n).exists() else 0
+                    for n in ("ms2_spectra.msp", "ms2_consensus.msp", "ms2_map.tsv", "identifications.tsv",
+                              "identifications.msp", "identifications.json", "user_annotations.json"))
         hit = self._ms2.get(str(output))
         if hit and hit[0] == key:
             return hit[1]
         blob = bundle.ms2_ids_blob(output)
-        self._ms2[str(output)] = (key, blob)
+        _remember(self._ms2, str(output), (key, blob))
         return blob
 
     def table_lines(self, path: Path):
@@ -428,6 +483,7 @@ class Handler(BaseHTTPRequestHandler):
                                   {"Content-Disposition": f'attachment; filename="{out.name}_{name}"'})
             if url.path == "/api/results/report":
                 out = self._output(q)
+                self.app.refresh_now(out, pending_only=True)          # recent annotations first
                 rep = out / "report.html"
                 body = rep.read_bytes() if rep.exists() else report.render(
                     gzip.compress(bundle.build(out), mtime=0), f"peak3d · {out.name}").encode()
@@ -462,6 +518,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._table(body)
             if url.path == "/api/results/reveal":
                 return self._reveal(body)
+            if url.path == "/api/results/annotate":
+                return self._annotate(body)
             if url.path == "/api/results/identify":
                 return self._identify(body)
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
@@ -590,8 +648,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "tolerances and minimum score must be numbers")
         if not (ppm > 0 and tol > 0 and 0 <= min_score <= 1):
             return self._error(400, "tolerances must be > 0 and the minimum score within [0, 1]")
-        with self.app.lock:
-            lock = self.app._searching.setdefault(str(out), threading.Lock())
+        lock = self.app.folder_lock(out)
         if not lock.acquire(blocking=False):
             return self._error(409, "a search is already running for these results")
         try:
@@ -599,14 +656,38 @@ class Handler(BaseHTTPRequestHandler):
                 identify(out, lib, method=method, precursor_ppm=ppm, fragment_tol=tol, min_score=min_score)
             except (pickle.UnpicklingError, ValueError, EOFError) as e:     # a .pkl that is not a library we can read
                 return self._error(400, f"could not read the library {lib.name}: {e}")
-            try:
-                report.refresh_ids(out)
-            except OSError:
-                pass                              # a read-only results folder: the GUI still shows the hits
         finally:
             lock.release()
+        self.app.refresh_now(out)                 # the report gets the new hits (and any annotations still waiting)
         meta = out / "identifications.json"
         self._json(json.loads(meta.read_text()) if meta.exists() else {})
+
+    def _annotate(self, body):
+        """the user's annotation of one feature: {"path", "group_id", "hit": {"spectrum", "rank"} | "unknown" | null}
+        (null = back to the library result). Rewrites user_annotations.json and feature_annotations.tsv, answers with
+        the entry stored (null after a reset), and refreshes report.html a few seconds after the last annotation"""
+        from ..annotations import set_user
+        out = self._output({"path": [body.get("path") or ""]})
+        try:
+            g = int(body.get("group_id"))
+        except (TypeError, ValueError):
+            return self._error(400, "group_id must be a number")
+        hit = body.get("hit")
+        if not (hit is None or hit == "unknown" or isinstance(hit, dict)):
+            return self._error(400, "hit must be {spectrum, rank}, \"unknown\" or null")
+        lock = self.app.folder_lock(out)
+        if not lock.acquire(timeout=30):
+            return self._error(409, "the results are busy (a search is running)")
+        try:
+            entry = set_user(out, g, hit)
+        except KeyError as e:
+            return self._error(400, str(e.args[0]) if e.args else "no such hit")
+        except (TypeError, ValueError):
+            return self._error(400, "hit must be {spectrum, rank} with a whole-number rank")
+        finally:
+            lock.release()
+        self.app.refresh_later(out)
+        self._json({"group_id": g, "annotation": entry})
 
     def _reveal(self, body):
         """open the folder in Finder / File Explorer / the desktop's file manager (the app runs on this computer)"""
@@ -705,4 +786,5 @@ def serve(host="127.0.0.1", port=8765, root=None, token="auto", open_browser=Tru
     finally:
         for r in httpd.app.runs.values():
             r.cancel()
+        httpd.app.flush()                         # annotations made in the last seconds reach report.html
         httpd.server_close()
