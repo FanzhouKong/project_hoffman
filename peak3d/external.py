@@ -1,7 +1,8 @@
 """Other feature-detection kernels (asari, MassCube) behind the same output layout as ``peak3d process``.
 
-The tool runs with its own defaults in a subprocess of the Python that has it installed (PEAK3D_ASARI_PYTHON /
-PEAK3D_MASSCUBE_PYTHON, else this interpreter when it can import the package). Its aligned table is converted to
+The tool runs with its own defaults in a subprocess of the Python that has it installed: PEAK3D_ASARI_PYTHON /
+PEAK3D_MASSCUBE_PYTHON when set, else the app's own install of it (MassCube, addons.py), else this program when it
+carries the package (asari is bundled with the app; it then runs as `peak3d _asari ...`, a hidden command). Its aligned table is converted to
 aligned_feature_table.tsv (group_id, mz, rt, rt_min, rt_max in minutes, counts, then one column per file), and every
 file is read once more by peak3d (MS1 point clouds for the chromatograms, MS2 spectra in the same pass), so MS2
 mapping, the identity search and the report work exactly as after a peak3d run. Nothing of the tool's own
@@ -29,7 +30,9 @@ from . import __version__
 KERNELS = {"asari": dict(label="asari", package="asari", dist="asari-metabolomics", env="PEAK3D_ASARI_PYTHON",
                          quant="area", install="pip install asari-metabolomics"),
            "masscube": dict(label="MassCube", package="masscube", dist="masscube", env="PEAK3D_MASSCUBE_PYTHON",
-                            quant="height", install="pip install masscube")}
+                            quant="height", install="pip install masscube==1.2.22",
+                            addon="peak3d addon install masscube --accept-licence (or the MassCube tab in the app)")}
+SELF = "self"           # kernel_status()[...]["python"] when this program runs the tool itself (asari, bundled)
 LAYOUT = ["group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
           "rt_sd", "iso_offset", "charge"]
 _PROBE = ("import importlib.util as u, importlib.metadata as m, sys\n"
@@ -46,8 +49,9 @@ _MASSCUBE = ("import multiprocessing, os, sys\n"
 
 # ------------------------------------------------------------------ availability ----
 def _probe(name: str) -> dict:
+    from .addons import ADDONS, python_of
     k = KERNELS[name]
-    py = os.environ.get(k["env"])
+    py = os.environ.get(k["env"]) or (python_of(name) if name in ADDONS else None)
     if py:
         try:
             r = subprocess.run([py, "-c", _PROBE.format(pkg=k["package"], dist=k["dist"])], capture_output=True,
@@ -57,16 +61,21 @@ def _probe(name: str) -> dict:
         if r.returncode == 0:
             return dict(available=True, version=(r.stdout.strip().splitlines() or ["unknown"])[-1], python=py, note="")
         return dict(available=False, version=None, python=py,
-                    note=f"{k['env']}={py} cannot import {k['package']} (install it there: {k['install']})")
-    if not getattr(sys, "frozen", False) and importlib.util.find_spec(k["package"]) is not None:
+                    note=f"{py} cannot import {k['package']} (install it there: {k['install']})")
+    if importlib.util.find_spec(k["package"]) is not None:
         try:
             ver = importlib.metadata.version(k["dist"])
         except importlib.metadata.PackageNotFoundError:
             ver = "unknown"
-        return dict(available=True, version=ver, python=sys.executable, note="")
+        return dict(available=True, version=ver, python=SELF, note="")
+    how = k.get("addon") or k["install"]
     return dict(available=False, version=None, python=None,
-                note=f"{k['label']} is not installed for this Python: {k['install']}, or set {k['env']} to a Python "
-                     f"that has it")
+                note=f"{k['label']} is not installed: {how}; or set {k['env']} to a Python that has it")
+
+
+def refresh() -> None:
+    """probe again (after an add-on was installed or removed)"""
+    kernel_status.cache_clear()
 
 
 @lru_cache(maxsize=1)
@@ -171,9 +180,22 @@ def _run(cmd, cwd: Path) -> int:
     return subprocess.run(cmd, cwd=str(cwd), env=env, stdout=sys.stdout.fileno(), stderr=subprocess.STDOUT).returncode
 
 
+def _self_command() -> list[str]:
+    """this program, as a command (the frozen app is its own executable)"""
+    return [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "peak3d"]
+
+
+def run_asari_main(argv) -> None:
+    """`peak3d _asari ARGS`: asari's own command line, inside this program (the app bundles asari)"""
+    from asari.main import main
+    sys.argv = ["asari", *argv]
+    main()
+
+
 def _run_asari(py, input_dir: Path, output: Path, polarity: str, cores: int) -> Path:
     t0 = time.time()
-    rc = _run([py, "-m", "asari.main", "process", "--mode", polarity, "--input", str(input_dir),
+    launcher = [*_self_command(), "_asari"] if py == SELF else [py, "-m", "asari.main"]
+    rc = _run([*launcher, "process", "--mode", polarity, "--input", str(input_dir),
                "--output", str(output / "asari_work"), "--multicores", str(cores)], output)
     if rc != 0:
         sys.exit(f"asari failed (exit {rc}); see the log above")
@@ -193,6 +215,10 @@ def _run_masscube(py, files, output: Path, cores: int) -> Path:
             dst.symlink_to(Path(f).resolve())
         except OSError:
             shutil.copy2(f, dst)
+    if py == SELF:
+        py = sys.executable
+        if getattr(sys, "frozen", False):
+            sys.exit("MassCube is not part of the app: install it from the MassCube tab")
     rc = _run([py, "-c", _MASSCUBE, str(work), str(max(1, cores))], work)
     if rc != 0:
         sys.exit(f"MassCube failed (exit {rc}); see the log above")
@@ -273,11 +299,11 @@ def run_external(files, args) -> None:
     k = KERNELS[kernel]
     if not st["available"]:
         sys.exit(f"{k['label']} is not available: {st['note']}")
-    files = [Path(f) for f in files]
+    files = [Path(f).resolve() for f in files]      # absolute: the tools run in their own working folders
     stems = [f.stem for f in files]
     if len(set(stems)) != len(stems):
         sys.exit("input file stems must be unique")
-    output = Path(args.output)
+    output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     polarity = args.polarity or detect_polarity(files[0])
     stage = {}

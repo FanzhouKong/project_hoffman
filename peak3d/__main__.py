@@ -132,6 +132,12 @@ def build_parser():
                    help="chromatogram values to store (default 3,000,000; more = larger file, more features)")
     p.add_argument("--eic-files", type=_positive(int), default=None, help="files per chromatogram plot (default 16)")
 
+    p = sub.add_parser("addon", help="install or remove an optional feature finder (MassCube) in a private Python")
+    p.add_argument("action", choices=["install", "remove", "status"])
+    p.add_argument("name", choices=["masscube"])
+    p.add_argument("--accept-licence", action="store_true",
+                   help="accept the tool's licence (MassCube: CC BY-NC 4.0, non-commercial use only); install needs it")
+
     p = sub.add_parser("gui", help="local web app: run peak3d and browse results in the browser")
     p.add_argument("--host", default="127.0.0.1", help="interface to listen on (default 127.0.0.1: this computer only)")
     p.add_argument("--port", type=int, default=8765, help="port (default 8765; the next free one is used if taken)")
@@ -163,6 +169,10 @@ def write_demo(out: Path) -> Path:
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["_asari"]:                      # hidden: asari's own command line (bundled in the app)
+        from .external import run_asari_main
+        return run_asari_main(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.cmd == "gui":
@@ -189,6 +199,22 @@ def main(argv=None):
         if refresh_ids(args.output):            # report.html shows the new hits (its chromatograms are kept)
             print("[peak3d] report.html updated", flush=True)
         print(f"[peak3d] done in {time.perf_counter() - t0:.1f} s", flush=True)
+        return
+    if args.cmd == "addon":
+        from . import addons
+        if args.action == "status":
+            print(json.dumps(addons.status(args.name), indent=1))
+        elif args.action == "remove":
+            addons.remove(args.name)
+            print(f"[peak3d] {args.name} removed", flush=True)
+        else:
+            a = addons.ADDONS[args.name]
+            if not args.accept_licence:
+                sys.exit(f"{a['label']} is licensed {a['licence']} ({a['licence_url']}); add --accept-licence to install it")
+            try:
+                addons.install(args.name, log=lambda m: print(m, flush=True))
+            except RuntimeError as e:
+                sys.exit(f"{a['label']} was not installed: {e}")
         return
     from . import pipeline
     t0 = time.perf_counter()

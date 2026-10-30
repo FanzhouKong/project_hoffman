@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install ${{ matrix.pins }} . "pyinstaller>=6.10,<7"
+        run: pip install ${{ matrix.pins }} ".[asari]" "pyinstaller>=6.10,<7"
       - name: Build
         run: pyinstaller --noconfirm --clean packaging/peak3d.spec
       - name: Locate the program
@@ -48,6 +48,11 @@ jobs:
           start=$(date +%s); "$BIN" demo --output smoke1 --cores 2; echo "cold: $(( $(date +%s) - start )) s"
           test -f smoke1/peak3d_out/report.html
           start=$(date +%s); "$BIN" demo --output smoke2 --cores 2; echo "warm: $(( $(date +%s) - start )) s"
+      - name: asari inside the app (bundled; runs as the app's own `_asari` command)
+        run: |
+          "$BIN" external --kernel asari --input smoke1/demo_mzml --output asari_out --cores 2
+          test -f asari_out/aligned_feature_table.tsv && test -f asari_out/report.html
+          echo "asari features: $(( $(wc -l < asari_out/aligned_feature_table.tsv) - 1 ))"
       - name: GUI inside the app runs peak3d (example data, one run, results)
         run: |
           "$BIN" gui --no-browser --port 8799 --token ci --root "$PWD" > gui.log 2>&1 &
@@ -89,6 +94,19 @@ jobs:
           path: upload/*
           retention-days: 14
           compression-level: 0
+      - name: MassCube installed by the app on request (private Python), run, removed
+        env:
+          PEAK3D_ADDONS: ${{ runner.temp }}/peak3d-addons
+        run: |
+          start=$(date +%s)
+          if ! "$BIN" addon install masscube --accept-licence > masscube_install.log 2>&1; then tail -40 masscube_install.log; exit 1; fi
+          grep -v "^  " masscube_install.log || true
+          echo "install: $(( $(date +%s) - start )) s"
+          "$BIN" addon status masscube
+          "$BIN" external --kernel masscube --input smoke1/demo_mzml --output masscube_out --cores 2
+          test -f masscube_out/aligned_feature_table.tsv && test -f masscube_out/report.html
+          echo "MassCube features: $(( $(wc -l < masscube_out/aligned_feature_table.tsv) - 1 ))"
+          "$BIN" addon remove masscube
       - name: Windows double-click (no console, as from Explorer), screenshots
         if: runner.os == 'Windows'
         shell: pwsh

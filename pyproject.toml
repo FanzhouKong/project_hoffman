@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+asari = ["asari-metabolomics==1.18.5"]     # the app bundles it: `peak3d external --kernel asari` runs it in-process
 
 [project.scripts]
 peak3d = "peak3d.__main__:main"

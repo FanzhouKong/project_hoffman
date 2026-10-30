@@ -532,6 +532,8 @@ textarea.comment { width: 100%; min-height: 64px; resize: vertical; border: 1px 
 textarea.comment:focus { outline: 0; border-color: var(--accent); box-shadow: var(--ring); }
 .comment-status { display: block; min-height: 16px; margin-top: 4px; }
 .comment-text { white-space: pre-wrap; }
+.addon-card .log { max-height: 200px; margin-top: 10px; }
+.addon-note { margin: -6px 0 14px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .hits tr.below td { color: var(--ink-4); }
 .id-card { margin: 4px 0 14px; }
 .id-form { display: grid; grid-template-columns: minmax(220px, 2.4fr) minmax(170px, 1.4fr) repeat(3, minmax(92px, .7fr)) auto; gap: 0 12px; align-items: end; }

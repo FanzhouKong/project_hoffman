@@ -3,20 +3,39 @@
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules, copy_metadata
 
 import peak3d
 
 ROOT = os.path.dirname(SPECPATH)
 MAC, WIN = sys.platform == "darwin", os.name == "nt"
 
-datas = [(os.path.join(ROOT, "peak3d", "web", "static"), os.path.join("peak3d", "web", "static"))]
+datas = [(os.path.join(ROOT, "peak3d", "web", "static"), os.path.join("peak3d", "web", "static")),
+         (os.path.join(SPECPATH, "THIRD_PARTY_NOTICES.md"), ".")]
 datas += collect_data_files("psims") + collect_data_files("pyteomics")
 hiddenimports = collect_submodules("peak3d", filter=lambda m: ".tests" not in m) + collect_submodules("psims")
+binaries = []
+# asari (pip install .[asari]) rides along: the app runs it as `peak3d _asari ...`. Its packages bring data files
+# (asari/db, the pymzml OBO files); the metadata (with each licence) reports the version and keeps the notices
+for pkg in ("asari", "mass2chem", "khipu", "jms", "metDataModel", "pymzml", "ms_entropy"):
+    try:
+        d, b, hi = collect_all(pkg)
+    except Exception:          # built without the asari extra: the app then shows asari as not installed
+        continue
+    datas += d
+    binaries += b
+    hiddenimports += hi
+for dist in ("asari-metabolomics", "mass2chem", "khipu-metabolomics", "jms-metabolite-services", "metDataModel",
+             "pymzml", "ms_entropy", "json_tricks", "pathvalidate"):
+    try:
+        datas += copy_metadata(dist)
+    except Exception:
+        pass
 
 a = Analysis(
     [os.path.join(SPECPATH, "peak3d_app.py")],
     pathex=[ROOT],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     excludes=["peak3d.tests", "pytest", "IPython", "jupyter", "notebook", "PyQt5", "PyQt6", "PySide2", "PySide6"],

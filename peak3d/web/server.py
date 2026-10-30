@@ -7,6 +7,7 @@ Security: the server reads folders and starts processes, so every request needs 
 localhost (blocks DNS rebinding), and ``--root`` confines browsing, inputs and outputs to one folder."""
 from __future__ import annotations
 
+import collections
 import gzip
 import html
 import ipaddress
@@ -290,6 +291,7 @@ class App:
         self._searching: dict[str, threading.Lock] = {}     # one identity search per output folder at a time
         self._tables: dict[str, tuple] = {}
         self._refresh: dict[str, threading.Timer] = {}      # report refreshes waiting for a burst of annotations to end
+        self.addon_jobs: dict[str, dict] = {}                # add-on installs: name -> {state, log, error}
         self.lock = threading.Lock()
 
     def folder_lock(self, output: Path) -> threading.Lock:
@@ -528,6 +530,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._annotate(body)
             if url.path == "/api/results/note":
                 return self._note(body)
+            if url.path == "/api/addons/install":
+                return self._addon(body, "install")
+            if url.path == "/api/addons/remove":
+                return self._addon(body, "remove")
             if url.path == "/api/results/identify":
                 return self._identify(body)
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
@@ -571,11 +577,58 @@ class Handler(BaseHTTPRequestHandler):
             from ..library import METHODS
         except ImportError:
             METHODS = {}
+        try:
+            from ..addons import ADDONS, status
+            addons = {n: {**status(n), "job": self._addon_job(n)} for n in ADDONS}
+        except ImportError:
+            addons = {}
         return {"version": __version__, "variant": VARIANT, "variant_sets": VARIANT_SETS, "kernels": kernels,
-                "methods": METHODS,
+                "methods": METHODS, "addons": addons,
                 "platform": platform.system(), "python": platform.python_version(),
                 "cpu_count": os.cpu_count() or 1, "root": str(a.root) if a.root else None,
                 "start": str(a.root or Path.home()), "sep": os.sep}
+
+    def _addon_job(self, name):
+        j = self.app.addon_jobs.get(name)
+        return None if j is None else {k: (list(v) if k == "log" else v) for k, v in j.items()}
+
+    def _addon(self, body, action):
+        """install (with the licence accepted) or remove an optional feature finder (addons.py); an install runs in
+        the background: GET /api/info shows its state and log"""
+        from .. import external
+        from ..addons import ADDONS, install, remove
+        name = body.get("name")
+        if name not in ADDONS:
+            return self._error(400, f"unknown add-on {name!r}")
+        with self.app.lock:
+            job = self.app.addon_jobs.get(name)
+            if job and job["state"] == "running":
+                return self._error(409, f"{ADDONS[name]['label']} is being installed")
+            if action == "remove":
+                if any(r.state == "running" and r.kernel == name for r in self.app.runs.values()):
+                    return self._error(409, f"a {ADDONS[name]['label']} run is in progress")
+            elif body.get("accept_licence") is not True:
+                return self._error(400, f"{ADDONS[name]['label']} is licensed {ADDONS[name]['licence']}: accept it to install")
+            else:
+                job = self.app.addon_jobs[name] = {"state": "running", "log": collections.deque(maxlen=400), "error": None,
+                                                   "started": time.strftime("%H:%M:%S")}
+        if action == "remove":
+            st = remove(name)
+            external.refresh()
+            return self._json(st)
+
+        def work():
+            try:
+                install(name, log=job["log"].append)
+                job["state"] = "done"
+            except Exception as e:              # any failure ends here, with the partial install removed
+                job["error"] = str(e)
+                job["log"].append(f"failed: {e}")
+                job["state"] = "failed"
+            finally:
+                external.refresh()
+        threading.Thread(target=work, daemon=True).start()
+        self._json({"state": "running"})
 
     def _ls(self, p, ext=""):
         a = self.app

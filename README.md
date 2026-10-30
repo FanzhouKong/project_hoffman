@@ -24,7 +24,15 @@ Download the file for your computer from the
 | Mac with an Intel processor, macOS 14+ | `peak3d-macos-x64.zip` | the same |
 | Linux, x86-64 (glibc 2.35+, e.g. Ubuntu 22.04) | `peak3d-linux-x64.tar.gz` | `tar xzf peak3d-linux-x64.tar.gz` then `./peak3d/peak3d` |
 
-Mosa opens in your web browser, with a small window to reopen or quit it. Choose a folder of mzML files, or
+Mosa opens in your web browser, with a small window to reopen or quit it. Three feature finders are on offer, and
+whichever you pick, the rest (chromatograms, MS2, library search, annotation, report) is the same:
+
+- **Mosa** (the default).
+- **asari** 1.18.5, included in the app.
+- **MassCube** 1.2.22, not included: its licence (CC BY-NC 4.0) allows non-commercial use only. The MassCube tab has
+  a **Download and install MassCube** button: after you accept the licence, Mosa installs it with a private Python
+  (about 950 MB, a few minutes) and can remove it again. From the command line:
+  `peak3d addon install masscube --accept-licence`. Choose a folder of mzML files, or
 press **Create example data** to try it with three small synthetic runs, then **Run Mosa** and **Open
 results**. The first run compiles Mosa (about a minute); later runs start at once. Your data stay on your
 computer.
@@ -59,7 +67,7 @@ pip install -e .
 
 # or plain pip, Python >= 3.10
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install -e .            # or pip install -e ".[asari]" to run asari as well (peak3d external --kernel asari)
 ```
 
 This installs the `peak3d` command. Check the installation with the built-in demo, which writes three

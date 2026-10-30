@@ -75,6 +75,7 @@
     S.page = page;
     rail.forEach((b) => { if (b.dataset.page === page) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
     if (S.viewer) { S.viewer.destroy(); S.viewer = null; }
+    clearTimeout(S.addonTimer);
     document.getElementById("bar-actions").replaceChildren();
     pageEl.replaceChildren();
     scroll.scrollTop = 0;
@@ -219,8 +220,11 @@
     }));
     page.appendChild(h("div.kernel-bar", h("span.label-medium.muted", "Kernel"), tabs));
     page.appendChild(h("p.page-intro", INTRO[S.kernel]));
-    if (!kst.available) page.appendChild(h("div.banner.error", { style: { marginBottom: "16px" } }, icon("error"),
+    const addon = (S.info.addons || {})[S.kernel];
+    if (!kst.available && addon && addon.supported) page.appendChild(addonCard(addon));
+    else if (!kst.available) page.appendChild(h("div.banner.error", { style: { marginBottom: "16px" } }, icon("error"),
       h("div.body-medium", `${KNAME[S.kernel]} is not available on this computer. ${kst.note || ""}`)));
+    else if (addon && addon.installed) page.appendChild(addonNote(addon, kst));
     const main = h("div.stack"), side = h("div.run-side");
     page.appendChild(h("div.run-layout", main, side));
 
@@ -515,6 +519,54 @@
     } catch (e) {
       holder.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "16px" } }, icon("error"), h("div", e.message))));
     }
+  }
+
+  // ---------------------------------------------------------------- optional feature finders (MassCube)
+  // not bundled (non-commercial licence, its own numpy); the app installs it on request into a private Python
+  function addonCard(ad) {
+    const job = ad.job;
+    const running = job && job.state === "running";
+    const btn = h("button.btn.filled.state", { type: "button", disabled: running || null }, icon("download"), `Download and install ${ad.label}`);
+    const log = h("pre.log", { style: { display: job ? "" : "none" } }, job ? job.log.slice(-14).join("\n") : "");
+    const status = h("p.body-medium", { style: { margin: "10px 0 0" } });
+    if (running) status.replaceChildren(P3.spinner(16), ` Installing ${ad.label} (started ${job.started}); you can keep working, the tab turns on when it is done.`);
+    else if (job && job.state === "failed") status.replaceChildren(h("span", { style: { color: "var(--danger)" } }, `Installation failed: ${job.error}`));
+    btn.addEventListener("click", async () => {
+      const ok = await confirmDialog(`Install ${ad.label} ${ad.version}?`,
+        `${ad.label} is licensed ${ad.licence} (${ad.licence_url}). By installing it you accept that licence. Mosa downloads a private Python ` +
+        `and ${ad.label} with its dependencies from the internet (about ${ad.size_mb} MB on disk) into ${ad.location}; your data stay on this computer.`,
+        "Accept and install");
+      if (!ok) return;
+      try {
+        await post("/api/addons/install", { name: ad.name, accept_licence: true });
+        await pollAddon(ad.name);
+      } catch (e) { snack(e.message); }
+    });
+    if (running) S.addonTimer = setTimeout(() => pollAddon(ad.name), 1500);
+    return h("section.card.elevated.addon-card", { style: { marginBottom: "16px" } },
+      h("div.card-head", h("h3.title-medium", `${ad.label} is not installed`)),
+      h("p.body-medium", `${ad.label} is not part of the app download: it is free for non-commercial use only (${ad.licence}) and needs its own Python. ` +
+        `Mosa can install it for you (about ${ad.size_mb} MB on disk, a few minutes); its features then go through the same steps as Mosa's: chromatograms, MS2, library search, annotation.`),
+      h("div.row.wrap", { style: { gap: "12px", alignItems: "center" } }, btn,
+        h("a.body-small", { href: ad.licence_url, target: "_blank", rel: "noopener" }, "Licence"),
+        h("a.body-small", { href: ad.homepage, target: "_blank", rel: "noopener" }, `About ${ad.label}`)),
+      status, log);
+  }
+  async function pollAddon(name) {
+    clearTimeout(S.addonTimer);
+    S.info = await api("/api/info");
+    const ad = S.info.addons[name];
+    if (S.page !== "run" || S.kernel !== name) return;
+    if (ad.job && ad.job.state === "done") snack(`${ad.label} ${ad.version} is installed`);
+    go("run");
+  }
+  function addonNote(ad, kst) {
+    const rm = h("button.btn.text.state", { type: "button" }, "Remove");
+    rm.addEventListener("click", async () => {
+      if (!(await confirmDialog(`Remove ${ad.label}?`, `This deletes ${ad.location}. You can install it again later.`, "Remove"))) return;
+      try { await post("/api/addons/remove", { name: ad.name }); S.info = await api("/api/info"); go("run"); } catch (e) { snack(e.message); }
+    });
+    return h("p.body-small.muted.addon-note", `${ad.label} ${kst.version || ""} installed by Mosa in ${ad.location} (${ad.licence}). `, rm);
   }
 
   // ---------------------------------------------------------------- dialogs
