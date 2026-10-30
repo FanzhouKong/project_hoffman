@@ -187,6 +187,17 @@ def _self_command() -> list[str]:
 
 def run_asari_main(argv) -> None:
     """`peak3d _asari ARGS`: asari's own command line, inside this program (the app bundles asari)"""
+    import types
+    if "asari.__init__" not in sys.modules:
+        # asari/main.py imports its version with `from .__init__ import __version__`: plain Python then runs
+        # asari/__init__.py a second time as a module of that name, the frozen app's importer makes it a package and
+        # the import goes in a circle. A stand-in holding the version answers that import in both
+        stub = types.ModuleType("asari.__init__")
+        try:
+            stub.__version__ = importlib.metadata.version("asari-metabolomics")
+        except importlib.metadata.PackageNotFoundError:
+            stub.__version__ = "unknown"
+        sys.modules["asari.__init__"] = stub
     from asari.main import main
     sys.argv = ["asari", *argv]
     main()

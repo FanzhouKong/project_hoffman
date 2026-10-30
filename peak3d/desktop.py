@@ -157,7 +157,14 @@ def main(argv=None) -> None:
     argv = [a for a in argv if not a.startswith("-psn_")]     # old macOS Finder launches add a process serial number
     if argv:                                                  # the command line (runs started by the GUI use this)
         from .__main__ import main as cli
-        cli(argv)
+        try:
+            cli(argv)
+        except Exception:
+            # print and exit: in the windowed app an uncaught error would open a dialog that waits for a click, and
+            # a run started by the GUI (or a check on a build machine) would hang behind it
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
         return
     _log_to_file()
     url = _running_url()

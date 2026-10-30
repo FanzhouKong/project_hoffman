@@ -39,6 +39,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     excludes=["peak3d.tests", "pytest", "IPython", "jupyter", "notebook", "PyQt5", "PyQt6", "PySide2", "PySide6"],
+    runtime_hooks=[os.path.join(SPECPATH, "rthook_pymzml_obo.py")],      # pymzml's OBO files, inside the app
     # peak3d as .py source files: numba's on-disk cache needs the source of every cached function
     module_collection_mode={"peak3d": "py"},
     noarchive=False,
