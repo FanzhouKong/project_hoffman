@@ -100,6 +100,11 @@ def _control_window(url: str, httpd) -> bool:
     from . import __version__
 
     root.title("peak3d")
+    try:                                     # the MOSA logo in the title bar, taskbar and Alt-Tab
+        root._icon = tk.PhotoImage(file=str(Path(__file__).with_name("web") / "static" / "logo-256.png"))
+        root.iconphoto(True, root._icon)
+    except Exception:
+        pass
     root.resizable(False, False)
     bg, ink, ink2 = "#f9f9ff", "#191c20", "#44474e"
     root.configure(bg=bg)
@@ -176,6 +181,7 @@ def main(argv=None) -> None:
     finally:
         for r in httpd.app.runs.values():
             r.cancel()
+        httpd.app.flush()                    # annotations made in the last seconds reach report.html
         httpd.shutdown()
         httpd.server_close()
         _forget()

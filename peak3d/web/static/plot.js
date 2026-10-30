@@ -229,12 +229,21 @@
         ctx.beginPath(); ctx.moveTo(x, b.y0); ctx.lineTo(x, b.y1); ctx.stroke();
       }
       ctx.setLineDash([]);
-      for (const d of s.dots || []) {
+      for (const d of s.dots || []) {        // {x, y, color, r, shape: "dot" | "star"}
         if (!isFinite(d.x) || !isFinite(d.y)) continue;
         ctx.fillStyle = this.color(d.color, P);
         ctx.strokeStyle = P.surface;
         ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(this.sx(d.x), this.sy(d.y), d.r || 3.5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+        const X = this.sx(d.x), Y = this.sy(d.y), r = d.r || 3.5;
+        ctx.beginPath();
+        if (d.shape === "star") {
+          for (let k = 0; k < 10; k++) {
+            const a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? r * 0.45 : r;
+            if (k) ctx.lineTo(X + rr * Math.cos(a), Y + rr * Math.sin(a)); else ctx.moveTo(X + rr * Math.cos(a), Y + rr * Math.sin(a));
+          }
+          ctx.closePath();
+        } else ctx.arc(X, Y, r, 0, 2 * Math.PI);
+        ctx.fill(); ctx.stroke();
       }
       ctx.restore();
       if (active >= 0 && s.label) {     // direct label on the active series, at its right end
@@ -616,7 +625,8 @@
       if (it.kind === "ramp") {
         return h("span.key", it.left || "", h("span.ramp", { style: { background: `linear-gradient(90deg, var(${it.from}), var(${it.to}))` } }), it.right || "");
       }
-      if (it.kind === "line") return h("span.key", h("span.line-key", { style: { background: col } }), it.label);
+      if (it.kind === "line") return h("span.key", h("span.line-key" + (it.bold ? ".bold" : ""), { style: { background: col } }), it.label);
+      if (it.kind === "star") return h("span.key", h("span.star-key", { style: { color: col } }, P3.icon("star")), it.label);
       if (it.kind === "dash") return h("span.key", h("span.dash-key" + (it.bold ? ".bold" : ""), { style: { borderColor: col } }), it.label);
       if (it.kind === "dot") return h("span.key", h("span.dot-key", { style: { background: col } }), it.label);
       if (it.kind === "text") return h("span.key", it.label);

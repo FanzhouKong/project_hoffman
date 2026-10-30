@@ -5,6 +5,7 @@
   const { h, icon, fixed, int, compact, sci, duration } = P3;
   const S1 = "--viz-series-1", S2 = "--viz-series-2";
   const STATUS = ["not found", "gap-filled", "gap-filled (peak confirmed)", "detected"];
+  const STARS = ["red", "blue", "yellow"];          // the user's own marks for features (annotations.STARS)
   // params.json stage_times_s keys (peak3d process, then peak3d external for the other kernels) and their labels
   const STAGE_KEYS = [["pick_s", "Picking"], ["align_s", "Alignment"], ["group_s", "Grouping"], ["gapfill_s", "Gap filling"], ["qc_s", "QC figures"],
     ["kernel_s", "{k}"], ["read_s", "Reading files"], ["ms2_s", "MS2 mapping"], ["identify_s", "Identity search"]];
@@ -57,33 +58,52 @@
       this.minScore = this.id && this.id.h.min_score != null ? this.id.h.min_score : 0.7;
       this.setAnnotations(header.ann || {});
     }
-    // the user's choices ({row: entry}) and what follows for every row: annotated or not, the score shown
-    setAnnotations(ann) {
-      this.ann = new Map(Object.entries(ann || {}).map(([r, v]) => [+r, v]));
+    // the user's notes ({row: {annotation?, comment?, stars?}}; an older file's {row: annotation} is read too) and what
+    // follows for every row: annotated or not, the score shown
+    setAnnotations(notes) {
+      this.notes = new Map();
+      for (const [r, v] of Object.entries(notes || {})) if (v) this.notes.set(+r, v.status ? { annotation: v } : v);
       this.annotated = new Uint8Array(this.G);
       this.annScore = new Float32Array(this.G).fill(NaN);
       this.nAnnotated = 0;
       this.nByUser = 0;
       if (!this.m2) return;
       for (let g = 0; g < this.G; g++) {
-        if (!this.nms2[g] && !this.ann.has(g)) continue;
+        if (!this.nms2[g] && !this.notes.has(g)) continue;
         const x = this.annotation(g);
         if (x && !x.unknown) { this.annotated[g] = 1; this.annScore[g] = x.score; this.nAnnotated++; }
         else this.annScore[g] = this.bestScore(g);
         if (x && x.source === "user") this.nByUser++;
       }
     }
+    setNotes(g, entry) {
+      const all = {};
+      for (const [k, v] of this.notes) all[k] = v;
+      if (entry) all[g] = entry; else delete all[g];
+      this.setAnnotations(all);
+    }
+    stars(g) { const e = this.notes.get(g); return (e && e.stars) || []; }
+    comment(g) { const e = this.notes.get(g); return (e && e.comment) || ""; }
+    reviewed(g) { const e = this.notes.get(g); return !!(e && e.annotation); }
     hits(g, spec) { return (this.id && this.idsAt[spec].get(g)) || []; }
     bestScore(g) { const l = this.hits(g, this.defSpec); return l.length ? this.id.a.id_score[l[0]] : NaN; }
     // the annotation in force: the user's choice, else the best hit on the default copy at or above min_score
     annotation(g) {
-      const u = this.ann.get(g);
-      if (u) return u.status === "unknown" ? { source: "user", unknown: true } : { source: "user", name: u.name, adduct: u.precursor_type,
-        formula: u.formula, inchikey: u.inchikey, smiles: u.smiles, score: u.score, spectrum: u.spectrum, rank: u.rank };
+      const e = this.notes.get(g), u = e && e.annotation;
+      if (u) return u.status === "unknown" ? { source: "user", unknown: true } : { source: "user", confirmed: !!u.confirmed, name: u.name,
+        adduct: u.precursor_type, formula: u.formula, inchikey: u.inchikey, smiles: u.smiles, score: u.score, spectrum: u.spectrum, rank: u.rank };
       const l = this.hits(g, this.defSpec);
       if (!l.length) return null;
       const b = this.hit(l[0]);
       return b.score >= this.minScore ? Object.assign({ source: "library" }, b) : null;
+    }
+    // are the two copies of row g one and the same spectrum (one MS2, or a consensus of one that is the highest-TIC
+    // spectrum)? Then the viewer shows one
+    oneSpectrum(g) {
+      const kc = this.ms2cAt.get(g), ks = this.ms2At.get(g);
+      if (kc == null || ks == null) return true;
+      if (this.nms2[g] <= 1) return true;
+      return this.m2c.a.ms2c_merged[kc] === 1 && this.m2c.h.file[kc] === this.m2.h.file[ks] && this.m2c.h.scan[kc] === this.m2.h.scan[ks];
     }
     // one copy's spectrum: which = "consensus" (k into m2c) or "single" (k into m2)
     spectrum(which, k) {
@@ -138,21 +158,22 @@
   // times in seconds, plus the MS2 count and best library hit when the results have them
   const TABLE_COLS = ["group_id", "mz", "rt_s", "rt_min_s", "rt_max_s", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
     "rt_sd_s", "iso_offset", "charge"];
-  const MS2_COLS = ["n_ms2", "n_consensus", "annotation", "annotation_source", "annotation_score", "annotation_adduct",
-    "annotation_formula", "annotation_inchikey", "best_hit", "best_score"];
+  const MS2_COLS = ["n_ms2", "n_consensus", "annotation", "annotation_source", "reviewed", "annotation_score", "annotation_adduct",
+    "annotation_formula", "annotation_inchikey", "best_hit", "best_score", "stars", "comment"];
   function bundleTable(R, rows) {
-    const a = R.a, num = (v, d) => (isFinite(v) ? v.toFixed(d) : ""), clean = (t) => String(t || "").replace(/[\t\r\n]/g, " ");
-    const parts = [TABLE_COLS.concat(R.m2 ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
+    const a = R.a, num = (v, d) => (isFinite(v) ? v.toFixed(d) : ""), clean = (t) => String(t || "").replace(/[\t\r\n]+/g, " ");
+    const notes = !!(R.m2 || R.notes.size);
+    const parts = [TABLE_COLS.concat(notes ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
     let buf = [];
     for (const g of rows) {
       const row = [a.g_id[g], a.g_mz[g].toFixed(6), num(60 * a.g_rt[g], 2), num(60 * a.g_rt_min[g], 2), num(60 * a.g_rt_max[g], 2),
         a.g_ndet[g], a.g_nconf[g], a.g_nfill[g], num(a.g_ppm[g], 3), num(60 * a.g_rtsd[g], 3), a.g_iso[g], a.g_z[g]];
-      if (R.m2) {
-        const x = R.annotation(g), kc = R.ms2cAt.get(g), l = R.hits(g, R.defSpec), b = l.length ? R.hit(l[0]) : null;
+      if (notes) {
+        const x = R.m2 ? R.annotation(g) : null, kc = R.ms2cAt.get(g), l = R.hits(g, R.defSpec), b = l.length ? R.hit(l[0]) : null;
         const named = x && !x.unknown;
         row.push(R.nms2[g], kc != null ? R.m2c.a.ms2c_merged[kc] : 0, x ? (x.unknown ? "unknown" : clean(x.name)) : "", x ? x.source : "",
-          named ? num(x.score, 4) : "", named ? clean(x.adduct) : "", named ? clean(x.formula) : "", named ? clean(x.inchikey) : "",
-          b ? clean(b.name) : "", b ? b.score.toFixed(4) : "");
+          R.reviewed(g) ? "yes" : "no", named ? num(x.score, 4) : "", named ? clean(x.adduct) : "", named ? clean(x.formula) : "",
+          named ? clean(x.inchikey) : "", b ? clean(b.name) : "", b ? b.score.toFixed(4) : "", R.stars(g).join(";"), clean(R.comment(g)));
       }
       if (a.m_q) for (let f = 0; f < R.N; f++) { const v = R.value(g, f); row.push(v ? String(+v.toPrecision(5)) : "0"); }
       buf.push(row.join("\t"));
@@ -168,7 +189,8 @@
     const R = new Results(bundle);
     const charts = [];
     const state = { tab: "overview", sel: null, sortKey: "max", sortDir: -1, query: "", mono: false, all: false, withEic: false, ppm: 10,
-      mzLo: "", mzHi: "", rtLo: "", rtHi: "", withMs2: false, identified: false, hit: null, autoSearched: false, copy: null };
+      mzLo: "", mzHi: "", rtLo: "", rtHi: "", withMs2: false, identified: false, hit: null, autoSearched: false, copy: null,
+      starF: { red: false, blue: false, yellow: false } };
     let detailEl = null, repaintRows = null;      // the Features page's detail panel and table, while it is shown
     const track = (c) => { charts.push(c); return c; };
     const clearCharts = () => { while (charts.length) charts.pop().destroy(); };
@@ -185,6 +207,9 @@
       state.tab = id;
       detailEl = null;
       repaintRows = null;
+      headEl = annoEl = shown = null;
+      chromCharts.length = 0;              // their charts are among those clearCharts destroys now
+      annoCharts.length = 0;
       tabs.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === id)));
       clearCharts();
       body.replaceChildren();
@@ -247,6 +272,7 @@
       const bound = (v, d) => (v !== "" && isFinite(+v) ? +v : d);
       const mzLo = bound(state.mzLo, -Infinity), mzHi = bound(state.mzHi, Infinity);
       const rtLo = bound(state.rtLo, -Infinity), rtHi = bound(state.rtHi, Infinity);
+      const starOn = STARS.some((c) => state.starF[c]);
       for (let g = 0; g < R.G; g++) {
         if (a.g_mz[g] < mzLo || a.g_mz[g] > mzHi || R.rtS[g] < rtLo || R.rtS[g] > rtHi) continue;
         if (state.mono && a.g_iso[g] > 0) continue;
@@ -254,6 +280,7 @@
         if (state.withEic && !R.eicAt.has(g)) continue;
         if (state.withMs2 && !R.nms2[g]) continue;
         if (state.identified && !R.annotated[g]) continue;
+        if (starOn && !R.stars(g).some((c) => state.starF[c])) continue;
         if (idq != null && a.g_id[g] !== idq) continue;
         if (mzq != null && Math.abs(a.g_mz[g] - mzq) / mzq * 1e6 > state.ppm) continue;
         out.push(g);
@@ -283,6 +310,13 @@
         return c;
       };
       const count = h("span.body-small.muted");
+      // one chip per star colour: the features carrying any of the chosen stars
+      const starChip = (c) => {
+        const b = h("button.chip.state.star-chip", { type: "button", "aria-pressed": String(state.starF[c]), title: `Only features with a ${c} star` },
+          h("span.star-ic." + c, icon("star")), c[0].toUpperCase() + c.slice(1));
+        b.addEventListener("click", () => { state.starF[c] = !state.starF[c]; b.setAttribute("aria-pressed", String(state.starF[c])); scroller.scrollTop = 0; features_refresh(); });
+        return b;
+      };
       const dl = h("button.btn.outlined.state", { type: "button", title: opts.exportTable ?
         "The features listed here (search, filters and sort applied), with the values from aligned_feature_table.tsv; retention times in seconds" :
         "The features listed here (search, filters and sort applied); retention times in seconds. Values are rounded to 0.04 %; the exact table is aligned_feature_table.tsv in the output folder (minutes)." },
@@ -326,7 +360,7 @@
       body.append(h("div.filter-row", mapEl, h("div.filter-tools",
         h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
-          R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null, h("span.spacer"), count, dl))));
+          R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null, ...STARS.map(starChip), h("span.spacer"), count, dl))));
       const mini = track(P3.plot.scatter(mapEl, {
         height: 200, x: R.rtS, y: a.g_mz, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
         xLabel: "RT (s)", yLabel: "m/z", xFmt: (v, d) => fixed(v, Math.min(d, 0)), yFmt: (v, d) => fixed(v, Math.min(d, 0)),
@@ -367,7 +401,7 @@
         const iso = a.g_iso[g] > 0 ? `M+${a.g_iso[g]}` : "M";
         const z = a.g_z[g] > 1 ? ` · z=${a.g_z[g]}` : "";
         const tr = h("tr", { "aria-selected": String(g === state.sel), "data-g": g },
-          h("td.r", int(a.g_id[g])), ...(R.m2 ? [scoreCell(g), identCell(g)] : []),
+          h("td.r.id-cell", R.stars(g).map((c) => h("span.star-ic.mini." + c, icon("star"))), int(a.g_id[g])), ...(R.m2 ? [scoreCell(g), identCell(g)] : []),
           h("td.r", fixed(a.g_mz[g], 4)), h("td.r", fixed(R.rtS[g], 1)),
           h("td.r", fixed((a.g_rt_max[g] - a.g_rt_min[g]) * 60, 1)), h("td.r", `${a.g_ndet[g]}/${R.N}`),
           h("td.r", int(a.g_nfill[g])), h("td.r", sci(a.g_max[g])), h("td.r", isFinite(a.g_cv[g]) ? fixed(a.g_cv[g], 0) + "%" : "–"),
@@ -527,85 +561,325 @@
         status);
     }
 
-    let detailCharts = [];
+    // ---------------------------------------------------------------- feature detail
+    // a header (with the user's stars), the annotation column (candidates, head-to-tail plot, structure, the user's
+    // annotation, comment) and the chromatogram column, which stays as it is while the annotation changes
+    const chromCharts = [], annoCharts = [];
+    const drop = (list) => { for (const c of list) { c.destroy(); const k = charts.indexOf(c); if (k >= 0) charts.splice(k, 1); } list.length = 0; };
+    let headEl = null, annoEl = null, shown = null;
     function renderDetail(el, g) {
-      detailCharts.forEach((c) => { c.destroy(); const k = charts.indexOf(c); if (k >= 0) charts.splice(k, 1); });
-      detailCharts = [];
+      drop(chromCharts);
+      drop(annoCharts);
+      shown = g;
       if (g == null) {
+        headEl = annoEl = null;
         el.replaceChildren(card(".elevated", null, null, h("div.empty", icon("scatter_plot", "lg"), h("h2.title-medium", "No feature selected"), h("p.body-medium", "Pick a row in the table or a point on the feature map."))));
         return;
       }
+      headEl = h("div");
+      annoEl = h("div");
+      renderHead(g);
+      renderAnno(g);
+      el.replaceChildren(h("div.detail-grid",
+        h("div.detail-head", card(".elevated.head-card", null, null, headEl)),
+        h("div.detail-col", card(".elevated", null, null, annoEl)),
+        h("div.detail-col", card(".elevated", null, null, ...chromColumn(g)))));
+    }
+
+    function renderHead(g) {
       const a = R.a;
       const iso = a.g_iso[g] > 0 ? `M+${a.g_iso[g]} isotope` : "Monoisotopic";
       const all = a.g_ndet[g] === R.N;
-      const head = h("div",
-        h("div.label-medium.muted", `Feature #${a.g_id[g]}`),
-        h("h2.headline-small.num", `m/z ${fixed(a.g_mz[g], 4)}`),
-        h("p.body-medium.muted", `RT ${fixed(R.rtS[g], 1)} s · window ${fixed(60 * a.g_rt_min[g], 1)}–${fixed(60 * a.g_rt_max[g], 1)} s`),
-        R.annotated[g] ? (() => { const x = R.annotation(g); return h("p.body-medium.id-best", h("b", x.name), `${x.adduct ? " · " + x.adduct : ""} · score ${fixed(x.score, 2)}${x.source === "user" ? " · your annotation" : ""}`); })() : null,
-        h("div.row.wrap", { style: { marginTop: "12px" } },
+      const x = R.m2 ? R.annotation(g) : null;
+      const stars = h("div.stars", STARS.map((c) => {
+        const on = R.stars(g).includes(c);
+        const b = h("button.star-btn.state" + (on ? ".on" : ""), { type: "button", "aria-pressed": String(on), "aria-label": `${c} star`,
+          title: opts.note ? `${on ? "Remove the" : "Give this feature a"} ${c} star (your own rule; filter by it above the table)` : `${c} star${on ? "" : " (not set)"}`,
+          disabled: opts.note ? null : true }, h("span.star-ic." + c, icon(on ? "star" : "star_outline")));
+        if (opts.note) b.addEventListener("click", () => toggleStar(g, c));
+        return b;
+      }));
+      headEl.replaceChildren(h("div.head-row",
+        h("div",
+          h("div.label-medium.muted", `Feature #${a.g_id[g]}`),
+          h("h2.headline-small.num", `m/z ${fixed(a.g_mz[g], 4)}`),
+          h("p.body-medium.muted", `RT ${fixed(R.rtS[g], 1)} s · window ${fixed(60 * a.g_rt_min[g], 1)}–${fixed(60 * a.g_rt_max[g], 1)} s`),
+          x && !x.unknown ? h("p.body-medium.id-best", h("b", x.name), `${x.adduct ? " · " + x.adduct : ""} · score ${fixed(x.score, 2)}${x.source === "user" ? (x.confirmed ? " · confirmed by you" : " · your choice") : ""}`) :
+            x && x.unknown ? h("p.body-medium.id-best", h("i", "unknown"), " · set by you") : null),
+        stars),
+        h("div.row.wrap", { style: { marginTop: "10px" } },
           h("span.chip.static" + (all ? ".ok" : ".info"), icon(all ? "check_circle" : "info"), `Detected in ${a.g_ndet[g]} of ${R.N} files`),
           h("span.chip.static", iso), a.g_z[g] > 0 ? h("span.chip.static", `z = ${a.g_z[g]}`) : null,
-          a.g_nfill[g] ? h("span.chip.static", `${a.g_nfill[g]} gap-filled`) : null));
-      const parts = [head];
-      const ann = R.m2 ? annotationSection(g) : null;
-      if (ann) parts.push(ann.el);
+          a.g_nfill[g] ? h("span.chip.static", `${a.g_nfill[g]} gap-filled`) : null,
+          R.reviewed(g) ? h("span.chip.static.ok", icon("check"), "Reviewed") : null));
+    }
 
+    function renderAnno(g) {
+      drop(annoCharts);
+      annoEl.replaceChildren(...annoColumn(g));
+    }
+
+    // a structure drawing of the candidate (smiles-drawer, offline), or why there is none
+    function structure(b) {
+      const box = h("div.structure");
+      const none = (why) => box.replaceChildren(h("p.body-small.muted", why),
+        b && b.inchikey ? h("a.body-small", { href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(b.inchikey)}`, target: "_blank", rel: "noopener" }, "Look it up on PubChem") : null);
+      if (!b) { none("No candidate selected."); return box; }
+      if (!b.smiles) { none("No structure (SMILES) in the library record."); return box; }
+      if (!window.SmilesDrawer) { none("Structure drawing is not available here."); return box; }
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 260 190");
+      svg.setAttribute("role", "img");
+      svg.setAttribute("aria-label", `structure of ${b.name}`);
+      box.append(svg);
+      try {
+        const d = new window.SmilesDrawer.SvgDrawer({ width: 260, height: 190, padding: 12, bondThickness: 1.1 });
+        window.SmilesDrawer.parse(b.smiles, (tree) => { try { d.draw(tree, svg, "light"); } catch (e) { none("This SMILES could not be drawn."); } },
+          () => none("This SMILES could not be read."));
+      } catch (e) {
+        none("This SMILES could not be drawn.");
+      }
+      return box;
+    }
+
+    function annoColumn(g) {
+      if (!R.m2) return [h("div.section-title.first", h("h3.title-small", "Annotation")), h("p.body-medium.muted", "These results hold no MS2 spectra: nothing to search."), commentBlock(g)];
+      const kc = R.ms2cAt.get(g), ks = R.ms2At.get(g), n = R.nms2[g];
+      if (ks == null) return [h("div.section-title.first", h("h3.title-small", "Candidates")), h("p.body-medium.muted", "No MS2 spectrum was acquired for this feature."), commentBlock(g)];
+      const one = R.oneSpectrum(g);
+      if (one || state.copy == null || (state.copy === "consensus" && kc == null)) state.copy = kc != null ? "consensus" : "single";
+      const copy = state.copy, k = copy === "consensus" ? kc : ks, M = copy === "consensus" ? R.m2c : R.m2;
+      const merged = kc != null ? R.m2c.a.ms2c_merged[kc] : 1, files = kc != null ? R.m2c.a.ms2c_files[kc] : 1;
+      const where = `${M.h.file[k]}, scan ${M.h.scan[k]}, ${fixed(M.a[copy === "consensus" ? "ms2c_rt" : "ms2_rt"][k], 1)} s`;
+      const desc = one ? `${n <= 1 ? "The only MS2 spectrum" : `The one usable MS2 spectrum of the ${int(n)}`} mapped to this feature: ${where}.` :
+        copy === "consensus" ? `Consensus of ${merged} of the ${int(n)} MS2 spectra mapped to this feature${files > 1 ? `, from ${files} files` : ""}: peaks held by at least two spectra, weighted by precursor abundance. Most abundant precursor: ${where}.` :
+          `The highest-TIC spectrum of the ${int(n)} mapped to this feature: ${where}, precursor m/z ${fixed(R.m2.a.ms2_prec[ks], 4)}.`;
+      const out = [h("div.section-title.first", h("h3.title-small", "Candidates"), h("p.body-small.muted", desc))];
+      if (!one) {
+        const sel = h("select", { "aria-label": "Which MS2 spectrum" },
+          h("option", { value: "consensus" }, `Consensus of ${merged} spectra`), h("option", { value: "single" }, "Highest-TIC spectrum (MassCube's choice)"));
+        sel.value = copy;
+        sel.addEventListener("change", () => { state.copy = sel.value; state.hit = null; renderAnno(g); });
+        out.push(h("div.copy-pick", field("Spectrum", sel, h("span.select-arrow", icon("expand_more")), "300px")));
+      }
+      const hits = R.hits(g, copy === "consensus" ? 0 : 1);
+      if (state.hit == null || !hits.includes(state.hit)) state.hit = hits.length ? hits[0] : null;
+      const spec = () => {
+        const b = state.hit != null ? R.hit(state.hit) : null;
+        return { top: R.spectrum(copy, k), bottom: b && b.spec ? b.spec : null, bottomLabel: b ? b.name : null };
+      };
+      const candEl = h("div"), annBox = h("div");
+      const drawCand = () => { const b = state.hit != null ? R.hit(state.hit) : null;
+        candEl.replaceChildren(h("div.cand", structure(b), b ? kv([["Name", b.name], ["Formula", b.formula], ["Adduct", b.adduct],
+          ["InChIKey", b.inchikey ? h("code.mono", b.inchikey) : null], ["SMILES", b.smiles ? h("code.mono.wrap", b.smiles) : null],
+          ["Library precursor", isFinite(b.prec) ? `m/z ${fixed(b.prec, 4)} (${fixed(b.ppm, 1)} ppm)` : null]]) : h("span"))); };
+      const drawAnn = () => annBox.replaceChildren(...userAnnotation(g));
+      let chart = null;
+      if (!R.id) out.push(h("p.body-medium.muted", "No identity search yet: choose a spectral library in the Identity search panel."));
+      else if (!hits.length) out.push(banner(`No library spectrum scoring above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)} (${R.id.h.method_label || R.id.h.method}) within the precursor tolerance.`));
+      else {
+        const x = R.annotation(g);
+        const tb = h("tbody", hits.map((j) => {
+          const b = R.hit(j);
+          const chosen = x && !x.unknown && x.name === b.name && x.spectrum === b.spectrum && x.rank === b.rank;
+          const tr = h("tr" + (b.score < R.minScore ? ".below" : ""), { "aria-selected": String(j === state.hit) }, h("td.r", b.rank),
+            h("td.ident", { title: b.name }, h("span.id-name", b.name), chosen ? h("span.id-user", "annotation") : null),
+            h("td.r", fixed(b.score, 3)), h("td", b.adduct || "–"), h("td", b.formula || "–"), h("td.r", fixed(b.ppm, 1)), h("td.r", int(b.nmatch)));
+          tr.addEventListener("click", () => {
+            state.hit = j;
+            tb.querySelectorAll("tr").forEach((r) => r.setAttribute("aria-selected", String(r === tr)));
+            if (chart) chart.update(spec());
+            drawCand();
+            drawAnn();
+          });
+          return tr;
+        }));
+        const nBelow = hits.filter((j) => R.id.a.id_score[j] < R.minScore).length;
+        out.push(h("div.table-wrap.hits.scroll", h("table.data", h("thead", h("tr", ["#", "Library match", "Score", "Adduct", "Formula", "Δ ppm", "Peaks"]
+          .map((t, i) => h("th" + ([0, 2, 5, 6].includes(i) ? ".r" : ""), t)))), tb)),
+          h("p.body-small.muted", { style: { margin: "6px 0 0" } }, `${int(hits.length)} candidate${hits.length === 1 ? "" : "s"} above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)}` +
+            (nBelow ? `; ${int(nBelow)} below the annotation threshold ${fixed(R.minScore, 2)} (grey)` : "") + ". Click one to compare."));
+      }
+      const specEl = h("div");
+      chart = track(P3.plot.mirror(specEl, Object.assign({ height: 230, topLabel: copy === "consensus" && !one ? "consensus" : "measured", tol: (R.id && R.id.h.fragment_tol) || 0.02 }, spec())));
+      annoCharts.push(chart);
+      out.push(h("div.section-title", h("h3.title-small", "Head-to-tail")), specEl);
+      if (R.id) out.push(P3.plot.legend([{ color: S1, label: "measured, matched" }, { color: S2, label: "library, matched" }, { color: "--viz-neutral", label: "unmatched" }]));
+      if (R.id && hits.length) { drawCand(); out.push(h("div.section-title", h("h3.title-small", "Selected candidate")), candEl); }
+      drawAnn();
+      out.push(annBox, commentBlock(g));
+      return out;
+    }
+
+    // the user's annotation, apart from the candidates: the library's best consensus hit by default, confirmed or
+    // replaced by the user, or "unknown"; set in the app (opts.annotate), shown read-only in a report
+    function userAnnotation(g) {
+      const x = R.annotation(g), e = R.notes.get(g), user = !!(e && e.annotation);
+      const out = [h("div.section-title", h("h3.title-small", "User annotation"), h("p.body-small.muted",
+        `By default the best candidate on the consensus spectrum when it scores at least ${fixed(R.minScore, 2)}. Confirm it, pick another candidate, or mark the feature unknown; this is what the report and the exported table use.`))];
+      if (!x) {
+        const bs = R.bestScore(g);
+        out.push(h("p.body-medium.muted", !R.id ? "Not annotated: no identity search yet." : isFinite(bs) ?
+          `Not annotated: the best candidate scores ${fixed(bs, 2)}, below ${fixed(R.minScore, 2)}.` : "Not annotated: no candidate."));
+      } else if (x.unknown) {
+        out.push(h("div.ann-head", h("span.chip.static.warn", icon("cancel"), "Unknown · set by you")));
+      } else {
+        out.push(h("div.ann-head", h("span.chip.static" + (user ? ".info" : ".ok"), icon(user ? "check" : "check_circle"),
+          user ? (x.confirmed ? "Confirmed by you" : "Your choice") : "Library search result · not reviewed"), h("b.ann-name", x.name)),
+          kv([["Score", `${fixed(x.score, 3)} on the ${x.spectrum === "consensus" ? "consensus" : "highest-TIC"} spectrum${x.rank > 1 ? `, candidate ${x.rank}` : ""}`],
+            ["Adduct", x.adduct], ["Formula", x.formula]]));
+      }
+      if (opts.annotate && R.id) {
+        const pick = state.hit != null ? R.hit(state.hit) : null;
+        const same = pick && x && !x.unknown && x.name === pick.name && x.spectrum === pick.spectrum && x.rank === pick.rank;
+        const short = (t) => (t.length > 34 ? t.slice(0, 32) + "…" : t);
+        const btns = [];
+        if (x && x.source === "library") {
+          const ok = h("button.btn.filled.state", { type: "button" }, icon("check"), "Confirm");
+          ok.addEventListener("click", () => setAnnotation(g, { spectrum: R.defSpec ? "single" : "consensus", rank: 1 }));
+          btns.push(ok);
+        }
+        const use = h("button.btn.tonal.state", { type: "button", disabled: pick && !same ? null : true,
+          title: pick ? `${pick.name} · score ${fixed(pick.score, 3)}` : "select a candidate above" },
+          icon("check"), pick && !same ? `Use “${short(pick.name)}”` : "Use the selected candidate");
+        use.addEventListener("click", () => setAnnotation(g, { spectrum: pick.spectrum, rank: pick.rank }));
+        const unk = h("button.btn.outlined.state", { type: "button", disabled: x && x.unknown ? true : null }, icon("cancel"), "Mark unknown");
+        unk.addEventListener("click", () => setAnnotation(g, "unknown"));
+        const reset = h("button.btn.text.state", { type: "button", disabled: user ? null : true }, icon("history"), "Back to the library result");
+        reset.addEventListener("click", () => setAnnotation(g, null));
+        out.push(h("div.row.wrap.ann-actions", ...btns, use, unk, reset));
+      } else if (!opts.annotate && user) {
+        out.push(h("p.body-small.muted", "Annotations are set in the peak3d app."));
+      }
+      return out;
+    }
+
+    // the user's comment on the feature: saved as they type (app), shown in a report; exported with the table
+    function commentBlock(g) {
+      const title = h("div.section-title", h("h3.title-small", "Comment"));
+      if (!opts.note) {
+        const c = R.comment(g);
+        return h("div", title, c ? h("p.body-medium.comment-text", c) : h("p.body-small.muted", "No comment."));
+      }
+      const ta = h("textarea.comment", { rows: "3", maxlength: "4000", placeholder: "Notes on this feature: saved as you type, exported with the table", "aria-label": "Comment" });
+      ta.value = R.comment(g);
+      const st = h("span.body-small.muted.comment-status");
+      let timer = null, saved = ta.value;
+      const save = async () => {
+        clearTimeout(timer);
+        const v = ta.value;
+        if (v.trim() === saved.trim()) return;
+        st.textContent = "Saving…";
+        try {
+          const r = await opts.note(R.a.g_id[g], { comment: v });
+          saved = v;
+          R.setNotes(g, r.notes);
+          st.textContent = "Saved";
+        } catch (e) {
+          st.textContent = String(e.message || e);
+        }
+      };
+      ta.addEventListener("input", () => { clearTimeout(timer); st.textContent = ""; timer = setTimeout(save, 900); });
+      ta.addEventListener("blur", save);
+      return h("div", title, ta, st);
+    }
+
+    async function setAnnotation(g, hit) {
+      try {
+        const r = await opts.annotate(R.a.g_id[g], hit);
+        R.setNotes(g, r.notes);
+        const x = R.annotation(g);
+        P3.snack(hit === null ? "Back to the library result" : hit === "unknown" ? "Marked unknown" : x && x.confirmed ? `Confirmed ${x.name}` : `Annotated as ${x ? x.name : "?"}`);
+        if (repaintRows) repaintRows();
+        if (shown === g && headEl) { renderHead(g); renderAnno(g); }
+      } catch (e) {
+        P3.snack(String(e.message || e));
+      }
+    }
+
+    async function toggleStar(g, c) {
+      const now = R.stars(g), next = now.includes(c) ? now.filter((x) => x !== c) : now.concat(c);
+      try {
+        const r = await opts.note(R.a.g_id[g], { stars: next });
+        R.setNotes(g, r.notes);
+        if (repaintRows) repaintRows();
+        if (shown === g && headEl) renderHead(g);
+      } catch (e) {
+        P3.snack(String(e.message || e));
+      }
+    }
+
+    // the chromatograms with the peak bounds, apexes and where the MS2 spectra were taken; the values per file and
+    // the numbers. Built once per feature: annotation changes leave it alone
+    function chromColumn(g) {
+      const a = R.a, parts = [];
       const e = R.eic(g);
       const statusOf = (f) => R.status(g, f);
       if (e) {
         const chartEl = h("div");
         const t0 = 60 * a.g_rt_min[g], t1 = 60 * a.g_rt_max[g];
-        const marks = R.marks.get(g) || [];
-        const nIn = marks.filter((m) => m.kind & 1).length;
-        parts.push(h("div.section-title", h("h3.title-small", "Chromatograms"),
-          h("p.body-small.muted", `±${R.h.eic.ppm} ppm around the feature, on the aligned RT axis${R.h.eic.files.length < R.N ? `; ${R.h.eic.files.length} of ${R.N} files (evenly spaced)` : ""}. ` +
-            `Peak ${fixed(t0, 1)}–${fixed(t1, 1)} s (dashed), apex of each trace (dot)` +
-            (marks.length ? `; orange: where the MS2 spectra were taken (${int(nIn)} in the consensus, bold: the highest-TIC spectrum)` : "") + ". Hover a trace to name its file.")), chartEl);
+        const marks = R.m2 ? R.marks.get(g) || [] : [];
+        const one = R.m2 ? R.oneSpectrum(g) : true;
+        const tic = marks.filter((m) => m.kind & 2), merged = one ? [] : marks.filter((m) => m.kind & 1);
         const hasStatus = !!R.a.m_status;
         const series = e.traces.map((t) => {
           const st = statusOf(t.file);
           return { id: t.file, label: R.stems[t.file], x: e.x, y: t.y, color: hasStatus && st != null && st < 3 ? S2 : S1, width: 1.5, alpha: 0.9 };
         });
+        const at = (y, t) => {            // a trace's value at time t (linear between grid points)
+          const x = e.x, n = x.length;
+          if (t <= x[0]) return y[0];
+          if (t >= x[n - 1]) return y[n - 1];
+          let j = 0;
+          while (j < n - 2 && x[j + 1] < t) j++;
+          const w = (t - x[j]) / (x[j + 1] - x[j] || 1);
+          return (1 - w) * y[j] + w * y[j + 1];
+        };
         const dots = [];
         for (const sr of series) {          // each trace's apex inside the peak bounds
           let k = -1, bv = 0;
           for (let p = 0; p < sr.x.length; p++) if (sr.x[p] >= t0 && sr.x[p] <= t1 && sr.y[p] > bv) { bv = sr.y[p]; k = p; }
           if (k >= 0) dots.push({ x: sr.x[k], y: bv, color: sr.color });
         }
-        const vlines = [{ x: t0, color: "--viz-ink-2", dash: [5, 4], width: 1.25 }, { x: t1, color: "--viz-ink-2", dash: [5, 4], width: 1.25 }];
-        for (const m of marks) if (!(m.kind & 2)) vlines.push({ x: m.t, color: "--viz-ms2", dash: [3, 3], width: 1.25 });
-        for (const m of marks) if (m.kind & 2) vlines.push({ x: m.t, color: "--viz-ms2", dash: [7, 3], width: 2.5 });
+        for (const m of merged) {            // the spectra in the consensus: stars on their file's trace
+          const sr = series.find((r) => r.id === m.file);
+          const y = sr ? at(sr.y, m.t) : Math.max(...series.map((r) => at(r.y, m.t)));
+          dots.push({ x: m.t, y, color: "--viz-ms2", shape: "star", r: 6 });
+        }
+        const vlines = [{ x: t0, color: "--viz-ink-2", dash: [5, 4], width: 1.25 }, { x: t1, color: "--viz-ink-2", dash: [5, 4], width: 1.25 },
+          ...tic.map((m) => ({ x: m.t, color: "--viz-ms2", dash: [], width: 2.5 }))];
+        parts.push(h("div.section-title.first", h("h3.title-small", "Chromatograms"),
+          h("p.body-small.muted", `±${R.h.eic.ppm} ppm around the feature, on the aligned RT axis${R.h.eic.files.length < R.N ? `; ${R.h.eic.files.length} of ${R.N} files (evenly spaced)` : ""}. ` +
+            `Peak ${fixed(t0, 1)}–${fixed(t1, 1)} s (dashed), apex of each trace (dot)` +
+            (tic.length ? (one ? "; red line: where the MS2 spectrum was taken" : `; red line: the highest-TIC MS2 spectrum; red stars: the ${int(merged.length)} spectra merged into the consensus, on their file's trace`) : "") +
+            ". Hover a trace to name its file.")), chartEl);
         const c = track(P3.plot.line(chartEl, {
-          height: 240, series, vlines, dots, xLabel: "Aligned RT (s)", yLabel: "Intensity",
+          height: 260, series, vlines, dots, xLabel: "Aligned RT (s)", yLabel: "Intensity",
           xFmt: (v, d) => fixed(v, Math.min(d, 1)),
           label: (si) => series[si].label,
           tip: (si, k) => { const st = statusOf(series[si].id); return `<b>${esc(series[si].label)}</b><br>RT ${fixed(e.x[k], 1)} s · ${sci(series[si].y[k])}${st != null ? "<br>" + STATUS[st] : ""}`; },
         }));
-        detailCharts.push(c);
+        chromCharts.push(c);
         parts.push(P3.plot.legend([
           ...(hasStatus ? [{ kind: "line", color: S1, label: "detected by the picker" }, { kind: "line", color: S2, label: "gap-filled" }] : []),
           { kind: "dash", color: "--viz-ink-2", label: "peak start / end" }, { kind: "dot", color: S1, label: "apex" },
-          ...(marks.length ? [{ kind: "dash", color: "--viz-ms2", label: "MS2 in the consensus" }, { kind: "dash", bold: true, color: "--viz-ms2", label: "highest-TIC MS2" }] : [])]));
+          ...(tic.length ? (one ? [{ kind: "line", bold: true, color: "--viz-ms2", label: "MS2 spectrum" }] :
+            [{ kind: "line", bold: true, color: "--viz-ms2", label: "highest-TIC MS2" }, { kind: "star", color: "--viz-ms2", label: "MS2 in the consensus" }]) : [])]));
       } else {
-        parts.push(h("div.section-title", h("h3.title-small", "Chromatograms")),
+        parts.push(h("div.section-title.first", h("h3.title-small", "Chromatograms")),
           banner(R.h.eic ? "Not stored for this feature: the report keeps chromatograms for the most intense features only (peak3d report --eic-budget raises the limit)." :
             `Not available: ${R.h.eic_note || "no point-cloud cache"}. Re-run with --keep-cache, or build the report while the cache exists.`));
       }
-
-      if (R.m2) parts.push(...ms2Section(g, ann));
-
       if (R.a.m_q) {
         const vals = R.stems.map((_, f) => R.value(g, f));
         const cols = R.stems.map((_, f) => (statusOf(f) === 3 ? S1 : S2));
         const barEl = h("div");
         parts.push(h("div.section-title", h("h3.title-small", `${R.quant} in each file`)), barEl,
           P3.plot.legend([{ color: S1, label: "detected" }, { color: S2, label: "gap-filled" }]));
-        const c = track(P3.plot.bars(barEl, {
-          height: 180, values: vals, colors: cols, xLabel: "File", yLabel: R.quant,
+        chromCharts.push(track(P3.plot.bars(barEl, {
+          height: 170, values: vals, colors: cols, xLabel: "File", yLabel: R.quant,
           xTick: (i) => String(i + 1), tip: (f) => `<b>${esc(R.stems[f])}</b><br>${sci(vals[f])} · ${STATUS[statusOf(f) || 0]}`,
-        }));
-        detailCharts.push(c);
+        })));
       } else if (R.h.matrix_note) {
         parts.push(h("div.section-title", h("h3.title-small", `${R.quant} in each file`)), banner(`Per-file values are not embedded (${R.h.matrix_note}); see aligned_feature_table.tsv.`));
       }
@@ -617,133 +891,7 @@
         ["Peak width", fixed((a.g_rt_max[g] - a.g_rt_min[g]) * 60, 1) + " s"],
         ["Found by", `picker in ${a.g_ndet[g]}, confirmed by gap filling in ${a.g_nconf[g]}, filled in ${a.g_nfill[g]}`],
       ]));
-      el.replaceChildren(card(".elevated", null, null, ...parts));
-    }
-
-    // the user's annotation of the feature, apart from the search results: the library's best consensus hit by default,
-    // or the hit the user picked, or "unknown"; set in the app (opts.annotate), shown read-only in a report
-    function annotationSection(g) {
-      const el = h("div");
-      const ctl = { refresh: () => {} };
-      const draw = () => {
-        const x = R.annotation(g), user = R.ann.has(g);
-        const out = [h("div.section-title", h("h3.title-small", "User annotation"), h("p.body-small.muted",
-          `What this feature is taken to be. By default the best library hit on the consensus spectrum, when it scores at least ${fixed(R.minScore, 2)}; ` +
-          "pick another hit from the search results below, or mark the feature unknown. Used in the report and the exported tables."))];
-        if (!x) {
-          const bs = R.bestScore(g);
-          out.push(h("p.body-medium.muted", !R.id ? "Not annotated: no identity search yet." : isFinite(bs) ?
-            `Not annotated: the best hit scores ${fixed(bs, 2)}, below ${fixed(R.minScore, 2)}.` : "Not annotated: no library hit."));
-        } else if (x.unknown) {
-          out.push(h("div.ann-head", h("span.chip.static.warn", icon("cancel"), "Unknown · set by you")));
-        } else {
-          out.push(h("div.ann-head", h("span.chip.static" + (user ? ".info" : ".ok"), icon(user ? "tune" : "check_circle"), user ? "Your choice" : "Library search result"),
-            h("b.ann-name", x.name)), kv([["Adduct", x.adduct], ["Formula", x.formula],
-            ["Score", `${fixed(x.score, 3)} on the ${x.spectrum === "consensus" ? "consensus" : "highest-TIC"} spectrum${x.rank > 1 ? `, hit ${x.rank}` : ""}`],
-            ["InChIKey", x.inchikey ? h("code.mono", x.inchikey) : null]]));
-        }
-        if (opts.annotate && R.id) {
-          const pick = state.hit != null ? R.hit(state.hit) : null;
-          const same = pick && x && !x.unknown && x.name === pick.name && x.spectrum === pick.spectrum && x.rank === pick.rank;
-          const short = (t) => (t.length > 36 ? t.slice(0, 34) + "…" : t);
-          const use = h("button.btn.tonal.state", { type: "button", disabled: pick && !same ? null : true,
-            title: pick ? `${pick.name} · score ${fixed(pick.score, 3)} on the ${pick.spectrum} spectrum` : "select a hit in the search results below" },
-            icon("check"), pick && !same ? `Use “${short(pick.name)}”` : "Use the selected hit");
-          use.addEventListener("click", () => setAnnotation(g, { spectrum: pick.spectrum, rank: pick.rank }));
-          const unk = h("button.btn.outlined.state", { type: "button", disabled: x && x.unknown ? true : null }, icon("cancel"), "Mark unknown");
-          unk.addEventListener("click", () => setAnnotation(g, "unknown"));
-          const reset = h("button.btn.text.state", { type: "button", disabled: user ? null : true }, icon("history"), "Back to the library result");
-          reset.addEventListener("click", () => setAnnotation(g, null));
-          out.push(h("div.row.wrap.ann-actions", use, unk, reset));
-        } else if (R.ann.size && !opts.annotate) {
-          out.push(h("p.body-small.muted", "Annotations are set in the peak3d app."));
-        }
-        el.replaceChildren(...out);
-      };
-      ctl.refresh = draw;
-      draw();
-      return { el, refresh: () => ctl.refresh() };
-    }
-
-    async function setAnnotation(g, hit) {
-      try {
-        const r = await opts.annotate(R.a.g_id[g], hit);
-        const all = {};
-        for (const [k, v] of R.ann) all[k] = v;
-        if (r && r.annotation) all[g] = r.annotation; else delete all[g];
-        R.setAnnotations(all);
-        P3.snack(hit === null ? "Back to the library result" : hit === "unknown" ? "Marked unknown" : `Annotated as ${r.annotation.name}`);
-        if (repaintRows) repaintRows();
-        if (detailEl && state.sel === g) renderDetail(detailEl, g);
-      } catch (e) {
-        P3.snack(String(e.message || e));
-      }
-    }
-
-    // one of the feature's two MS2 copies (the consensus by default; the highest-TIC spectrum on request), mirrored
-    // against the selected library hit, and that copy's search results: every hit above 0.1, weaker than the
-    // annotation threshold greyed
-    function ms2Section(g, ann) {
-      const kc = R.ms2cAt.get(g), ks = R.ms2At.get(g);
-      const n = R.nms2[g];
-      if (ks == null) return [h("div.section-title", h("h3.title-small", "MS2 spectrum")), h("p.body-medium.muted", "No MS2 spectrum was acquired for this feature.")];
-      if (state.copy == null || (state.copy === "consensus" && kc == null)) state.copy = kc != null ? "consensus" : "single";
-      const copy = state.copy, k = copy === "consensus" ? kc : ks, M = copy === "consensus" ? R.m2c : R.m2;
-      const merged = kc != null ? R.m2c.a.ms2c_merged[kc] : 0, files = kc != null ? R.m2c.a.ms2c_files[kc] : 0;
-      const sel = h("select", { "aria-label": "Which MS2 spectrum" },
-        kc != null ? h("option", { value: "consensus" }, `Consensus of ${merged} spectr${merged === 1 ? "um" : "a"}`) : null,
-        h("option", { value: "single" }, "Highest-TIC spectrum (MassCube's choice)"));
-      sel.value = copy;
-      sel.addEventListener("change", () => { state.copy = sel.value; state.hit = null; renderDetail(detailEl || sel.closest(".detail"), g); });
-      const where = `${M.h.file[k]}, scan ${M.h.scan[k]}, ${fixed(M.a[copy === "consensus" ? "ms2c_rt" : "ms2_rt"][k], 1)} s`;
-      const desc = copy === "consensus" ?
-        `${merged} of the ${int(n)} MS2 spectra mapped to this feature${files > 1 ? `, from ${files} files` : ""}, merged: a peak stays when at least two spectra hold it, intensities weighted by precursor abundance${merged === 1 ? " (only one usable spectrum: it is shown as it is)" : ""}. Most abundant precursor: ${where}.` :
-        `The spectrum with the highest total ion current of the ${int(n)} mapped to this feature: ${where}, precursor m/z ${fixed(R.m2.a.ms2_prec[ks], 4)}.`;
-      const out = [h("div.section-title", h("h3.title-small", "MS2 spectrum and library search"), h("p.body-small.muted", desc)),
-        h("div.copy-pick", field("Spectrum", sel, h("span.select-arrow", icon("expand_more")), "300px"))];
-      const hits = R.hits(g, copy === "consensus" ? 0 : 1);
-      if (state.hit == null || !hits.includes(state.hit)) state.hit = hits.length ? hits[0] : null;
-      const spec = () => {
-        const b = state.hit != null ? R.hit(state.hit) : null;
-        return { top: R.spectrum(copy, k), bottom: b && b.spec ? b.spec : null, bottomLabel: b ? b.name : null };
-      };
-      const specEl = h("div");
-      const chart = track(P3.plot.mirror(specEl, Object.assign({ height: 250, topLabel: copy === "consensus" ? "consensus" : "measured", tol: (R.id && R.id.h.fragment_tol) || 0.02 }, spec())));
-      detailCharts.push(chart);
-      out.push(specEl);
-      if (!R.id) return out.concat(h("p.body-small.muted", "No identity search yet."));
-      out.push(P3.plot.legend([{ color: S1, label: "measured, matched" }, { color: S2, label: "library, matched" }, { color: "--viz-neutral", label: "unmatched" }]));
-      if (!hits.length) return out.concat(banner(`No library spectrum scoring above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)} (${R.id.h.method_label || R.id.h.method}) within the precursor tolerance.`));
-      const more = h("div");
-      const showMore = () => {
-        const b = R.hit(state.hit);
-        more.replaceChildren(kv([["InChIKey", b.inchikey ? h("code.mono", b.inchikey) : null], ["SMILES", b.smiles ? h("code.mono", b.smiles) : null],
-          ["Library precursor", isFinite(b.prec) ? `m/z ${fixed(b.prec, 4)} (${fixed(b.ppm, 1)} ppm)` : null]]));
-      };
-      const x = R.annotation(g);
-      const tb = h("tbody", hits.map((j) => {
-        const b = R.hit(j);
-        const chosen = x && !x.unknown && x.name === b.name && x.spectrum === b.spectrum && x.rank === b.rank;
-        const tr = h("tr" + (b.score < R.minScore ? ".below" : ""), { "aria-selected": String(j === state.hit) }, h("td.r", b.rank),
-          h("td.ident", { title: b.name }, h("span.id-name", b.name), chosen ? h("span.id-user", "annotation") : null),
-          h("td.r", fixed(b.score, 3)), h("td", b.adduct || "–"), h("td", b.formula || "–"), h("td.r", fixed(b.ppm, 1)), h("td.r", int(b.nmatch)));
-        tr.addEventListener("click", () => {
-          state.hit = j;
-          tb.querySelectorAll("tr").forEach((r) => r.setAttribute("aria-selected", String(r === tr)));
-          chart.update(spec());
-          showMore();
-          if (ann) ann.refresh();
-        });
-        return tr;
-      }));
-      showMore();
-      if (ann) ann.refresh();
-      const nBelow = hits.filter((j) => R.id.a.id_score[j] < R.minScore).length;
-      return out.concat(h("p.body-small.muted", { style: { margin: "12px 0 0" } },
-        `${int(hits.length)} hit${hits.length === 1 ? "" : "s"} above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)}` +
-        (nBelow ? `; ${int(nBelow)} below the annotation threshold ${fixed(R.minScore, 2)} (grey)` : "") + ". Click one to compare; use it as the annotation above."),
-        h("div.table-wrap.hits.scroll", h("table.data", h("thead", h("tr", ["#", "Library match", "Score", "Adduct", "Formula", "Δ ppm", "Peaks"]
-          .map((t, i) => h("th" + ([0, 2, 5, 6].includes(i) ? ".r" : ""), t)))), tb)), more);
+      return parts;
     }
 
     // ---------------------------------------------------------------- alignment

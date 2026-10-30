@@ -216,12 +216,13 @@ def _spectra(reps, row_of, prefix):
     return arrays, {"n": int(len(k)), "file": [str(reps["file"][i]) for i in k], "scan": [str(reps["scan"][i]) for i in k]}
 
 
-def _marks(output: Path, row_of):
+def _marks(output: Path, row_of, stems):
     """where the spectra of the consensus and the highest-TIC spectrum were taken, on the aligned axis (s):
-    mk_row, mk_t, mk_kind (1 in the consensus, 2 highest TIC, 3 both)"""
+    mk_row, mk_t, mk_kind (1 in the consensus, 2 highest TIC, 3 both), mk_file (index into stems, -1 unknown)"""
     mp = output / "ms2_map.tsv"
     if not mp.exists():
         return {}
+    file_of = {s: i for i, s in enumerate(stems)}
     m = pd.read_csv(mp, sep="\t", dtype={"file": str, "scan": str})
     if "in_consensus" not in m:
         m["in_consensus"] = 0
@@ -229,15 +230,17 @@ def _marks(output: Path, row_of):
     kind = m["in_consensus"].fillna(0).astype(int) + 2 * m["representative"].fillna(0).astype(int)
     keep = (kind > 0) & m["group_id"].isin(list(row_of))
     return {"mk_row": np.array([row_of[int(g)] for g in m.loc[keep, "group_id"]], np.int32),
-            "mk_t": t[keep].to_numpy(np.float32), "mk_kind": kind[keep].to_numpy(np.uint8)}
+            "mk_t": t[keep].to_numpy(np.float32), "mk_kind": kind[keep].to_numpy(np.uint8),
+            "mk_file": np.array([file_of.get(f, -1) for f in m.loc[keep, "file"]], np.int16)}
 
 
-def ms2_ids(output, group_ids) -> tuple[dict, dict]:
+def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
     """both MS2 copies of every group that has MS2 (ms2.read_representatives: the highest-TIC spectrum as ms2_*, the
     consensus as ms2c_*), where their spectra were taken (mk_*), the hits of the last identity search on both
     (identifications.tsv, .msp, .json; id_spec 0 consensus, 1 single) and the user's annotations, as header parts and
-    arrays keyed by row of the aligned table (group_ids in table order). Header keys ms2 / ms2c / ids are None when
-    the output has no such part; ann maps a row (as text) to the user's annotation"""
+    arrays keyed by row of the aligned table (group_ids in table order; stems: its file columns, read from the table
+    when not given). Header keys ms2 / ms2c / ids are None when the output has no such part; ann maps a row (as
+    text) to the user's notes on it (annotations.load_user)"""
     from ..annotations import load_user, read_hits
     from ..ms2 import read_representatives
     output = Path(output)
@@ -249,7 +252,10 @@ def ms2_ids(output, group_ids) -> tuple[dict, dict]:
             a, head[key] = _spectra(reps, row_of, prefix)
             arrays.update(a)
     if head["ms2"] is not None:
-        arrays.update(_marks(output, row_of))
+        if stems is None:
+            cols = pd.read_csv(output / "aligned_feature_table.tsv", sep="\t", nrows=0).columns
+            stems = [c for c in cols if c not in BASE_COLS]
+        arrays.update(_marks(output, row_of, stems))
     hits = read_hits(output) if head["ms2"] is not None else None
     if hits is not None:
         hits = hits.copy()                      # read_hits keeps its frame for the next caller
@@ -405,7 +411,7 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
             arrays.update(extra)
 
     try:
-        ms2_head, extra = ms2_ids(output, arrays["g_id"])
+        ms2_head, extra = ms2_ids(output, arrays["g_id"], stems)
         arrays.update(extra)
     except Exception as e:   # a damaged MS2 or identification file never costs the rest of the results
         ms2_head = {**{k: None for k in MS2_KEYS}, "ms2_note": f"{type(e).__name__}: {e}"}

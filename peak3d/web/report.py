@@ -11,7 +11,7 @@ from pathlib import Path
 from . import bundle
 
 STATIC = Path(__file__).with_name("static")
-SCRIPTS = ("icons.js", "core.js", "plot.js", "viewer.js")       # load order; the GUI adds app.js
+SCRIPTS = ("logo.js", "icons.js", "core.js", "plot.js", "smiles-drawer.min.js", "viewer.js")   # load order; GUI adds app.js
 DATA_RE = re.compile(rb'<script id="peak3d-data" type="application/octet-stream">([A-Za-z0-9+/=\s]*)</script>')
 
 
@@ -57,7 +57,7 @@ def refresh_ids(output) -> bool:
     arrays = {k: v for k, v in arrays.items() if not k.startswith(bundle.MS2_PREFIXES)}
     for k in bundle.MS2_KEYS:
         header.pop(k, None)
-    head, extra = bundle.ms2_ids(output, arrays["g_id"])
+    head, extra = bundle.ms2_ids(output, arrays["g_id"], header.get("stems"))
     arrays.update(extra)
     blob = gzip.compress(bundle.pack(bundle._clean({**header, **head}), arrays), compresslevel=6, mtime=0)
     tmp = rep.with_name(rep.name + ".tmp")

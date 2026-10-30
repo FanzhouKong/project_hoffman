@@ -3,10 +3,11 @@
 identifications.tsv lists every library hit of both MS2 copies of each feature (library.identify). A feature's
 default annotation is its best hit on the consensus spectrum (on the single spectrum for outputs made before there
 was a consensus) when that scores at least the search's min_score. A user can replace it with any other listed hit
-or mark the feature unknown; those choices live in user_annotations.json, keyed by group id, with the hit's library
-fields copied in, so they outlast a new search. feature_annotations.tsv holds the annotation in force for every
-feature with MS2 and where it came from (library, user, or unknown set by the user); the report and the exported
-tables use it."""
+or mark the feature unknown (or confirm the library's hit), and add a comment and stars (red, blue, yellow) to any
+feature; all of it lives in user_annotations.json, keyed by group id, with a chosen hit's library fields copied
+in, so it outlasts a new search. feature_annotations.tsv holds, for every feature with MS2 or notes, the
+annotation in force and where it came from (library, user, or unknown set by the user), whether the user reviewed
+it, the stars and the comment; the report and the exported tables use it."""
 from __future__ import annotations
 
 import json
@@ -18,13 +19,17 @@ import pandas as pd
 
 USER_FILE = "user_annotations.json"
 TABLE_FILE = "feature_annotations.tsv"
-COLUMNS = ["group_id", "annotation", "source", "score", "spectrum", "adduct", "formula", "inchikey", "smiles",
-           "best_hit", "best_score"]
+COLUMNS = ["group_id", "annotation", "source", "reviewed", "score", "spectrum", "adduct", "formula", "inchikey",
+           "smiles", "best_hit", "best_score", "stars", "comment"]
 TEXT = ("name", "precursor_type", "formula", "inchikey", "smiles", "spectrum")
+STARS = ("red", "blue", "yellow")       # three marks a user can give a feature, each for a rule of their own
+MAX_COMMENT = 4000
 
 
 def load_user(output) -> dict[int, dict]:
-    """the user's choices: {group_id: {"status": "user" | "unknown", ...hit fields}}"""
+    """the user's notes per feature: {group_id: {"annotation": {"status": "user" | "unknown", ...hit fields},
+    "comment": text, "stars": [...]}}, each key present only when set (files of the first format, one
+    annotation per feature, are read too)"""
     p = Path(output) / USER_FILE
     if not p.exists():
         return {}
@@ -32,16 +37,19 @@ def load_user(output) -> dict[int, dict]:
         d = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return {int(k): v for k, v in (d.get("annotations") or {}).items()}
+    if "features" in d:
+        return {int(k): v for k, v in d["features"].items()}
+    return {int(k): {"annotation": v} for k, v in (d.get("annotations") or {}).items()}
 
 
-def _save_user(output, ann: dict) -> None:
+def _save_user(output, notes: dict) -> None:
     p = Path(output) / USER_FILE
-    if not ann:
+    notes = {g: e for g, e in notes.items() if e}
+    if not notes:
         p.unlink(missing_ok=True)
         return
     tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps({"version": 1, "annotations": {str(k): ann[k] for k in sorted(ann)}}, indent=1),
+    tmp.write_text(json.dumps({"version": 2, "features": {str(k): notes[k] for k in sorted(notes)}}, indent=1),
                    encoding="utf-8")
     tmp.replace(p)                      # never a half-written file, even if the app is closed mid-save
 
@@ -81,17 +89,19 @@ def default_copy(output) -> str:
 
 
 def set_user(output, group_id: int, choice) -> dict | None:
-    """record the user's annotation of one feature. choice: {"spectrum": ..., "rank": ...} = that listed hit;
-    "unknown" = no compound; None = back to the library result. Rewrites feature_annotations.tsv; returns the entry
-    stored (None after a reset). KeyError when the hit is not in identifications.tsv."""
+    """record the user's annotation of one feature. choice: {"spectrum": ..., "rank": ...} = that listed hit
+    (picking the default hit confirms it); "unknown" = no compound; None = back to the library result. Rewrites
+    feature_annotations.tsv; returns the feature's notes (None when nothing is left). KeyError when the hit is not
+    in identifications.tsv."""
     output = Path(output)
-    ann = load_user(output)
+    notes = load_user(output)
     g = int(group_id)
+    entry = dict(notes.get(g) or {})
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     if choice is None:
-        ann.pop(g, None)
-        entry = None
+        entry.pop("annotation", None)
     elif choice == "unknown":
-        entry = ann[g] = {"status": "unknown", "set": time.strftime("%Y-%m-%d %H:%M:%S")}
+        entry["annotation"] = {"status": "unknown", "set": stamp}
     else:
         h = read_hits(output)
         spec, rank = str(choice.get("spectrum", "")), int(choice.get("rank", 0))
@@ -100,23 +110,53 @@ def set_user(output, group_id: int, choice) -> dict | None:
             raise KeyError(f"feature {g} has no hit {rank} on the {spec} spectrum")
         r = row.iloc[0]
         info = _search_info(output)
-        entry = ann[g] = {"status": "user", **{c: str(r[c]) for c in TEXT}, "rank": rank,
-                          "score": float(r["score"]), "library_index": int(r["library_index"]),
-                          "library": info.get("library", ""), "method": info.get("method", ""),
-                          "set": time.strftime("%Y-%m-%d %H:%M:%S")}
-    _save_user(output, ann)
+        entry["annotation"] = {"status": "user", "confirmed": spec == default_copy(output) and rank == 1,
+                               **{c: str(r[c]) for c in TEXT}, "rank": rank, "score": float(r["score"]),
+                               "library_index": int(r["library_index"]), "library": info.get("library", ""),
+                               "method": info.get("method", ""), "set": stamp}
+    notes[g] = entry
+    _save_user(output, notes)
     write_table(output)
-    return entry
+    return entry or None
+
+
+def set_note(output, group_id: int, comment: str | None = None, stars=None) -> dict | None:
+    """the user's comment and stars on one feature (None leaves that part as it is; "" / [] clear it). Rewrites
+    feature_annotations.tsv; returns the feature's notes (None when nothing is left). ValueError on an unknown star."""
+    output = Path(output)
+    notes = load_user(output)
+    g = int(group_id)
+    entry = dict(notes.get(g) or {})
+    if comment is not None:
+        text = str(comment).strip()[:MAX_COMMENT]
+        if text:
+            entry["comment"] = text
+        else:
+            entry.pop("comment", None)
+    if stars is not None:
+        bad = [s for s in stars if s not in STARS]
+        if bad:
+            raise ValueError(f"unknown star {bad[0]!r}; one of {', '.join(STARS)}")
+        keep = [s for s in STARS if s in set(stars)]
+        if keep:
+            entry["stars"] = keep
+        else:
+            entry.pop("stars", None)
+    notes[g] = entry
+    _save_user(output, notes)
+    write_table(output)
+    return entry or None
 
 
 def effective(output) -> pd.DataFrame:
-    """the annotation in force for every feature with MS2 (and any the user annotated): COLUMNS"""
+    """the annotation in force for every feature with MS2 and every feature with notes: COLUMNS. reviewed is "yes"
+    when the user decided the annotation (picked or confirmed a hit, or marked the feature unknown)"""
     output = Path(output)
     mp = output / "ms2_map.tsv"
     groups = set(pd.read_csv(mp, sep="\t", usecols=["group_id"])["group_id"].astype(int)) if mp.exists() else set()
-    user = load_user(output)
-    groups |= set(user)
-    best: dict[int, pd.Series] = {}
+    notes = load_user(output)
+    groups |= set(notes)
+    best: dict[int, tuple] = {}
     h = read_hits(output)
     min_score = float(_search_info(output).get("min_score", 0.7))
     if h is not None and len(h):
@@ -125,14 +165,16 @@ def effective(output) -> pd.DataFrame:
     rows = []
     for g in sorted(groups):
         b = best.get(g)
-        row = {"group_id": g, "annotation": "", "source": "", "score": np.nan, "spectrum": "", "adduct": "",
-               "formula": "", "inchikey": "", "smiles": "", "best_hit": b.name if b is not None else "",
-               "best_score": float(b.score) if b is not None else np.nan}
-        u = user.get(g)
+        e = notes.get(g) or {}
+        row = {"group_id": g, "annotation": "", "source": "", "reviewed": "no", "score": np.nan, "spectrum": "",
+               "adduct": "", "formula": "", "inchikey": "", "smiles": "", "best_hit": b.name if b is not None else "",
+               "best_score": float(b.score) if b is not None else np.nan, "stars": ";".join(e.get("stars", [])),
+               "comment": e.get("comment", "")}
+        u = e.get("annotation")
         if u and u.get("status") == "unknown":
-            row.update(annotation="unknown", source="user")
+            row.update(annotation="unknown", source="user", reviewed="yes")
         elif u:
-            row.update(annotation=u.get("name", ""), source="user", score=u.get("score", np.nan),
+            row.update(annotation=u.get("name", ""), source="user", reviewed="yes", score=u.get("score", np.nan),
                        spectrum=u.get("spectrum", ""), adduct=u.get("precursor_type", ""), formula=u.get("formula", ""),
                        inchikey=u.get("inchikey", ""), smiles=u.get("smiles", ""))
         elif b is not None and b.score >= min_score:
@@ -144,7 +186,9 @@ def effective(output) -> pd.DataFrame:
 
 def write_table(output) -> Path:
     p = Path(output) / TABLE_FILE
-    effective(output).to_csv(p, sep="\t", index=False, float_format="%.4f")
+    t = effective(output)
+    t["comment"] = t["comment"].str.replace(r"[\t\r\n]+", " ", regex=True)      # one line per feature in a TSV
+    t.to_csv(p, sep="\t", index=False, float_format="%.4f")
     return p
 
 

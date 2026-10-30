@@ -126,10 +126,11 @@ feature then gets two spectra:
 
 With `--library` (an `.msp` file, or a MassCube `.pkl`), both are searched (`--similarity`, default weighted
 entropy). Every hit scoring above 0.1 is listed in `identifications.tsv`. A feature's best consensus hit at or
-above `--min-similarity` (default 0.7) is its annotation in `feature_annotations.tsv`. In the app you can pick
-another hit or mark a feature unknown; that choice is saved in `user_annotations.json`, kept apart from the
-search results, and used in the report and the exported tables. `peak3d identify OUT --library LIB` searches
-again without re-processing; your annotations are kept.
+above `--min-similarity` (default 0.7) is its annotation in `feature_annotations.tsv`. In the app you can confirm
+it, pick another candidate or mark the feature unknown (the table's `reviewed` column says whether you did), write
+a comment, and give features red, blue or yellow stars to filter by. All of it is saved in `user_annotations.json`,
+kept apart from the search results, and used in the report and the exported tables (`reviewed`, `stars`,
+`comment` columns). `peak3d identify OUT --library LIB` searches again without re-processing; your notes are kept.
 
 ### In the browser: `peak3d gui`
 

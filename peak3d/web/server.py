@@ -239,27 +239,33 @@ def _seconds(v: str) -> str:
     return f"{x * 60:.6g}" if x == x else v
 
 
-EXPORT_ID_COLS = ("n_ms2", "n_consensus", "annotation", "annotation_source", "annotation_score", "annotation_adduct",
-                  "annotation_formula", "annotation_inchikey", "best_hit", "best_score")
+EXPORT_ID_COLS = ("n_ms2", "n_consensus", "annotation", "annotation_source", "reviewed", "annotation_score",
+                  "annotation_adduct", "annotation_formula", "annotation_inchikey", "best_hit", "best_score", "stars",
+                  "comment")
 
 
 def _identity_columns(out: Path) -> dict:
-    """MS2 counts and the annotation in force (annotations.effective) per group id, as extra export columns (none
-    when the output has no MS2)"""
+    """MS2 counts, the annotation in force, the review flag, stars and comment (annotations.effective) per group id,
+    as extra export columns (none when the output has neither MS2 nor user notes)"""
+    from ..annotations import USER_FILE, effective
     map_path = out / "ms2_map.tsv"
-    if not map_path.exists() or not (out / "ms2_spectra.msp").exists():
+    has_ms2 = map_path.exists() and (out / "ms2_spectra.msp").exists()
+    if not has_ms2 and not (out / USER_FILE).exists():
         return {"header": (), "rows": {}, "empty": []}
     import pandas as pd
-    from ..annotations import effective
-    m = pd.read_csv(map_path, sep="\t")
+    m = pd.read_csv(map_path, sep="\t") if has_ms2 else pd.DataFrame(columns=["group_id"])
     n = m["group_id"].value_counts()
     nc = m.loc[m["in_consensus"] == 1, "group_id"].value_counts() if "in_consensus" in m else n * 0
     score = lambda v: f"{v:.4f}" if v == v else ""
-    ann = {int(r.group_id): [r.annotation, r.source, score(r.score), r.adduct, r.formula, r.inchikey, r.best_hit,
-                             score(r.best_score)] for r in effective(out).fillna({c: "" for c in (
-                                 "annotation", "source", "adduct", "formula", "inchikey", "best_hit")}).itertuples()}
-    rows = {int(g): [str(int(k)), str(int(nc.get(g, 0)))] + ann.get(int(g), [""] * 8) for g, k in n.items()}
-    return {"header": EXPORT_ID_COLS, "rows": rows, "empty": ["0", "0"] + [""] * 8}
+    one_line = lambda t: re.sub(r"[\t\r\n]+", " ", str(t))
+    rows = {}
+    eff = effective(out)
+    text = [c for c in eff.columns if c not in ("group_id", "score", "best_score")]
+    for r in eff.fillna({c: "" for c in text}).itertuples():
+        g = int(r.group_id)
+        rows[g] = [str(int(n.get(g, 0))), str(int(nc.get(g, 0))), r.annotation, r.source, r.reviewed, score(r.score),
+                   r.adduct, r.formula, r.inchikey, r.best_hit, score(r.best_score), r.stars, one_line(r.comment)]
+    return {"header": EXPORT_ID_COLS, "rows": rows, "empty": ["0", "0", "", "", "no"] + [""] * 8}
 
 
 def _remember(cache: dict, key: str, value) -> None:
@@ -520,6 +526,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._reveal(body)
             if url.path == "/api/results/annotate":
                 return self._annotate(body)
+            if url.path == "/api/results/note":
+                return self._note(body)
             if url.path == "/api/results/identify":
                 return self._identify(body)
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
@@ -665,7 +673,7 @@ class Handler(BaseHTTPRequestHandler):
     def _annotate(self, body):
         """the user's annotation of one feature: {"path", "group_id", "hit": {"spectrum", "rank"} | "unknown" | null}
         (null = back to the library result). Rewrites user_annotations.json and feature_annotations.tsv, answers with
-        the entry stored (null after a reset), and refreshes report.html a few seconds after the last annotation"""
+        the feature's notes (null when none are left), and refreshes report.html a few seconds after the last change"""
         from ..annotations import set_user
         out = self._output({"path": [body.get("path") or ""]})
         try:
@@ -687,7 +695,34 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             lock.release()
         self.app.refresh_later(out)
-        self._json({"group_id": g, "annotation": entry})
+        self._json({"group_id": g, "notes": entry})
+
+    def _note(self, body):
+        """the user's comment and stars on one feature: {"path", "group_id", "comment"?, "stars"?: ["red", "blue",
+        "yellow"]}; a part left out stays as it is. Answers with the feature's notes; report.html follows a few seconds
+        after the last change"""
+        from ..annotations import set_note
+        out = self._output({"path": [body.get("path") or ""]})
+        try:
+            g = int(body.get("group_id"))
+        except (TypeError, ValueError):
+            return self._error(400, "group_id must be a number")
+        comment, stars = body.get("comment"), body.get("stars")
+        if comment is not None and not isinstance(comment, str):
+            return self._error(400, "comment must be text")
+        if stars is not None and not (isinstance(stars, list) and all(isinstance(x, str) for x in stars)):
+            return self._error(400, "stars must be a list of colours")
+        lock = self.app.folder_lock(out)
+        if not lock.acquire(timeout=30):
+            return self._error(409, "the results are busy (a search is running)")
+        try:
+            entry = set_note(out, g, comment, stars)
+        except ValueError as e:
+            return self._error(400, str(e))
+        finally:
+            lock.release()
+        self.app.refresh_later(out)
+        self._json({"group_id": g, "notes": entry})
 
     def _reveal(self, body):
         """open the folder in Finder / File Explorer / the desktop's file manager (the app runs on this computer)"""

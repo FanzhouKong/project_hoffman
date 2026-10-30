@@ -54,8 +54,9 @@ def test_user_choice_unknown_and_reset(tmp_path):
     identify(out, lib, "entropy", min_score=0.7)
     with pytest.raises(KeyError):
         A.set_user(out, 1, {"spectrum": "consensus", "rank": 7})
-    entry = A.set_user(out, 1, {"spectrum": "single", "rank": 2})
+    entry = A.set_user(out, 1, {"spectrum": "single", "rank": 2})["annotation"]
     assert entry["name"] == "Isoleucine-ish" and entry["status"] == "user" and entry["library"].endswith("lib.msp")
+    assert not entry["confirmed"]
     e = A.effective(out).set_index("group_id")
     assert e.loc[1, "annotation"] == "Isoleucine-ish" and e.loc[1, "source"] == "user" and e.loc[1, "best_hit"] == "Leucine"
     A.set_user(out, 2, {"spectrum": "consensus", "rank": 1})             # a hit below min_score is a valid choice
@@ -79,4 +80,35 @@ def test_rebuilt_groups_retire_annotations_and_the_old_search(tmp_path):
     assert not (out / A.USER_FILE).exists() and len(list(out.glob("user_annotations.*.json"))) == 1
     assert not any((out / n).exists() for n in A.SEARCH_FILES)
     saved = json.loads(next(out.glob("user_annotations.*.json")).read_text())
-    assert saved["annotations"]["1"]["status"] == "unknown"
+    assert saved["features"]["1"]["annotation"]["status"] == "unknown"
+
+
+def test_confirm_comment_stars_and_review_flag(tmp_path):
+    out, lib = _output(tmp_path)
+    identify(out, lib, "entropy", min_score=0.7)
+    e = A.effective(out).set_index("group_id")
+    assert e.loc[1, "reviewed"] == "no" and e.loc[1, "source"] == "library"
+    entry = A.set_user(out, 1, {"spectrum": "consensus", "rank": 1})            # the default hit: confirmed
+    assert entry["annotation"]["confirmed"] and entry["annotation"]["name"] == "Leucine"
+    A.set_note(out, 1, comment="looks right\tcheck the\nadduct", stars=["yellow", "red"])
+    A.set_note(out, 2, stars=["blue"])                                          # notes on a feature with no annotation
+    with pytest.raises(ValueError):
+        A.set_note(out, 2, stars=["green"])
+    t = pd.read_csv(out / A.TABLE_FILE, sep="\t").set_index("group_id")
+    assert t.loc[1, "reviewed"] == "yes" and t.loc[1, "annotation"] == "Leucine" and t.loc[1, "stars"] == "red;yellow"
+    assert t.loc[1, "comment"] == "looks right check the adduct"                 # one line per feature in the table
+    assert t.loc[2, "reviewed"] == "no" and t.loc[2, "stars"] == "blue"
+    A.set_user(out, 1, None)                                                    # reset keeps the comment and stars
+    n = A.load_user(out)
+    assert "annotation" not in n[1] and n[1]["stars"] == ["red", "yellow"] and n[1]["comment"].startswith("looks right")
+    A.set_note(out, 1, comment="", stars=[])
+    A.set_note(out, 2, stars=[])
+    assert not (out / A.USER_FILE).exists()
+
+
+def test_first_format_file_is_read(tmp_path):
+    out, lib = _output(tmp_path)
+    identify(out, lib, "entropy", min_score=0.7)
+    (out / A.USER_FILE).write_text(json.dumps({"version": 1, "annotations": {"1": {"status": "unknown"}}}))
+    assert A.load_user(out) == {1: {"annotation": {"status": "unknown"}}}
+    assert A.effective(out).set_index("group_id").loc[1, "annotation"] == "unknown"

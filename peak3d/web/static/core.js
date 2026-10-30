@@ -86,11 +86,13 @@
   function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
 
   // the mark: a chromatographic peak on a blue tile
+  // the MOSA mark (logo.js); also the browser tab's icon
   function logo() {
     const el = h("span.logo", { "aria-hidden": "true" });
-    el.innerHTML = '<svg viewBox="0 0 28 28"><path d="M4 21.5h3.2c2.2 0 3.1-1.2 4-4.6l1.3-5.4c.4-1.6.9-2.4 1.5-2.4s1.1.8 1.5 2.4l1.3 5.4c.9 3.4 1.8 4.6 4 4.6H24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    if (P3.LOGO) el.append(h("img", { src: P3.LOGO, alt: "" }));
     return el;
   }
+  if (P3.LOGO && document.head && !document.querySelector('link[rel="icon"]')) document.head.append(h("link", { rel: "icon", type: "image/png", href: P3.LOGO }));
   function css(name, el) { return getComputedStyle(el || document.documentElement).getPropertyValue(name).trim(); }
 
   // ---- downloads

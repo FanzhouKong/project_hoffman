@@ -32,12 +32,14 @@ exe = EXE(
     console=not (MAC or WIN),          # Linux: runs in a terminal; Windows/macOS: the small control window
     disable_windowed_traceback=False,
     upx=False,
+    icon=os.path.join(SPECPATH, "mosa.ico") if WIN else None,     # packaging/make_icons.py
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="peak3d", upx=False)
 if MAC:
     app = BUNDLE(
         coll,
         name="peak3d.app",
+        icon=os.path.join(SPECPATH, "mosa.icns"),
         bundle_identifier="edu.ucdavis.peak3d",
         info_plist={
             "CFBundleDisplayName": "peak3d",

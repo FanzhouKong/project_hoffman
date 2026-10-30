@@ -378,28 +378,38 @@ def test_identity_search_through_the_server(gui):
     rows = [ln.split("\t") for ln in raw.decode().splitlines()]
     head = rows[0]
     assert head[:5] == ["group_id", "mz", "rt_s", "rt_min_s", "rt_max_s"] and "rt_sd_s" in head
-    assert head[-10:] == list(server.EXPORT_ID_COLS)
+    assert head[-13:] == list(server.EXPORT_ID_COLS)
     r1 = dict(zip(head, rows[1]))
     assert rows[1][2] == "120" and r1["n_ms2"] == "3" and r1["annotation"] == "Glucose" and r1["annotation_source"] == "library"
     assert r1["annotation_adduct"] == "[M+H]+" and r1["best_hit"] == "Glucose"
-    assert rows[2][-10:] == ["0", "0"] + [""] * 8
+    assert rows[2][-13:] == ["0", "0", "", "", "no"] + [""] * 8 and r1["reviewed"] == "no"
     # the user's annotation: unknown, then back to the library result, then a listed hit; kept apart from the search
     assert c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": {"spectrum": "single", "rank": 9}})[0] == 400
     assert c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": {"spectrum": "single", "rank": "x"}})[0] == 400
     assert c.json("/api/results/annotate", {"path": str(out), "group_id": "one", "hit": None})[0] == 400
     code, r = c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": "unknown"})
-    assert code == 200 and r["annotation"]["status"] == "unknown"
+    assert code == 200 and r["notes"]["annotation"]["status"] == "unknown"
     h, _ = bundle.unpack(gzip.decompress(c.req(f"/api/results/ms2ids?path={q}")[1]))
-    assert h["ann"] == {"0": r["annotation"]}
+    assert h["ann"] == {"0": r["notes"]}
     assert c.req(f"/api/results/report?path={q}")[0] == 200            # opening the report applies waiting refreshes
     rh, _ = bundle.unpack(gzip.decompress(report.read_bundle(out / "report.html")))
-    assert rh["ann"]["0"]["status"] == "unknown"                        # the report shows it too
+    assert rh["ann"]["0"]["annotation"]["status"] == "unknown"          # the report shows it too
     eff = pd.read_csv(out / "feature_annotations.tsv", sep="\t").set_index("group_id")
     assert eff.loc[1, "annotation"] == "unknown" and eff.loc[1, "source"] == "user" and eff.loc[1, "best_hit"] == "Glucose"
     code, r = c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": None})
-    assert code == 200 and r["annotation"] is None and not (out / "user_annotations.json").exists()
+    assert code == 200 and r["notes"] is None and not (out / "user_annotations.json").exists()
     code, r = c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": {"spectrum": "single", "rank": 1}})
-    assert code == 200 and r["annotation"]["name"] == "Glucose" and r["annotation"]["status"] == "user"
+    a = r["notes"]["annotation"]
+    assert code == 200 and a["name"] == "Glucose" and a["status"] == "user" and a["confirmed"]
+    # comment and stars, also on a feature without MS2; both reach the exported table
+    assert c.json("/api/results/note", {"path": str(out), "group_id": 2, "stars": ["purple"]})[0] == 400
+    assert c.json("/api/results/note", {"path": str(out), "group_id": 2, "comment": 5})[0] == 400
+    code, r = c.json("/api/results/note", {"path": str(out), "group_id": 2, "stars": ["blue", "red"], "comment": "odd\tshape"})
+    assert code == 200 and r["notes"] == {"stars": ["red", "blue"], "comment": "odd\tshape"}
+    code, raw, _ = c.req("/api/results/table", {"path": str(out), "ids": [1, 2]})
+    rows = [dict(zip(head, ln.split("\t"))) for ln in raw.decode().splitlines()[1:]]
+    assert rows[0]["reviewed"] == "yes" and rows[1]["stars"] == "red;blue" and rows[1]["comment"] == "odd shape"
+    assert rows[1]["reviewed"] == "no" and rows[1]["n_ms2"] == "0"
     assert c.req(f"/api/results/file?path={q}&name=identifications.tsv")[0] == 200
     full = bundle.unpack(bundle.build(out))[0]
     assert full["ids"]["n"] >= 1 and full["kernel"] == "peak3d"
