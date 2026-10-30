@@ -9,7 +9,9 @@ This repository holds two things:
 - **`bench/` + `scripts/`**, the benchmark ("peakbench") that compares peak3d with asari, MassCube and
   IDSL.IPA on public datasets with ground truth. See [Benchmark](#benchmark-peakbench) below.
 
-## Run the peak3d app (download, double-click)
+## Run the Mosa app (download, double-click)
+
+Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases) (newest preview build:
@@ -22,9 +24,9 @@ Download the file for your computer from the
 | Mac with an Intel processor, macOS 14+ | `peak3d-macos-x64.zip` | the same |
 | Linux, x86-64 (glibc 2.35+, e.g. Ubuntu 22.04) | `peak3d-linux-x64.tar.gz` | `tar xzf peak3d-linux-x64.tar.gz` then `./peak3d/peak3d` |
 
-peak3d opens in your web browser, with a small window to reopen or quit it. Choose a folder of mzML files, or
-press **Create example data** to try it with three small synthetic runs, then **Run peak3d** and **Open
-results**. The first run compiles peak3d (about a minute); later runs start at once. Your data stay on your
+Mosa opens in your web browser, with a small window to reopen or quit it. Choose a folder of mzML files, or
+press **Create example data** to try it with three small synthetic runs, then **Run Mosa** and **Open
+results**. The first run compiles Mosa (about a minute); later runs start at once. Your data stay on your
 computer.
 
 The app is not yet signed with an Apple or Microsoft certificate, so the first start asks you to confirm:

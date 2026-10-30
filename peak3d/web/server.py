@@ -434,8 +434,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, b"Forbidden host", "text/plain")
             return False
         if not self._authed(query):
-            self._send(403, ("<!doctype html><meta charset=utf-8><title>peak3d</title><body style='font:16px system-ui;"
-                             "padding:40px'><h2>peak3d</h2><p>Open the link printed in the terminal (it carries the "
+            self._send(403, ("<!doctype html><meta charset=utf-8><title>Mosa</title><body style='font:16px system-ui;"
+                             "padding:40px'><h2>Mosa</h2><p>Open the link printed in the terminal (it carries the "
                              "access token).</p>").encode(), "text/html; charset=utf-8")
             return False
         return True
@@ -492,10 +492,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.app.refresh_now(out, pending_only=True)          # recent annotations first
                 rep = out / "report.html"
                 body = rep.read_bytes() if rep.exists() else report.render(
-                    gzip.compress(bundle.build(out), mtime=0), f"peak3d · {out.name}").encode()
+                    gzip.compress(bundle.build(out), mtime=0), f"Mosa · {out.name}").encode()
                 disp = "attachment" if q.get("download") else "inline"
                 return self._send(200, body, "text/html; charset=utf-8",
-                                  {"Content-Disposition": f'{disp}; filename="peak3d_report_{out.name}.html"'})
+                                  {"Content-Disposition": f'{disp}; filename="mosa_report_{out.name}.html"'})
             self._error(404, "not found")
         except PermissionError as e:
             self._error(403, str(e))
@@ -613,7 +613,7 @@ class Handler(BaseHTTPRequestHandler):
     def _output(self, q) -> Path:
         out = self.app.resolve(q.get("path", [""])[0])
         if not (out / "aligned_feature_table.tsv").exists():
-            raise FileNotFoundError(f"no peak3d results in {out}")
+            raise FileNotFoundError(f"no Mosa results in {out}")
         return out
 
     def _table(self, body):
@@ -769,7 +769,7 @@ class Handler(BaseHTTPRequestHandler):
         if any(r.state == "running" and r.output == out for r in a.runs.values()):
             return self._error(409, "a run is already writing to this folder")
         if (out / "aligned_feature_table.tsv").exists() and not body.get("overwrite"):
-            return self._json({"error": "this folder already holds peak3d results", "confirm": "overwrite"}, 409)
+            return self._json({"error": "this folder already holds Mosa results", "confirm": "overwrite"}, 409)
         argv = options_to_argv(body.get("options") or {}, a.schemas["peak3d" if kernel == "peak3d" else "external"])
         msg = validate_argv([*command_args(kernel), "--input", str(inp), "--output", str(out), *argv])
         if msg:
@@ -806,7 +806,7 @@ def make_server(host="127.0.0.1", port=8765, root=None, token: str | None = "aut
 
 def serve(host="127.0.0.1", port=8765, root=None, token="auto", open_browser=True, allowed_hosts=()):
     httpd, url = make_server(host, port, root, token, allowed_hosts)
-    print(f"[peak3d] GUI running; open this link in your browser:\n\n    {url}\n", flush=True)
+    print(f"[peak3d] Mosa is running; open this link in your browser:\n\n    {url}\n", flush=True)
     if host in ("0.0.0.0", "::"):
         print("[peak3d] listening on all interfaces; the token in the link keeps others out", flush=True)
     if httpd.app.root:

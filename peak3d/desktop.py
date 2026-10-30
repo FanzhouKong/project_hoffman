@@ -99,7 +99,7 @@ def _control_window(url: str, httpd) -> bool:
         return False
     from . import __version__
 
-    root.title("peak3d")
+    root.title("Mosa")
     try:                                     # the MOSA logo in the title bar, taskbar and Alt-Tab
         root._icon = tk.PhotoImage(file=str(Path(__file__).with_name("web") / "static" / "logo-256.png"))
         root.iconphoto(True, root._icon)
@@ -113,9 +113,9 @@ def _control_window(url: str, httpd) -> bool:
     title_font.configure(size=max(base.cget("size"), 13) + 5, weight="bold")
     frame = tk.Frame(root, bg=bg, padx=24, pady=20)
     frame.pack(fill="both", expand=True)
-    tk.Label(frame, text="peak3d is running", font=title_font, fg=ink, bg=bg, anchor="w").pack(fill="x")
+    tk.Label(frame, text="Mosa is running", font=title_font, fg=ink, bg=bg, anchor="w").pack(fill="x")
     tk.Label(frame, text="It is open in your web browser. Keep this window open while you work;\n"
-                         "quitting stops peak3d and any run in progress.",
+                         "quitting stops Mosa and any run in progress.",
              fg=ink2, bg=bg, justify="left", anchor="w").pack(fill="x", pady=(6, 16))
     row = tk.Frame(frame, bg=bg)
     row.pack(fill="x")
@@ -125,11 +125,11 @@ def _control_window(url: str, httpd) -> bool:
 
     def quit_app():
         busy = [r for r in httpd.app.runs.values() if r.state == "running"]
-        if busy and not messagebox.askyesno("peak3d", "A run is still in progress. Stop it and quit peak3d?", parent=root):
+        if busy and not messagebox.askyesno("Mosa", "A run is still in progress. Stop it and quit Mosa?", parent=root):
             return
         root.destroy()
 
-    ttk.Button(row, text="Open peak3d", command=open_browser, default="active").pack(side="left")
+    ttk.Button(row, text="Open Mosa", command=open_browser, default="active").pack(side="left")
     ttk.Button(row, text="Quit", command=quit_app).pack(side="left", padx=(8, 0))
     tk.Label(row, text=f"version {__version__}", fg=ink2, bg=bg).pack(side="right")
     root.protocol("WM_DELETE_WINDOW", quit_app)
@@ -173,7 +173,7 @@ def main(argv=None) -> None:
     threading.Timer(0.3, webbrowser.open, args=(url,)).start()
     try:
         if not _control_window(url, httpd):
-            print(f"peak3d is running; open this link in your browser:\n\n    {url}\n\nPress Ctrl+C to stop.", flush=True)
+            print(f"Mosa is running; open this link in your browser:\n\n    {url}\n\nPress Ctrl+C to stop.", flush=True)
             while True:
                 time.sleep(3600)
     except KeyboardInterrupt:

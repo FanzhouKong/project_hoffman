@@ -34,7 +34,7 @@ def write_report(output, cache_dir=None, path=None, **limits) -> Path:
     output = Path(output)
     blob = gzip.compress(bundle.build(output, cache_dir, **limits), compresslevel=6, mtime=0)
     path = Path(path) if path else output / "report.html"
-    path.write_text(render(blob, f"peak3d · {output.resolve().name}"), encoding="utf-8")
+    path.write_text(render(blob, f"Mosa · {output.resolve().name}"), encoding="utf-8")
     return path
 
 
@@ -61,6 +61,6 @@ def refresh_ids(output) -> bool:
     arrays.update(extra)
     blob = gzip.compress(bundle.pack(bundle._clean({**header, **head}), arrays), compresslevel=6, mtime=0)
     tmp = rep.with_name(rep.name + ".tmp")
-    tmp.write_text(render(blob, f"peak3d · {output.resolve().name}"), encoding="utf-8")
+    tmp.write_text(render(blob, f"Mosa · {output.resolve().name}"), encoding="utf-8")
     tmp.replace(rep)                   # a reader never sees a half-written report
     return True

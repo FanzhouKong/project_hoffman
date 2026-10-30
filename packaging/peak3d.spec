@@ -42,7 +42,8 @@ if MAC:
         icon=os.path.join(SPECPATH, "mosa.icns"),
         bundle_identifier="edu.ucdavis.peak3d",
         info_plist={
-            "CFBundleDisplayName": "peak3d",
+            "CFBundleDisplayName": "Mosa",           # what the Dock and the menu bar show
+            "CFBundleName": "Mosa",
             "CFBundleShortVersionString": peak3d.__version__,
             "CFBundleVersion": peak3d.__version__,
             "NSHighResolutionCapable": True,

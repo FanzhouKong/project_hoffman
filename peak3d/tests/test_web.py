@@ -94,7 +94,7 @@ def test_report_contents(processed):
     rep = out / "report.html"
     assert rep.exists()
     html = rep.read_text(encoding="utf-8")
-    assert "<title>peak3d · out</title>" in html and "{{" not in html
+    assert "<title>Mosa · out</title>" in html and "{{" not in html
     assert "<link" not in html and 'src="http' not in html and "url(http" not in html      # nothing loads from the network
     h, a = bundle.unpack(gzip.decompress(report.read_bundle(rep)))
     t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")

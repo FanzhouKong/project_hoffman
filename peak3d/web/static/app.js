@@ -24,7 +24,7 @@
   const S = { info: null, schemas: { peak3d: [], external: [] }, kernel: "peak3d", form: {}, input: "", output: "", inputInfo: null, runs: new Map(), page: "run", resultsPath: null, viewer: null, viewerTab: "overview" };
   // feature detection kernels: peak3d runs `peak3d process`, the others `peak3d external --kernel NAME` (their own
   // workflow, then the same tables, chromatograms, MS2 mapping and report)
-  const KERNELS = [["peak3d", "peak3d", "scatter_plot"], ["asari", "asari", "dataset"], ["masscube", "MassCube", "experiment"]];
+  const KERNELS = [["peak3d", "Mosa", "scatter_plot"], ["asari", "asari", "dataset"], ["masscube", "MassCube", "experiment"]];
   const KNAME = Object.fromEntries(KERNELS.map(([k, n]) => [k, n]));
   const schemaOf = (k) => S.schemas[k === "peak3d" ? "peak3d" : "external"] || [];
   const kernelInfo = (k) => (S.info.kernels || {})[k] || { available: k === "peak3d" };
@@ -201,9 +201,9 @@
 
   // ---------------------------------------------------------------- run page
   const INTRO = {
-    peak3d: "Choose a folder of centroided .mzML files. peak3d picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library.",
-    asari: "Choose a folder of centroided .mzML files. asari detects and aligns the features with its own defaults; peak3d then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
-    masscube: "Choose a folder of centroided .mzML files. MassCube runs its default untargeted workflow; peak3d then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
+    peak3d: "Choose a folder of centroided .mzML files. Mosa picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library.",
+    asari: "Choose a folder of centroided .mzML files. asari detects and aligns the features with its own defaults; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
+    masscube: "Choose a folder of centroided .mzML files. MassCube runs its default untargeted workflow; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
   };
   function runPage() {
     setTitle("New run");
@@ -264,7 +264,7 @@
         else {
           inField.setError(null);
           inField.setHelp(`${int(info.n_mzml)} mzML file${info.n_mzml > 1 ? "s" : ""}: ${info.mzml.slice(0, 3).join(", ")}${info.n_mzml > 3 ? ", …" : ""}`);
-          if (!S.output || S.autoOutput === S.output) { S.output = S.autoOutput = join(info.path, "peak3d_" + stamp()); outField.input.value = S.output; }
+          if (!S.output || S.autoOutput === S.output) { S.output = S.autoOutput = join(info.path, "mosa_" + stamp()); outField.input.value = S.output; }
         }
       } catch (e) {
         if (my !== seq) return;
@@ -285,7 +285,7 @@
         S.output = S.autoOutput = r.output;
         outField.input.value = r.output;
         refresh();
-        snack(`Example data ready: ${r.n_mzml} synthetic runs. Press Run peak3d.`);
+        snack(`Example data ready: ${r.n_mzml} synthetic runs. Press Run Mosa.`);
       } catch (e) {
         snack(e.message);
       } finally {
@@ -325,13 +325,13 @@
         poll(r.id);
         snack("Run started");
         S.autoOutput = null;
-        S.output = join(dirname(S.output), "peak3d_" + stamp());       // the next run gets its own folder
+        S.output = join(dirname(S.output), "mosa_" + stamp());       // the next run gets its own folder
         if (S.output === r.output) S.output += "_2";
         S.autoOutput = S.output;
         outField.input.value = S.output;
       } catch (e) {
         if (e.status === 409 && e.body && e.body.confirm === "overwrite") {
-          if (await confirmDialog("Replace existing results?", `${S.output} already holds peak3d results. Running again replaces them.`, "Replace")) return start(true);
+          if (await confirmDialog("Replace existing results?", `${S.output} already holds Mosa results. Running again replaces them.`, "Replace")) return start(true);
         } else snack(e.message);
       } finally { refresh(); }
     }
@@ -451,7 +451,7 @@
       const done = [...S.runs.values()].filter((r) => r.status.state === "done");
       pageEl.appendChild(h("div.page.narrow", h("div.empty",
         icon("insights", "lg"), h("h2.headline-small", "Open results"),
-        h("p.body-medium", "Choose a peak3d output folder (one with aligned_feature_table.tsv), or finish a run first."),
+        h("p.body-medium", "Choose a Mosa results folder (one with aligned_feature_table.tsv), or finish a run first."),
         h("button.btn.filled.state", { type: "button", onclick: () => browse("results", S.input || "", (p) => openResults(p)) }, icon("folder_open"), "Choose folder")),
         done.length ? h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Finished in this session")),
           h("div.list", done.map((r) => h("button.list-item.state", { type: "button", onclick: () => openResults(r.status.output) }, icon("folder"),
@@ -551,7 +551,7 @@
         list.replaceChildren(...items);
         if (mode === "msp") { ok.disabled = true; status.textContent = (r.files || []).length ? `${int(r.files.length)} library file${r.files.length > 1 ? "s" : ""} here: pick one` : "No .msp or .pkl files here"; }
         else if (mode === "input") { ok.disabled = !r.n_mzml; status.textContent = r.n_mzml ? `${int(r.n_mzml)} mzML files here` : "No mzML files here"; }
-        else if (mode === "results") { ok.disabled = !r.is_output; status.textContent = r.is_output ? "peak3d results here" : "No peak3d results here"; }
+        else if (mode === "results") { ok.disabled = !r.is_output; status.textContent = r.is_output ? "Mosa results here" : "No Mosa results here"; }
         else { ok.disabled = !r.path || r.writable === false; status.textContent = r.writable === false ? "Not writable" : "Results go in a new subfolder here"; }
       } catch (e) {
         pathField.setError(e.message);
@@ -578,7 +578,7 @@
     try {
       [S.info, S.schemas.peak3d, S.schemas.external] = await Promise.all([api("/api/info"), api("/api/schema"), api("/api/schema?kernel=asari")]);
     } catch (e) {
-      pageEl.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "24px" } }, icon("error"), h("div", "Cannot reach the peak3d server: " + e.message))));
+      pageEl.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "24px" } }, icon("error"), h("div", "Cannot reach the Mosa server: " + e.message))));
       return;
     }
     S.formErrors = {};

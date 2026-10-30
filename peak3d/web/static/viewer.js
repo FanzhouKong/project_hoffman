@@ -28,7 +28,7 @@
       if (header.eic) a.eic_row.forEach((row, k) => this.eicAt.set(row, k));
       this.rtS = Float32Array.from(a.g_rt, (v) => v * 60);       // retention times are shown in seconds
       this.kernel = header.kernel || "peak3d";
-      this.kernelLabel = header.kernel_label || this.kernel;
+      this.kernelLabel = this.kernel === "peak3d" ? "Mosa" : header.kernel_label || this.kernel;
       this.kernelVersion = header.kernel_version || this.params.peak3d_version || "";
       this.setMs2({ header, a });
     }
@@ -749,7 +749,7 @@
         reset.addEventListener("click", () => setAnnotation(g, null));
         out.push(h("div.row.wrap.ann-actions", ...btns, use, unk, reset));
       } else if (!opts.annotate && user) {
-        out.push(h("p.body-small.muted", "Annotations are set in the peak3d app."));
+        out.push(h("p.body-small.muted", "Annotations are set in the Mosa app."));
       }
       return out;
     }
@@ -957,7 +957,7 @@
       const files = p.input_files || [];
       body.append(h("div.grid.cols-2", { style: { marginTop: "16px" } },
         card(".elevated", "Run", null, kv([
-          ["Kernel", `${R.kernelLabel} ${R.kernelVersion}`], ["Picker variant", p.variant], ["peak3d", R.kernel !== "peak3d" ? p.peak3d_version : null],
+          ["Kernel", `${R.kernelLabel} ${R.kernelVersion}`], ["Picker variant", p.variant], ["Mosa", R.kernel !== "peak3d" ? p.peak3d_version : null],
           ["Command", p.command ? h("code.mono", p.command) : null],
           ["Files", int(R.N)], ["Alignment", p.alignment], ["Reference file", p.medoid],
           ["m/z tolerance", p.ppm_tol != null ? fixed(p.ppm_tol, 2) + " ppm" : null],
