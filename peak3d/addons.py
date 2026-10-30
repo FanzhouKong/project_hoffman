@@ -43,6 +43,8 @@ _EMPTY_SCAN = ("    mzs = signals[:, 0]\n    intens = signals[:, 1]\n",
                "    mzs = signals[:, 0]\n    intens = signals[:, 1]\n")
 ADDONS = {
     "masscube": dict(label="MassCube", version="1.2.22", packages=["masscube==1.2.22"], module="masscube",
+                     # the last numba / llvmlite with Intel-Mac wheels (newer releases build for Apple silicon only)
+                     platform_packages={"x86_64-apple-darwin": ["numba==0.62.1", "llvmlite==0.45.1"]},
                      dist="masscube", licence="CC BY-NC 4.0 (non-commercial use only)",
                      licence_url="https://creativecommons.org/licenses/by-nc/4.0/",
                      homepage="https://github.com/huaxuyu/masscube", size_mb=950,
@@ -171,8 +173,9 @@ def install(name: str, log=print, url_base: str = PBS) -> dict:
         py = _python(work)
         if not py.exists():
             raise RuntimeError(f"the Python archive has no {py.relative_to(work)}")
-        log(f"Installing {', '.join(a['packages'])} and its dependencies (this takes a few minutes) …")
-        _run([py, "-m", "pip", "install", "--no-input", "--no-warn-script-location", *a["packages"]], log)
+        packages = [*a["packages"], *a.get("platform_packages", {}).get(tgt, [])]
+        log(f"Installing {', '.join(packages)} and the rest of its dependencies (this takes a few minutes) …")
+        _run([py, "-m", "pip", "install", "--no-input", "--no-warn-script-location", *packages], log)
         site = _site_packages(py)
         for rel, old, new in a["patches"]:
             f = site / rel
@@ -187,7 +190,7 @@ def install(name: str, log=print, url_base: str = PBS) -> dict:
         if out.returncode != 0:
             raise RuntimeError(f"{a['label']} was installed but does not import: {out.stderr.strip()[-300:]}")
         (work / "installed.json").write_text(json.dumps(dict(
-            name=name, version=out.stdout.strip(), packages=a["packages"], python=archive_name, python_sha256=sha,
+            name=name, version=out.stdout.strip(), packages=packages, python=archive_name, python_sha256=sha,
             licence=a["licence"], installed=time.strftime("%Y-%m-%d %H:%M:%S")), indent=1))
         shutil.rmtree(root, ignore_errors=True)
         work.replace(root)

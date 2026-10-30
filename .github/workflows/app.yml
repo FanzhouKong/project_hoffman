@@ -14,11 +14,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: windows-x64, os: windows-latest }
-          - { name: macos-arm64, os: macos-14 }
+          # asari hangs inside the Windows app (not yet understood): the Windows build leaves it out
+          - { name: windows-x64, os: windows-latest, extras: "" }
+          - { name: macos-arm64, os: macos-14, extras: "[asari]" }
           # the last numba/llvmlite with Intel-Mac wheels (newer releases build for Apple silicon only)
-          - { name: macos-x64, os: macos-15-intel, pins: "numba==0.62.1 llvmlite==0.45.1" }
-          - { name: linux-x64, os: ubuntu-22.04 }
+          - { name: macos-x64, os: macos-15-intel, pins: "numba==0.62.1 llvmlite==0.45.1", extras: "[asari]" }
+          - { name: linux-x64, os: ubuntu-22.04, extras: "[asari]" }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     defaults:
@@ -32,7 +33,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install ${{ matrix.pins }} ".[asari]" "pyinstaller>=6.10,<7"
+        run: pip install ${{ matrix.pins }} ".${{ matrix.extras }}" "pyinstaller>=6.10,<7"
       - name: Build
         run: pyinstaller --noconfirm --clean packaging/peak3d.spec
       - name: Locate the program
@@ -49,6 +50,8 @@ jobs:
           test -f smoke1/peak3d_out/report.html
           start=$(date +%s); "$BIN" demo --output smoke2 --cores 2; echo "warm: $(( $(date +%s) - start )) s"
       - name: asari inside the app (bundled; runs as the app's own `_asari` command)
+        if: matrix.extras == '[asari]'
+        timeout-minutes: 10
         run: |
           "$BIN" external --kernel asari --input smoke1/demo_mzml --output asari_out --cores 2
           test -f asari_out/aligned_feature_table.tsv && test -f asari_out/report.html
@@ -95,6 +98,7 @@ jobs:
           retention-days: 14
           compression-level: 0
       - name: MassCube installed by the app on request (private Python), run, removed
+        timeout-minutes: 25
         env:
           PEAK3D_ADDONS: ${{ runner.temp }}/peak3d-addons
         run: |

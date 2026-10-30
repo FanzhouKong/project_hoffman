@@ -68,6 +68,9 @@ def _probe(name: str) -> dict:
         except importlib.metadata.PackageNotFoundError:
             ver = "unknown"
         return dict(available=True, version=ver, python=SELF, note="")
+    if getattr(sys, "frozen", False) and name == "asari":
+        return dict(available=False, version=None, python=None,
+                    note=f"asari is not part of the app on this system; set {k['env']} to a Python that has it")
     how = k.get("addon") or k["install"]
     return dict(available=False, version=None, python=None,
                 note=f"{k['label']} is not installed: {how}; or set {k['env']} to a Python that has it")

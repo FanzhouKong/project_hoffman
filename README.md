@@ -28,7 +28,7 @@ Mosa opens in your web browser, with a small window to reopen or quit it. Three 
 whichever you pick, the rest (chromatograms, MS2, library search, annotation, report) is the same:
 
 - **Mosa** (the default).
-- **asari** 1.18.5, included in the app.
+- **asari** 1.18.5, included in the app on macOS and Linux (not yet on Windows, where it does not run inside the app).
 - **MassCube** 1.2.22, not included: its licence (CC BY-NC 4.0) allows non-commercial use only. The MassCube tab has
   a **Download and install MassCube** button: after you accept the licence, Mosa installs it with a private Python
   (about 950 MB, a few minutes) and can remove it again. From the command line:
