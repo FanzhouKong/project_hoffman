@@ -128,7 +128,7 @@ jobs:
             & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --virtual-time-budget=5000 --screenshot="$PWD\check\windows-app.png" "$($s.url)" | Out-Null
             $rep = (Resolve-Path "check\run\report.html").Path.Replace("\", "/")
             & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --virtual-time-budget=5000 --screenshot="$PWD\check\windows-report.png" "file:///$rep" | Out-Null
-            $ok = ($win -eq "peak3d") -and ($st.state -eq "done")
+            $ok = ($win -eq "Mosa") -and ($st.state -eq "done")
           } catch {
             $notes.Add("ERROR: $($_.Exception.Message)")
           } finally {
@@ -177,11 +177,11 @@ jobs:
           ls -la upload
           n=$(ls upload | wc -l)
           if [ "$n" -lt 4 ]; then echo "only $n of 4 downloads built: keeping the current release"; exit 1; fi
-          notes="Standalone peak3d app: download the file for your computer, unzip, double-click (see the README for the one-time security confirmation on macOS and Windows). Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."
+          notes="Standalone Mosa app (the peak3d program): download the file for your computer, unzip, double-click (see the README for the one-time security confirmation on macOS and Windows). Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            gh release create "$GITHUB_REF_NAME" upload/* --title "peak3d $GITHUB_REF_NAME" --notes "$notes"
+            gh release create "$GITHUB_REF_NAME" upload/* --title "Mosa $GITHUB_REF_NAME" --notes "$notes"
           else
             gh release delete app-preview --yes --cleanup-tag || true
             gh release create app-preview upload/* --prerelease --target "$GITHUB_SHA" \
-              --title "peak3d app (preview)" --notes "$notes"
+              --title "Mosa app (preview)" --notes "$notes"
           fi
