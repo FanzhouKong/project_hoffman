@@ -104,6 +104,7 @@ def test_map_to_groups(tmp_path):
     c = ms2.read_representatives(out, "consensus")
     assert c["group_id"].tolist() == [11, 12, 13] and c["n_merged"].tolist() == [1, 1, 3]
     assert c["n_files"].tolist() == [1, 1, 2]
+    assert c["vs_single"][2] == pytest.approx(1.0, abs=1e-6)          # same peaks, other scales: alike
     assert np.allclose(c["mz"][c["off"][2]:c["off"][3]], m, atol=1e-6)
     assert t.loc[t["group_id"] == 13, "in_consensus"].tolist() == [1, 1, 1]
     assert (t["rt_aligned_s"] - t["rt_s"]).abs().max() == pytest.approx(6.0)        # B's correction: +0.1 min

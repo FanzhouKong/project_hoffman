@@ -164,7 +164,7 @@ class Run:
         self.cancelled = False
 
     def start(self):
-        env = dict(os.environ, PYTHONUNBUFFERED="1")
+        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")      # read below as UTF-8
         kw = {"start_new_session": True} if os.name == "posix" else \
             {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)}
         self.proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

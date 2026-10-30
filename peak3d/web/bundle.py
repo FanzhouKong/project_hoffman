@@ -210,6 +210,7 @@ def _spectra(reps, row_of, prefix):
               f"{prefix}n": np.clip(np.asarray(reps["n_ms2"])[k], 0, 65535).astype(np.uint16),
               f"{prefix}merged": np.clip(np.asarray(reps["n_merged"])[k], 0, 65535).astype(np.uint16),
               f"{prefix}files": np.clip(np.asarray(reps["n_files"])[k], 0, 65535).astype(np.uint16),
+              f"{prefix}vs": np.asarray(reps["vs_single"], np.float32)[k],
               f"{prefix}prec": np.asarray(reps["prec_mz"], np.float64)[k],
               f"{prefix}rt": np.asarray(reps["rt_s"], np.float32)[k], f"{prefix}off": off,
               f"{prefix}mz": mz.astype(np.float32), f"{prefix}int": inten.astype(np.float32)}

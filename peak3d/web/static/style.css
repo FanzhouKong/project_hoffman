@@ -352,7 +352,8 @@ button.list-item:hover { background: var(--surface-3); }
 .list-item .headline { font: 400 13px/1.4 var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-item .supporting { font: 400 11.5px/1.4 var(--font); color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .divider { height: 1px; background: var(--line); border: 0; margin: 0; }
-.kv { display: grid; grid-template-columns: minmax(110px, max-content) 1fr; gap: 7px 20px; }
+.kv { display: grid; grid-template-columns: minmax(110px, max-content) minmax(0, 1fr); gap: 7px 20px; }
+.kv dd { min-width: 0; overflow-wrap: anywhere; }
 .kv dt { color: var(--ink-3); }
 .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; color: var(--ink); }
 
@@ -457,14 +458,22 @@ dialog.dialog::backdrop { background: rgba(28, 28, 30, .28); backdrop-filter: bl
 .cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font: 400 11.5px/1.5 var(--mono); color: var(--ink-2); padding: 5px 0; scrollbar-width: thin; }
 .section-title { margin: 22px 0 10px; }
 .section-title p { margin-top: 2px; }
-/* features: the table on the left, then the feature's annotation column and its chromatogram column (most right) */
-.feature-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.55fr); gap: 16px; align-items: start; }
-.feature-split > .detail { position: sticky; top: 64px; max-height: calc(100vh - 80px); overflow: auto; }
-.detail-grid { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+/* results pages use the width they are given; the Features page all of it: the feature list on the left, then the
+   chromatogram column (with the feature map below) and the annotation column */
+.viewer .page { max-width: 1680px; padding: 4px 20px 48px; }
+.viewer .page.wide { max-width: none; padding: 4px 16px 40px; }
+.feature-split { display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 2fr); gap: 14px; align-items: start; }
+.feature-split > .detail { position: sticky; top: 64px; max-height: calc(100vh - 76px); overflow: auto; }
+.detail-grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.12fr); gap: 12px; align-items: start; }
+.head-card { padding-top: 12px; padding-bottom: 12px; }
+.head-main { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.head-line { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; }
+.head-line .id-best { margin: 0; }
 .detail-grid .detail-head { grid-column: 1 / -1; }
+.detail-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .detail-grid .card { margin: 0; }
 .detail-grid .section-title.first { margin-top: 0; }
-@media (max-width: 1500px) { .feature-split { grid-template-columns: minmax(0, 1fr); } .feature-split > .detail { position: static; max-height: none; overflow: visible; } }
+@media (max-width: 1400px) { .feature-split { grid-template-columns: minmax(0, 1fr); } .feature-split > .detail { position: static; max-height: none; overflow: visible; } }
 @media (max-width: 900px) { .detail-grid { grid-template-columns: minmax(0, 1fr); } }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 12px; }
 .toolbar .field { width: 260px; }
@@ -499,16 +508,24 @@ td.score { color: var(--success); font-variant-numeric: tabular-nums; }
 td.score.weak { color: var(--ink-4); }
 td.ident .id-user { margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 10.5px; }
 td.ident.unknown .id-name { font-style: italic; color: var(--ink-3); }
-/* features: mini map beside the filters */
-.filter-row { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; align-items: start; margin: 0 0 4px; }
-.minimap { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); padding: 4px 6px 0; }
-@media (max-width: 860px) { .filter-row { grid-template-columns: minmax(0, 1fr); } }
-/* features: the user's annotation and the hit list */
-.ann-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
-.ann-name { font: 600 15px/1.35 var(--font); color: var(--ink); }
-.ann-actions { gap: 8px; margin-top: 10px; }
-.copy-pick { margin: 4px 0 8px; }
-.hits.scroll { max-height: 260px; overflow: auto; }
+/* features: the feature map under the feature list; on a wide page the list sizes itself to the window */
+.list-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.minimap { margin-top: 2px; }
+.page.wide .vtable { height: max(280px, calc(100vh - 600px)); }
+.filters { display: flex; flex-direction: column; gap: 0; min-width: 0; }
+.filters .toolbar { margin: 0 0 8px; }
+.filters .toolbar .field { width: 200px; }
+.filters .id-card { margin: 0 0 10px; }
+.filters .id-form { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 10px; }
+.filters .id-form > .field:first-child { grid-column: 1 / -1; }
+.filters .id-form .id-go { grid-column: 1 / -1; padding: 4px 0 0; }
+/* features: the spectrum choice and its notes */
+.copy-pick { margin: 4px 0 8px; display: flex; align-items: center; gap: 4px 14px; flex-wrap: wrap; }
+.ms2-timing { display: flex; align-items: center; gap: 6px; margin: 0; flex: 1 1 260px; min-width: 0; color: var(--ink-2); }
+.ms2-timing .icon { width: 16px; height: 16px; flex: none; }
+.ms2-timing.ok .icon { color: var(--success); }
+.ms2-timing.off .icon { color: #b26a00; }
+.hits.scroll { max-height: 180px; overflow: auto; }
 .head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .stars { display: flex; gap: 2px; flex: none; }
 .star-btn { width: 34px; height: 34px; border: 0; border-radius: 17px; background: none; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
@@ -522,8 +539,23 @@ td.ident.unknown .id-name { font-style: italic; color: var(--ink-3); }
 .star-ic.mini .icon { width: 12px; height: 12px; }
 td.id-cell .star-ic.mini { margin-right: 1px; vertical-align: -1px; }
 .star-chip .star-ic .icon { width: 14px; height: 14px; }
-.cand { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 12px; align-items: start; }
-@media (max-width: 700px) { .cand { grid-template-columns: minmax(0, 1fr); } }
+/* the selected candidate: structure beside its name, score, facts and the user's annotation */
+.ms2-desc { margin: 0 0 6px; }
+.compound { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 14px; align-items: start; margin-top: 10px; }
+.cmp-pic .structure { width: 190px; min-height: 130px; }
+.cmp-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cmp-name { font: 600 15px/1.3 var(--font); color: var(--ink); overflow-wrap: anywhere; }
+.cmp-score { font: 600 20px/1.2 var(--font); color: var(--success); }
+.cmp-facts { color: var(--ink-2); }
+.ann-label { margin-top: 8px; }
+.ann-head { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; margin: 4px 0 0; }
+.ann-actions { gap: 6px; margin-top: 8px; }
+.ann-actions .btn { height: 30px; padding: 0 10px; font-size: 12.5px; }
+.vs-note { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--ink-2); }
+.vs-note .icon { width: 16px; height: 16px; flex: none; }
+.vs-note.ok .icon { color: var(--success); }
+.vs-note.off .icon { color: #b26a00; }
+@media (max-width: 640px) { .compound { grid-template-columns: minmax(0, 1fr); } }
 .structure { border: 1px solid var(--line); border-radius: var(--r); background: #fff; min-height: 120px; display: flex; flex-direction: column; justify-content: center; padding: 4px; }
 .structure svg { width: 100%; height: auto; display: block; }
 .structure p, .structure a { margin: 6px 8px; }

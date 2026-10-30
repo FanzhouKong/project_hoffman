@@ -525,6 +525,24 @@
   // Each side is scaled to its own base peak (100); peaks with a partner on the other side within tol are drawn
   // in the series colour, the rest in the neutral grey.
   class Mirror extends Chart {
+    // drag across to zoom into an m/z range, double-click to see the whole spectrum again
+    constructor(el, spec) {
+      super(el, spec);
+      this.view = null;
+      this.drag = null;
+      this.canvas.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || !this.box) return;
+        this.drag = { a: this.pos(e)[0], b: this.pos(e)[0] };
+        if (this.canvas.setPointerCapture) this.canvas.setPointerCapture(e.pointerId);
+      });
+      this.canvas.addEventListener("pointerup", () => {
+        const d = this.drag;
+        this.drag = null;
+        if (d && Math.abs(d.b - d.a) > 6) this.view = [this.ix(Math.min(d.a, d.b)), this.ix(Math.max(d.a, d.b))];
+        this.draw();
+      });
+      this.canvas.addEventListener("dblclick", () => { this.view = null; this.draw(); });
+    }
     prep() {
       const s = this.spec, sides = [s.top, s.bottom].filter(Boolean);
       this.sides = sides.map((r) => {
@@ -550,9 +568,10 @@
       let x0 = Infinity, x1 = -Infinity;
       for (const r of this.sides) for (let i = 0; i < r.mz.length; i++) { if (r.mz[i] < x0) x0 = r.mz[i]; if (r.mz[i] > x1) x1 = r.mz[i]; }
       if (!isFinite(x0)) { x0 = 50; x1 = 500; }
+      if (isFinite(s.prec) && s.prec > 0) { x0 = Math.min(x0, s.prec); x1 = Math.max(x1, s.prec); }
       const pad = Math.max(5, (x1 - x0) * 0.05);
-      this.xd = [Math.max(0, x0 - pad), x1 + pad];
-      this.yd = two ? [-112, 112] : [0, 112];
+      this.xd = this.view ? this.view.slice() : [Math.max(0, x0 - pad), x1 + pad];
+      this.yd = two ? [-128, 128] : [0, 128];         // headroom for the m/z labels of the tallest peaks
       const yFmt = (v) => P3.fixed(Math.abs(v), 0);
       const yt = { values: two ? [-100, -50, 0, 50, 100] : [0, 25, 50, 75, 100], digits: 0 };
       this.layout(P, yFmt, yt);
@@ -584,6 +603,24 @@
         ctx.textBaseline = si ? "top" : "bottom";
         for (const i of top4) if (r.rel[i] > 5) ctx.fillText(P3.fixed(r.mz[i], 4), this.sx(r.mz[i]), this.sy(sign * r.rel[i]) + (si ? 3 : -3));
       });
+      if (isFinite(s.prec) && s.prec > 0) {    // the precursor m/z: a dashed grey line
+        const x = Math.round(this.sx(s.prec)) + 0.5;
+        ctx.strokeStyle = P.muted;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(x, b.y0); ctx.lineTo(x, b.y1); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = `400 10px ${P.font}`;
+        ctx.fillStyle = P.muted;
+        ctx.textAlign = "right";
+        ctx.textBaseline = "top";
+        ctx.fillText(`precursor ${P3.fixed(s.prec, 4)}`, x - 4, b.y0 + 18);
+      }
+      if (this.drag) {
+        const [l, r] = [Math.min(this.drag.a, this.drag.b), Math.max(this.drag.a, this.drag.b)];
+        ctx.fillStyle = rgba(P.s1, 0.12);
+        ctx.fillRect(l, b.y0, r - l, b.y1 - b.y0);
+      }
       ctx.strokeStyle = P.axis;
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(b.x0, zero); ctx.lineTo(b.x1, zero); ctx.stroke();
@@ -601,9 +638,18 @@
       ctx.textBaseline = "top";
       if (s.topLabel) ctx.fillText(s.topLabel, b.x0 + 6, b.y0 + 2);
       if (two && s.bottomLabel) { ctx.textBaseline = "bottom"; ctx.fillText(s.bottomLabel, b.x0 + 6, b.y1 - 2); }
+      if (two && s.score) {                 // the match's similarity, readable at a glance
+        ctx.font = `600 13px ${P.font}`;
+        ctx.fillStyle = P.ink;
+        ctx.textAlign = "right";
+        ctx.textBaseline = "top";
+        ctx.fillText(s.score, b.x1 - 6, b.y0 + 2);
+      }
+      this.hint.textContent = this.view ? "Double-click to see the whole spectrum" : "Drag across to zoom";
     }
     onMove([px, py]) {
       if (!this.box || !this.sides) return;
+      if (this.drag) { this.drag.b = px; this.draw(); return; }
       const upper = py <= this.sy(0), si = upper || this.sides.length < 2 ? 0 : 1, r = this.sides[si];
       let best = -1, bd = 7;
       for (let i = 0; i < r.mz.length; i++) { const d = Math.abs(this.sx(r.mz[i]) - px); if (d < bd) { bd = d; best = i; } }

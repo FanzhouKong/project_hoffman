@@ -139,6 +139,7 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003, fragment_t
     Returns the map (empty when the files had no MS2)."""
     from .consensus import build
     from .library import write_msp_record
+    from .similarity import METHOD_CODE, clean, score
     from .pipeline import log
     output = Path(output)
     table = pd.read_csv(output / "aligned_feature_table.tsv", sep="\t")
@@ -195,12 +196,17 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003, fragment_t
             status[rows] = c.status
             in_cons[rows[c.used]] = 1
             t = d.iloc[c.top]
+            # how alike the consensus and the highest-TIC spectrum are (weighted entropy, cleaned as for the search)
+            r0 = d.iloc[0]                                  # m is sorted by TIC within a group: the highest first
+            sm, si = clean(*spectra[0], float(g_mz[gi]), float(fragment_tol))
+            vs = score(c.mz, c.inten, sm, si, METHOD_CODE["weighted_entropy"], float(fragment_tol))[0] if len(sm) else 0.0
             write_msp_record(fh, [
                 ("NAME", f"feature_{int(t['group_id'])}"), ("PRECURSORMZ", f"{g_mz[gi]:.6f}"),
                 ("RETENTIONTIME", f"{g_rt[gi]:.4f}"), ("IONMODE", ion.get(sets[t['file']].polarity, "")),
                 ("Comment", f"group_id={int(t['group_id'])} n_ms2={len(d)} n_merged={len(c.used)} "
                             f"n_files={d['file'].iloc[c.used].nunique()} file=\"{t['file']}\" scan=\"{t['scan']}\" "
-                            f"rt_s={t['rt_s']:.3f} precursor={t['precursor_mz']:.6f} n_dropped={c.n_dropped}")],
+                            f"rt_s={t['rt_s']:.3f} precursor={t['precursor_mz']:.6f} n_dropped={c.n_dropped} "
+                            f"vs_single={vs:.4f}")],
                 c.mz, np.round(c.inten / c.inten.max() * 1000.0, 3))
     m["in_consensus"] = in_cons
     m["consensus_status"] = status
@@ -231,7 +237,8 @@ def _comment(text: str) -> dict:
 def read_representatives(output, which: str = "single") -> dict | None:
     """one copy of every feature's MS2 spectrum (which: "single" = ms2_spectra.msp, the highest-TIC spectrum;
     "consensus" = ms2_consensus.msp), as arrays in file order: group_id, n_ms2, n_merged (spectra in the consensus,
-    1 for single), prec_mz (the feature's m/z), rt_s (the native time of that, or the consensus's most abundant,
+    1 for single), vs_single (consensus only: its weighted entropy similarity to the highest-TIC spectrum; nan
+    otherwise), prec_mz (the feature's m/z), rt_s (the native time of that, or the consensus's most abundant,
     spectrum), file, scan, ion_mode, off, mz, inten. None when the output has no such file or it is empty."""
     from .library import read_msp
     path = Path(output) / SPECTRA[which]
@@ -245,6 +252,7 @@ def read_representatives(output, which: str = "single") -> dict | None:
             "n_ms2": np.array([int(d.get("n_ms2", 1)) for d in info], np.int32),
             "n_merged": np.array([int(d.get("n_merged", 1)) for d in info], np.int32),
             "n_files": np.array([int(d.get("n_files", 1)) for d in info], np.int32),
+            "vs_single": np.array([float(d.get("vs_single", "nan")) for d in info], np.float64),
             "prec_mz": lib.precursor_mz, "rt_s": np.array([float(d.get("rt_s", "nan")) for d in info], np.float64),
             "file": [d.get("file", "") for d in info], "scan": [d.get("scan", "") for d in info],
             "ion_mode": list(lib.ion_mode), "off": lib.off, "mz": lib.mz, "inten": lib.inten}

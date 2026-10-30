@@ -179,7 +179,9 @@ def convert_masscube(path, stems) -> pd.DataFrame:
 def _run(cmd, cwd: Path) -> int:
     """the tool's own output goes straight to ours (the GUI shows it in the run log)"""
     sys.stdout.flush()
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    # UTF-8 output whatever the console code page: MassCube prints box-drawing characters, which Windows' cp1252
+    # cannot encode (the tool then stops at its welcome banner)
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     return subprocess.run(cmd, cwd=str(cwd), env=env, stdout=sys.stdout.fileno(), stderr=subprocess.STDOUT).returncode
 
 

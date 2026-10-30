@@ -168,7 +168,20 @@ def write_demo(out: Path) -> Path:
     return data
 
 
+def _utf8_when_piped() -> None:
+    """runs started by the app write to a pipe that is read as UTF-8; on Windows Python would write the console code
+    page (cp1252) there and fail on characters outside it (tools' progress bars, banners)"""
+    for name in ("stdout", "stderr"):
+        f = getattr(sys, name, None)
+        try:
+            if f is not None and not f.isatty() and (f.encoding or "").lower().replace("-", "") != "utf8":
+                f.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main(argv=None):
+    _utf8_when_piped()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["_asari"]:                      # hidden: asari's own command line (bundled in the app)
         from .external import run_asari_main

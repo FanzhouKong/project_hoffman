@@ -132,7 +132,7 @@ feature then gets two spectra:
 - **consensus** (used by default): all its spectra, from every file, merged. A peak is kept only when at least
   two spectra hold it, so noise ions do not add up. Intensities are weighted by how abundant the precursor was
   in the MS1 scan before each spectrum.
-- **highest TIC**: the single spectrum with the highest total ion current (MassCube's choice).
+- **highest TIC**: the single spectrum with the highest total ion current.
 
 With `--library` (an `.msp` file, or a MassCube `.pkl`), both are searched (`--similarity`, default weighted
 entropy). Every hit scoring above 0.1 is listed in `identifications.tsv`. A feature's best consensus hit at or
