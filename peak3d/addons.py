@@ -3,8 +3,8 @@
 MassCube is not bundled: its licence (CC BY-NC 4.0) allows non-commercial use only, and it pins numpy below 2. When
 the user asks for it (and accepts that licence), install() downloads a standalone CPython build
 (python-build-standalone, pinned by release and checked against its SHA-256), pip-installs the pinned MassCube
-version into it, applies our one-line fix for empty MS1 scans, checks that it imports, and only then moves the
-folder into place: a failed or interrupted install leaves nothing behind. external.py runs the tool with that
+version into it, applies our one-line fix for empty MS1 scans, checks that it imports, and only then writes the
+marker file that makes it count as installed; a failed install removes the folder. external.py runs the tool with that
 Python, in its own process, exactly as with PEAK3D_MASSCUBE_PYTHON.
 
 The add-ons live in <user data>/peak3d/addons/<name>/: %LOCALAPPDATA% on Windows, ~/Library/Application Support on
@@ -134,13 +134,15 @@ def _extract(archive: Path, dest: Path) -> None:
 
 def _site_packages(py: Path) -> Path:
     out = subprocess.run([str(py), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
-                         capture_output=True, text=True, check=True)
+                         capture_output=True, encoding="utf-8", errors="replace", check=True)
     return Path(out.stdout.strip())
 
 
 def _run(cmd, log) -> None:
-    p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                         env=dict(os.environ, PYTHONNOUSERSITE="1", PIP_DISABLE_PIP_VERSION_CHECK="1"))
+    p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         encoding="utf-8", errors="replace",          # not the console code page (Windows)
+                         env=dict(os.environ, PYTHONNOUSERSITE="1", PIP_DISABLE_PIP_VERSION_CHECK="1",
+                                  PYTHONIOENCODING="utf-8", PYTHONUTF8="1"))
     for line in p.stdout:
         line = line.rstrip()
         if line:
@@ -159,9 +161,11 @@ def install(name: str, log=print, url_base: str = PBS) -> dict:
                            f"{platform.machine()}")
     archive_name, sha = PYTHONS[tgt]
     root = home() / name
-    work = home() / f".{name}.partial"
-    shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True)
+    # in place, with the marker written last (python_of() needs it): no folder rename at the end, which Windows
+    # refuses while its virus scanner still holds the files just written
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    work = root
     tic = time.time()
     try:
         log(f"Downloading Python 3.11 for {tgt} …")
@@ -186,16 +190,14 @@ def install(name: str, log=print, url_base: str = PBS) -> dict:
                 f.write_text(text.replace(old, new), encoding="utf-8")
                 log(f"Applied the empty-scan fix to {rel}")
         out = subprocess.run([str(py), "-c", f"import {a['module']}, importlib.metadata as m; print(m.version({a['dist']!r}))"],
-                             capture_output=True, text=True)
+                             capture_output=True, encoding="utf-8", errors="replace")
         if out.returncode != 0:
             raise RuntimeError(f"{a['label']} was installed but does not import: {out.stderr.strip()[-300:]}")
         (work / "installed.json").write_text(json.dumps(dict(
             name=name, version=out.stdout.strip(), packages=packages, python=archive_name, python_sha256=sha,
             licence=a["licence"], installed=time.strftime("%Y-%m-%d %H:%M:%S")), indent=1))
-        shutil.rmtree(root, ignore_errors=True)
-        work.replace(root)
     except BaseException:
-        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
         raise
     log(f"{a['label']} {a['version']} installed in {time.time() - tic:.0f} s ({root})")
     return status(name)

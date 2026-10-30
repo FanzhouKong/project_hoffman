@@ -97,20 +97,6 @@ jobs:
           path: upload/*
           retention-days: 14
           compression-level: 0
-      - name: MassCube installed by the app on request (private Python), run, removed
-        timeout-minutes: 25
-        env:
-          PEAK3D_ADDONS: ${{ runner.temp }}/peak3d-addons
-        run: |
-          start=$(date +%s)
-          if ! "$BIN" addon install masscube --accept-licence > masscube_install.log 2>&1; then tail -40 masscube_install.log; exit 1; fi
-          grep -v "^  " masscube_install.log || true
-          echo "install: $(( $(date +%s) - start )) s"
-          "$BIN" addon status masscube
-          "$BIN" external --kernel masscube --input smoke1/demo_mzml --output masscube_out --cores 2
-          test -f masscube_out/aligned_feature_table.tsv && test -f masscube_out/report.html
-          echo "MassCube features: $(( $(wc -l < masscube_out/aligned_feature_table.tsv) - 1 ))"
-          "$BIN" addon remove masscube
       - name: Windows double-click (no console, as from Explorer), screenshots
         if: runner.os == 'Windows'
         shell: pwsh
@@ -168,6 +154,34 @@ jobs:
           name: ci-check-windows
           path: check/*.*
           retention-days: 7
+      - name: MassCube installed by the app on request (optional add-on; does not fail the build)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          PEAK3D_ADDONS: ${{ runner.temp }}/peak3d-addons
+        run: |
+          set +e                       # record each exit code (the default shell stops at the first failure)
+          mkdir -p check-mc
+          log="check-mc/masscube-${{ matrix.name }}.log"
+          start=$(date +%s)
+          "$BIN" addon install masscube --accept-licence > "$log" 2>&1; rc=$?
+          echo "install exit $rc after $(( $(date +%s) - start )) s" | tee -a "$log"
+          if [ $rc -ne 0 ]; then tail -60 "$log"; exit 1; fi
+          "$BIN" addon status masscube >> "$log" 2>&1
+          "$BIN" external --kernel masscube --input smoke1/demo_mzml --output masscube_out --cores 2 >> "$log" 2>&1; rc=$?
+          echo "run exit $rc" | tee -a "$log"
+          if [ $rc -ne 0 ]; then tail -60 "$log"; exit 1; fi
+          test -f masscube_out/aligned_feature_table.tsv && test -f masscube_out/report.html
+          echo "MassCube features: $(( $(wc -l < masscube_out/aligned_feature_table.tsv) - 1 ))" | tee -a "$log"
+          "$BIN" addon remove masscube
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-check-${{ matrix.name }}-masscube
+          path: check-mc/*
+          retention-days: 7
+          if-no-files-found: ignore
 
   release:
     needs: build
