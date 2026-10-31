@@ -3,12 +3,16 @@ import pandas as pd
 import pytest
 
 from peak3d.align import AlignParams, align_run, anchors_table, summary_table
+from peak3d.warp import coarse_mz_offset
 
 T = 5.0
 DT = 0.005
 GRID = np.arange(0.0, T + DT / 2, DT)
 COLS = ["feature_id", "mz", "rt", "rt_min", "rt_max", "height", "score", "snr", "n_scans", "mz_sd_ppm",
         "iso_offset", "iso_parent"]
+# the m/z settings before 2026-10-31, one offset per file (AlignParams() now has every m/z option on)
+STATIC = dict(mz_dynamic=False, mz_relaxed_second_mode=False, mz_step_curve=False, mz_fallback_ref=False,
+              mz_probe_features=False)
 
 
 def _truth(n=600, seed=0):
@@ -148,6 +152,245 @@ def test_per_file_mz_offset_is_recovered():
     assert abs(offs["c"] - offs["a"]) < 0.6, offs
     s = summary_table(res)
     assert "mz_offset_ppm" in s.columns
+
+
+def test_coarse_mz_offset_finds_the_mode_and_rejects_chance():
+    rng = np.random.default_rng(3)
+    mz_t, rt_t = np.sort(rng.uniform(100, 900, 300)), rng.uniform(0.3, T - 0.3, 300)
+    mz_f = mz_t * (1 + 1e-6 * (12.0 + 0.5 * rng.standard_normal(300)))
+    modes, bg = coarse_mz_offset(mz_f, rt_t + 0.02, mz_t, rt_t, 50.0, 0.5)
+    (off, sup, _), rest = modes[0], modes[1:]
+    assert abs(off - 12.0) < 0.2 and sup >= 250 and sup > 20 * bg and all(n < 5 for _, n, _ in rest)
+    # unrelated anchors: whatever mode there is does not stand out from the chance pairs
+    mz_r, rt_r = np.sort(rng.uniform(100, 900, 300)), rng.uniform(0.3, T - 0.3, 300)
+    modes, bg = coarse_mz_offset(mz_r, rt_r, mz_t, rt_t, 50.0, 0.5)
+    assert modes[0][1] < max(10, 4 * bg)
+
+
+@pytest.mark.parametrize("shift", [0.0, 2.0])
+def test_file_with_two_mz_scales_takes_the_mode_nearer_the_study(shift):
+    # calibration that jumps mid-run (23 PR002464 ST004502 files: 0 ppm early, -22 ppm late): one offset cannot fit
+    # both parts; the file takes the mode that agrees with the other files (as the fine step alone did before), also
+    # when the whole file is off as well (its early part then sits at +shift, not at 0), and is flagged
+    truth = _truth()
+    W = _warps()
+    feats = {k: _file(truth, W[k], seed=i) for i, k in enumerate(W)}
+    late = feats["c"]["rt"].values > 2.0
+    feats["c"].loc[late, "mz"] = feats["c"]["mz"].values[late] * (1 - 22e-6)
+    feats["c"]["mz"] = feats["c"]["mz"] * (1 + shift * 1e-6)
+    res = align_run(feats, {k: GRID for k in W}, AlignParams(**STATIC))
+    fc = res.files["c"]
+    assert "two_mz_modes" in fc.flag
+    assert abs(fc.mz_offset_ppm - res.files["a"].mz_offset_ppm - shift) < 0.5, fc.mz_offset_ppm
+
+
+def test_file_without_a_mode_takes_the_study_scale():
+    # the reference (most anchors) is a shifted file, and one file has no credible mode (its features are unrelated):
+    # it must take the study's scale, not the reference's
+    truth = _truth()
+    W = dict(_warps(), d=lambda t: t)
+    feats = {k: _file(truth, W[k], presence=1.0 if k == "c" else 0.4, seed=i) for i, k in enumerate("abc")}
+    feats["c"]["mz"] = feats["c"]["mz"] * (1 + 10e-6)
+    feats["d"] = _file(_truth(seed=9), W["d"], presence=0.5, seed=7)
+    res = align_run(feats, {k: GRID for k in "abcd"}, AlignParams(**STATIC))
+    assert res.files["c"].n_anchors > max(res.files[k].n_anchors for k in "abd")      # c is the reference
+    off = {k: fa.mz_coarse_ppm for k, fa in res.files.items()}
+    assert "no_mz_mode" in res.files["d"].flag and abs(off["d"] - off["a"]) < 0.5, off
+    assert abs(off["c"] - off["a"] - 10.0) < 0.3, off
+
+
+def test_dynamic_mz_offset_follows_a_jump_and_a_drift():
+    # c's calibration jumps -22 ppm at 2 min (as in 23 PR002464 ST004502 files); b drifts from 0 to +8 ppm over the
+    # run: as curves over RT both are followed, and c keeps the anchors of both parts
+    truth = _truth()
+    W = _warps()
+    grids = {k: GRID for k in W}
+    res0 = align_run({k: _file(truth, W[k], seed=i) for i, k in enumerate(W)}, grids, AlignParams(mz_dynamic=True))
+    feats = {k: _file(truth, W[k], seed=i) for i, k in enumerate(W)}
+    late = feats["c"]["rt"].values > 2.0
+    feats["c"].loc[late, "mz"] = feats["c"]["mz"].values[late] * (1 - 22e-6)
+    feats["b"]["mz"] = feats["b"]["mz"] * (1 + 8e-6 * feats["b"]["rt"].values / T)
+    res = align_run(feats, grids, AlignParams(mz_dynamic=True))
+    t = np.array([0.8, 1.5, 3.0, 4.2])                                       # native times, away from the jump
+    rel = {k: res.files[k].mz_offset_at(t) - res.files["a"].mz_offset_at(t) for k in "bc"}
+    assert np.all(np.abs(rel["c"] - np.where(t > 2.0, -22.0, 0.0)) < 1.0), rel
+    assert np.all(np.abs(rel["b"] - 8.0 * t / T) < 1.0), rel
+    assert res.files["c"].diag.n >= 0.9 * res0.files["c"].diag.n
+    # the same jump with one offset per file: only one part is matched
+    stat = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(**STATIC))
+    assert stat.files["c"].diag.n < 0.8 * res0.files["c"].diag.n
+
+
+def test_dynamic_mz_offset_keeps_the_study_scale_when_the_reference_jumps():
+    # the file with the most anchors (the coarse search's reference) is the one whose calibration jumps: the other
+    # files must stay flat at the study's scale, and only the jumping file gets the step
+    truth = _truth()
+    W = _warps()
+    feats = {k: _file(truth, W[k], presence=1.0 if k == "b" else 0.5, seed=i) for i, k in enumerate(W)}
+    late = feats["b"]["rt"].values > 2.0
+    feats["b"].loc[late, "mz"] = feats["b"]["mz"].values[late] * (1 - 10e-6)
+    res = align_run(feats, {k: GRID for k in W}, AlignParams(mz_dynamic=True))
+    assert res.files["b"].n_anchors > max(res.files[k].n_anchors for k in "ac")
+    t = np.array([1.0, 3.5])
+    for k in "ac":
+        assert np.all(np.abs(res.files[k].mz_offset_at(t)) < 1.0), (k, res.files[k].mz_offset_at(t))
+    assert np.all(np.abs(res.files["b"].mz_offset_at(t) - [0.0, -10.0]) < 1.0), res.files["b"].mz_offset_at(t)
+
+
+def test_relaxed_second_mode_keeps_a_short_part_before_a_jump():
+    # as two PR002464 ST004502 injections: c shares few compounds with the others (most of its anchors are its own),
+    # and its calibration jumps -22 ppm early in the run, so the part before the jump holds more than 10 anchor pairs
+    # but fewer than 10 % of the anchors: the default rule drops that mode, the relaxed one keeps it, and the dynamic
+    # offset then follows both parts
+    truth = _truth()
+    W = _warps()
+    feats = {k: _file(truth, W[k], seed=i) for i, k in enumerate("ab")}
+    own = _file(_truth(seed=9), W["c"], seed=5)
+    feats["c"] = pd.concat([_file(truth, W["c"], presence=0.35, seed=2), own], ignore_index=True)
+    feats["c"]["feature_id"] = np.arange(len(feats["c"]))
+    late = feats["c"]["rt"].values > 1.4
+    feats["c"].loc[late, "mz"] = feats["c"]["mz"].values[late] * (1 - 22e-6)
+    grids = {k: GRID for k in W}
+    assert "two_mz_modes" not in align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(**STATIC)).files["c"].flag
+    res = align_run({k: f.copy() for k, f in feats.items()}, grids,
+                    AlignParams(**{**STATIC, "mz_dynamic": True, "mz_relaxed_second_mode": True}))
+    assert "two_mz_modes" in res.files["c"].flag
+    t = np.array([0.8, 3.0, 4.2])
+    rel = res.files["c"].mz_offset_at(t) - res.files["a"].mz_offset_at(t)
+    assert np.all(np.abs(rel - np.where(t > 1.4, -22.0, 0.0)) < 1.0), rel
+
+
+def _short_part_before_jump():
+    truth = _truth()
+    W = _warps()
+    feats = {k: _file(truth, W[k], seed=i) for i, k in enumerate("ab")}
+    feats["c"] = pd.concat([_file(truth, W["c"], presence=0.35, seed=2), _file(_truth(seed=9), W["c"], seed=5)],
+                           ignore_index=True)
+    feats["c"]["feature_id"] = np.arange(len(feats["c"]))
+    late = feats["c"]["rt"].values > 1.4
+    feats["c"].loc[late, "mz"] = feats["c"]["mz"].values[late] * (1 - 22e-6)
+    return feats, {k: GRID for k in W}
+
+
+def test_step_curve_jumps_where_the_calibration_does():
+    # as in the two vial-6 injections: no shared compound elutes for a while around the jump (1.2-1.8 min here, the
+    # jump at 1.4), so the running median of the anchor pairs is interpolated across that gap and features there are
+    # corrected by part of the step; the step curve puts the whole jump in the gap's middle
+    feats, grids = _short_part_before_jump()
+    c = feats["c"]
+    n_own = len(_file(_truth(seed=9), _warps()["c"], seed=5))          # c's own compounds come after the shared ones
+    shared = np.arange(len(c)) < len(c) - n_own
+    feats["c"] = c[~(shared & (c["rt"].values > 1.2) & (c["rt"].values < 1.8))].reset_index(drop=True)
+    feats["c"]["feature_id"] = np.arange(len(feats["c"]))
+    t = np.array([1.1, 1.65, 1.9, 3.0])
+    want = np.where(t > 1.4, -22.0, 0.0)
+    res = align_run({k: f.copy() for k, f in feats.items()}, grids,
+                    AlignParams(mz_dynamic=True, mz_relaxed_second_mode=True, mz_step_curve=True))
+    rel = res.files["c"].mz_offset_at(t) - res.files["a"].mz_offset_at(t)
+    assert np.all(np.abs(rel - want) < 1.0), rel
+    ramp = align_run({k: f.copy() for k, f in feats.items()}, grids,
+                     AlignParams(**{**STATIC, "mz_dynamic": True, "mz_relaxed_second_mode": True}))
+    rel0 = ramp.files["c"].mz_offset_at(t) - ramp.files["a"].mz_offset_at(t)
+    assert abs(rel0[1] - want[1]) > 3.0, rel0                          # the ramp the step replaces
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_fallback_reference_gives_a_file_without_partners_its_offset(dynamic):
+    # c shares no compound with the reference a (as a U-13C-only sample against a 12C one) but shares many with b,
+    # which is on the study's scale: by default c has no mode and keeps the study's scale; with the fallback it is
+    # measured against b and takes its true offset, +12 ppm (static), or 0 then -22 ppm after 3 min (dynamic)
+    truth, other = _truth(), _truth(seed=9)
+    W = _warps()
+    feats = {"a": _file(truth, W["a"], n_decoy=200, seed=0),
+             "b": pd.concat([_file(truth, W["b"], presence=0.4, seed=1), _file(other, W["b"], presence=0.4, seed=3)],
+                            ignore_index=True),
+             "c": _file(other, W["c"], presence=0.8, seed=2)}
+    feats["b"]["feature_id"] = np.arange(len(feats["b"]))
+    if dynamic:
+        late = feats["c"]["rt"].values > 3.0
+        feats["c"].loc[late, "mz"] = feats["c"]["mz"].values[late] * (1 - 22e-6)
+    else:
+        feats["c"]["mz"] = feats["c"]["mz"] * (1 + 12e-6)
+    grids = {k: GRID for k in W}
+    P = {**STATIC, "mz_dynamic": dynamic, "mz_relaxed_second_mode": True, "mz_step_curve": dynamic}
+    t = np.array([1.0, 2.0, 4.0])
+    want = np.where(t > 3.0, -22.0, 0.0) if dynamic else np.full(3, 12.0)
+    base = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(**P))
+    assert base.files["a"].n_anchors > max(base.files[k].n_anchors for k in "bc")      # a is the reference
+    assert "no_mz_mode" in base.files["c"].flag
+    res = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(**{**P, "mz_fallback_ref": True}))
+    assert "mz_mode_via_other_file" in res.files["c"].flag
+    rel = res.files["c"].mz_offset_at(t) - res.files["a"].mz_offset_at(t)
+    assert np.all(np.abs(rel - want) < 1.0), rel
+
+
+def test_probe_features_find_a_short_part_at_the_start():
+    # as PR002464 ST004500 4_019_08: the calibration is right for the first stretch of the run and -22 ppm after it
+    # (0.7 min of 5 here); that stretch holds too few anchor pairs for a second mode (< 25 % of the first), so the
+    # anchors give one offset for the whole run; the probe features find the stretch and the step
+    truth = _truth()
+    W = _warps()
+    feats = {k: _file(truth, W[k], seed=i) for i, k in enumerate(W)}
+    late = feats["c"]["rt"].values > 0.7
+    feats["c"].loc[late, "mz"] = feats["c"]["mz"].values[late] * (1 - 22e-6)
+    grids = {k: GRID for k in W}
+    P = {**STATIC, "mz_dynamic": True, "mz_relaxed_second_mode": True, "mz_step_curve": True, "mz_fallback_ref": True}
+    t = np.array([0.45, 1.5, 3.5])
+    want = np.where(t > 0.7, -22.0, 0.0)
+    base = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(**P))
+    rel0 = base.files["c"].mz_offset_at(t) - base.files["a"].mz_offset_at(t)
+    assert abs(rel0[0] + 22.0) < 1.0, rel0                             # the anchors miss the first stretch
+    res = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(**{**P, "mz_probe_features": True}))
+    assert "mz_step_from_probes" in res.files["c"].flag
+    rel = res.files["c"].mz_offset_at(t) - res.files["a"].mz_offset_at(t)
+    assert np.all(np.abs(rel - want) < 1.0), rel
+
+
+def test_probe_features_leave_steady_files_alone():
+    truth = _truth()
+    W = _warps()
+    res = align_run({k: _file(truth, W[k], n_decoy=100, seed=i) for i, k in enumerate(W)}, {k: GRID for k in W},
+                    AlignParams(mz_dynamic=True, mz_relaxed_second_mode=True, mz_step_curve=True, mz_fallback_ref=True,
+                                mz_probe_features=True))
+    for fa in res.files.values():
+        assert "mz_step_from_probes" not in fa.flag and np.ptp(fa.mz_offset_at(GRID)) < 0.6
+
+
+def test_dynamic_mz_offset_stays_flat_without_offsets():
+    truth = _truth()
+    W = _warps()
+    res = align_run({k: _file(truth, W[k], seed=i) for i, k in enumerate(W)}, {k: GRID for k in W},
+                    AlignParams(mz_dynamic=True))
+    for fa in res.files.values():
+        assert np.ptp(fa.mz_offset_at(GRID)) < 0.6 and abs(fa.mz_offset_ppm) < 0.3
+
+
+def test_dynamic_mz_offset_with_few_matched_anchors_is_flat():
+    # 5 to 9 inlier anchors: too few for a curve; the file's offset is then flat over its run (it once was a bare
+    # number, which made mz_offset_at fail)
+    truth = _truth()
+    W = _warps()
+    seen = set()
+    for n in range(10, 26, 2):                       # small files: some match 8 or 9 anchors (a fit, but no curve)
+        feats = {k: _file(truth, W[k], seed=i) for i, k in enumerate(W)}
+        feats["d"] = _file(truth.iloc[::len(truth) // n].reset_index(drop=True), W["a"], seed=5)
+        res = align_run(feats, {k: GRID for k in [*W, "d"]}, AlignParams(mz_dynamic=True))
+        seen.add(res.files["d"].diag.n)
+        for fa in res.files.values():
+            v = fa.mz_offset_at(np.array([0.5, 2.5, 4.5]))
+            assert v.shape == (3,) and np.all(np.isfinite(v))
+    assert seen & {8, 9}, seen
+
+
+def test_file_matching_few_anchors_is_flagged_first():
+    truth = _truth()
+    W = _warps()
+    feats = {k: _file(truth, W[k], seed=i) for i, k in enumerate(W)}
+    feats["d"] = _file(truth, W["a"], presence=0.25, seed=5)            # a quarter of the compounds
+    res = align_run(feats, {k: GRID for k in [*W, "d"]}, AlignParams())
+    s = summary_table(res).set_index("file")
+    assert s.loc["d", "flag"].startswith("few_anchors_matched") and s.loc["d", "match_vs_median"] < 0.8
+    assert not any(s.loc[k, "flag"].startswith("few_anchors") for k in W)
 
 
 def test_cluster_weights_sum_to_clusters():

@@ -6,6 +6,8 @@
   const S1 = "--viz-series-1", S2 = "--viz-series-2";
   const STATUS = ["not found", "gap-filled", "gap-filled (peak confirmed)", "detected"];
   const STARS = ["red", "blue", "yellow"];          // the user's own marks for features (annotations.STARS)
+  const MARK = { red: ["mark_circle", "circle"], blue: ["mark_diamond", "diamond"], yellow: ["star", "star"] };   // icon, shape name
+  const markIcon = (c, on) => icon(on ? MARK[c][0] : MARK[c][0] + "_outline");
   // params.json stage_times_s keys (peak3d process, then peak3d external for the other kernels) and their labels
   const STAGE_KEYS = [["pick_s", "Picking"], ["align_s", "Alignment"], ["group_s", "Grouping"], ["gapfill_s", "Gap filling"], ["qc_s", "QC figures"],
     ["kernel_s", "{k}"], ["read_s", "Reading files"], ["ms2_s", "MS2 mapping"], ["identify_s", "Identity search"]];
@@ -313,8 +315,8 @@
       const count = h("span.body-small.muted");
       // one chip per star colour: the features carrying any of the chosen stars
       const starChip = (c) => {
-        const b = h("button.chip.state.star-chip", { type: "button", "aria-pressed": String(state.starF[c]), title: `Only features with a ${c} star` },
-          h("span.star-ic." + c, icon("star")), c[0].toUpperCase() + c.slice(1));
+        const b = h("button.chip.state.star-chip", { type: "button", "aria-pressed": String(state.starF[c]), title: `Only features with the ${c} ${MARK[c][1]}` },
+          h("span.star-ic." + c, markIcon(c, true)), c[0].toUpperCase() + c.slice(1));
         b.addEventListener("click", () => { state.starF[c] = !state.starF[c]; b.setAttribute("aria-pressed", String(state.starF[c])); scroller.scrollTop = 0; features_refresh(); });
         return b;
       };
@@ -409,7 +411,7 @@
         const iso = a.g_iso[g] > 0 ? `M+${a.g_iso[g]}` : "M";
         const z = a.g_z[g] > 1 ? ` · z=${a.g_z[g]}` : "";
         const tr = h("tr", { "aria-selected": String(g === state.sel), "data-g": g },
-          h("td.r.id-cell", R.stars(g).map((c) => h("span.star-ic.mini." + c, icon("star"))), int(a.g_id[g])), ...(R.m2 ? [scoreCell(g), identCell(g)] : []),
+          h("td.r.id-cell", R.stars(g).map((c) => h("span.star-ic.mini." + c, markIcon(c, true))), int(a.g_id[g])), ...(R.m2 ? [scoreCell(g), identCell(g)] : []),
           h("td.r", fixed(a.g_mz[g], 4)), h("td.r", fixed(R.rtS[g], 1)),
           h("td.r", fixed((a.g_rt_max[g] - a.g_rt_min[g]) * 60, 1)), h("td.r", `${a.g_ndet[g]}/${R.N}`),
           h("td.r", int(a.g_nfill[g])), h("td.r", sci(a.g_max[g])), h("td.r", isFinite(a.g_cv[g]) ? fixed(a.g_cv[g], 0) + "%" : "–"),
@@ -601,9 +603,10 @@
       const x = R.m2 ? R.annotation(g) : null;
       const stars = h("div.stars", STARS.map((c) => {
         const on = R.stars(g).includes(c);
-        const b = h("button.star-btn.state" + (on ? ".on" : ""), { type: "button", "aria-pressed": String(on), "aria-label": `${c} star`,
-          title: opts.note ? `${on ? "Remove the" : "Give this feature a"} ${c} star (your own rule; filter by it above the table)` : `${c} star${on ? "" : " (not set)"}`,
-          disabled: opts.note ? null : true }, h("span.star-ic." + c, icon(on ? "star" : "star_outline")));
+        const mark = `${c} ${MARK[c][1]}`;
+        const b = h("button.star-btn.state" + (on ? ".on" : ""), { type: "button", "aria-pressed": String(on), "aria-label": `${c} mark`,
+          title: opts.note ? `${on ? "Remove the" : "Give this feature the"} ${mark} (a mark for a rule of your own; filter by it above the list)` : `${mark}${on ? "" : " (not set)"}`,
+          disabled: opts.note ? null : true }, h("span.star-ic." + c, markIcon(c, on)));
         if (opts.note) b.addEventListener("click", () => toggleStar(g, c));
         return b;
       }));

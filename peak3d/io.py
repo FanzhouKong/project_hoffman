@@ -205,6 +205,55 @@ def _isolation_window(spec):
 
 ISOTOPE_DA = 1.003355          # 13C - 12C
 PRECURSOR_PPM, PRECURSOR_DA = 10.0, 0.003
+# a file's precursor m/z error against its MS1 (precursor_calibration): where the precursor's MS1 peak is looked for,
+# the spectra needed to measure it, and the spectra per m/z bin of the error curve (at most PRECURSOR_MAX_BINS bins)
+PRECURSOR_SEARCH_PPM, PRECURSOR_SEARCH_DA = 50.0, 0.01
+PRECURSOR_MIN_N, PRECURSOR_PER_BIN, PRECURSOR_MAX_BINS = 20, 100, 10
+
+
+def precursor_error(cal_mz, cal_ppm, mz):
+    """the precursor m/z error (ppm, precursor minus MS1) at mz of a precursor_calibration curve; 0 without one"""
+    mz = np.asarray(mz, np.float64)
+    if cal_mz is None or not len(cal_mz):
+        return np.zeros_like(mz)
+    return np.interp(mz, cal_mz, cal_ppm)
+
+
+def precursor_calibration(prec, d_ppm, ppm: float = PRECURSOR_PPM, search: float = PRECURSOR_SEARCH_PPM,
+                          min_n: int = PRECURSOR_MIN_N, per_bin: int = PRECURSOR_PER_BIN,
+                          max_bins: int = PRECURSOR_MAX_BINS):
+    """a file's MS2 precursor m/z error against its own MS1, from every spectrum's precursor m/z (prec) and
+    d_ppm: the precursor minus the strongest MS1 peak near it in the scan before, in ppm (nan where there was none).
+    Some instruments write the precursor off the MS1 calibration (a QTOF file in the MassCube set: +17 to +33 ppm,
+    falling with m/z), so the error is a curve: the median of d_ppm in equal-count m/z bins of at least per_bin
+    spectra (at most max_bins), linear between the bins' median m/z and flat beyond. The tolerance is 3 robust sd of
+    what the curve leaves, at least ppm and at most search. Returns (knot m/z, knot ppm, tolerance ppm, n spectra
+    measured); with fewer than min_n spectra there is no curve (empty knots) and the tolerance is ppm."""
+    prec = np.asarray(prec, np.float64)
+    d = np.asarray(d_ppm, np.float64)
+    ok = np.isfinite(prec) & np.isfinite(d)
+    n = int(ok.sum())
+    if n < min_n:
+        return np.zeros(0), np.zeros(0), float(ppm), n
+    o = np.argsort(prec[ok], kind="stable")
+    p, d = prec[ok][o], d[ok][o]
+    bins = np.array_split(np.arange(n), int(np.clip(n // per_bin, 1, max_bins)))
+    cal_mz = np.array([np.median(p[b]) for b in bins])
+    cal_ppm = np.array([np.median(d[b]) for b in bins])
+    r = d - np.interp(p, cal_mz, cal_ppm)
+    sd = 1.4826 * float(np.median(np.abs(r - np.median(r))))
+    return cal_mz, cal_ppm, float(min(search, max(ppm, 3.0 * sd))), n
+
+
+def _precursor_shift(mz, inten, prec, ppm: float = PRECURSOR_SEARCH_PPM, da: float = PRECURSOR_SEARCH_DA):
+    """the precursor minus the strongest MS1 peak within max(ppm, da) of it, in ppm (nan when there is none)"""
+    if mz is None or not np.isfinite(prec):
+        return float("nan")
+    near = np.flatnonzero(np.abs(mz - prec) <= max(prec * ppm * 1e-6, da))
+    if not len(near):
+        return float("nan")
+    j = near[np.argmax(inten[near])]
+    return float((prec - mz[j]) / prec * 1e6)
 
 
 def precursor_in_ms1(mz, inten, prec, lo, hi, ppm: float = PRECURSOR_PPM, da: float = PRECURSOR_DA):
@@ -237,17 +286,19 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
     "pos"/"neg" = keep only that polarity.
     ms2: a list to collect the file's centroided MS2 spectra into, in the same pass (the parser decodes them
     anyway): (scan id, rt, precursor m/z, polarity, precursor intensity, precursor purity, m/z array, intensity
-    array) with rt in minutes by the same rule as the MS1 scans; precursor intensity and purity are measured in the
-    last MS1 scan before the spectrum (precursor_in_ms1). Empty and profile-mode MS2 spectra are skipped and
-    counted in ``ms2.n_skipped`` when the collector has that attribute (ms2.Collector)."""
+    array) with rt in minutes by the same rule as the MS1 scans and the precursor m/z as the file gives it;
+    precursor intensity and purity are measured in the last MS1 scan before the spectrum (precursor_in_ms1), after
+    the pass, at the precursor corrected by the file's precursor_calibration and with its tolerance. Empty and
+    profile-mode MS2 spectra are skipped and counted in ``ms2.n_skipped``, and the calibration is stored in
+    ``ms2.cal_mz``, ``cal_ppm``, ``tol_ppm`` and ``cal_n``, when the collector has those attributes
+    (ms2.Collector)."""
     from pyteomics import mzml
 
     want = {"pos": "positive scan", "neg": "negative scan"}.get(polarity)
     rts, mzs, intens = [], [], []
     seen = set()
     n_ms1 = n_profile = 0
-    found = []
-    last_mz = last_int = None      # the last MS1 scan kept, for the precursor of the MS2 spectra after it
+    found = []                     # MS2 spectra with the index of the last MS1 scan kept before each (-1: none)
     with mzml.read(str(path), use_index=False) as reader:
         for s in reader:
             level = s.get("ms level")
@@ -259,10 +310,9 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
                             ms2.n_skipped += 1
                         continue
                     pol = "neg" if "negative scan" in s else ("pos" if "positive scan" in s else "")
-                    prec = _precursor_mz(s)
-                    p_int, purity = precursor_in_ms1(last_mz, last_int, prec, *_isolation_window(s))
-                    found.append((str(s.get("id", "")), _scan_rt_minutes(s), prec, pol, p_int, purity,
-                                  np.asarray(m, dtype=np.float64), np.asarray(s["intensity array"], dtype=np.float32)))
+                    found.append((str(s.get("id", "")), _scan_rt_minutes(s), _precursor_mz(s), pol, len(mzs) - 1,
+                                  *_isolation_window(s), np.asarray(m, dtype=np.float64),
+                                  np.asarray(s["intensity array"], dtype=np.float32)))
                 continue
             n_ms1 += 1
             n_profile += "profile spectrum" in s
@@ -273,7 +323,6 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
             rts.append(_scan_rt_minutes(s))
             mzs.append(s["m/z array"])
             intens.append(s["intensity array"])
-            last_mz, last_int = mzs[-1], intens[-1]
     if n_ms1 and n_profile == n_ms1:
         raise ValueError(f"{path}: MS1 spectra are profile mode; peak3d needs centroided MS1 "
                          f"(convert with msconvert --filter \"peakPicking vendor msLevel=1\")")
@@ -285,6 +334,14 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
     if seconds:
         rt = rt / 60.0
     if ms2 is not None:
-        ms2.extend((sid, t / 60.0 if seconds else t, *rest) for sid, t, *rest in found)
+        ms1 = lambda k: (mzs[k], intens[k]) if k >= 0 else (None, None)
+        prec = np.array([f[2] for f in found], np.float64)
+        cal_mz, cal_ppm, tol, cal_n = precursor_calibration(prec, [_precursor_shift(*ms1(f[4]), f[2]) for f in found])
+        scale = 1.0 - precursor_error(cal_mz, cal_ppm, prec) * 1e-6      # the precursor on the MS1 m/z scale
+        for (sid, t, p, pol, k, lo, hi, m, i), c in zip(found, scale):
+            ms2.append((sid, t / 60.0 if seconds else t, p, pol,
+                        *precursor_in_ms1(*ms1(k), p * c, lo * c, hi * c, ppm=tol), m, i))
+        if hasattr(ms2, "cal_n"):
+            ms2.cal_mz, ms2.cal_ppm, ms2.tol_ppm, ms2.cal_n = cal_mz, cal_ppm, tol, cal_n
     pol = polarity or (next(iter(pols)) if pols else "")
     return from_scans(Path(path).stem, rt, mzs, intens, pol)

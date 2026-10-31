@@ -9,7 +9,8 @@ import pandas as pd
 import pytest
 
 from peak3d import ms2
-from peak3d.io import load_cloud
+from peak3d.io import (PRECURSOR_MAX_BINS, PRECURSOR_PPM, PRECURSOR_SEARCH_PPM, load_cloud,
+                       precursor_calibration, precursor_error)
 from peak3d.library import read_msp, write_msp_record
 from peak3d.synth import Peak, make_cloud, write_mzml
 
@@ -57,6 +58,101 @@ def test_ms2_time_follows_the_ms1_unit_rule(tmp_path, unit):
     back = load_cloud(p, None, col)
     assert back.rt.max() == pytest.approx(cloud.rt.max(), abs=1e-3)
     assert col[0][1] == pytest.approx(4.0, abs=1e-3)
+
+
+# ------------------------------------------------------------------ precursor calibration ----
+def test_precursor_calibration_follows_the_error_curve():
+    rng = np.random.default_rng(5)
+    prec = rng.uniform(80, 900, 2000)
+    true = 33.0 - 0.02 * (prec - 80)                      # QTOF-like: +33 ppm at m/z 80 falling to +17 ppm at 900
+    d = true + rng.normal(0, 3.0, len(prec))
+    d[::50] = np.nan                                      # no MS1 peak near the precursor
+    cal_mz, cal_ppm, tol, n = precursor_calibration(prec, d)
+    assert n == 1960 and len(cal_mz) == PRECURSOR_MAX_BINS and np.all(np.diff(cal_mz) > 0)
+    inner = (prec > cal_mz[0]) & (prec < cal_mz[-1])
+    assert np.abs(precursor_error(cal_mz, cal_ppm, prec[inner]) - true[inner]).max() < 1.5
+    assert tol == pytest.approx(PRECURSOR_PPM)            # 3 sd of 3 ppm is under the 10 ppm floor
+    # flat beyond the bins, not extrapolated
+    assert precursor_error(cal_mz, cal_ppm, [10.0, 5000.0]).tolist() == [cal_ppm[0], cal_ppm[-1]]
+    # a wide spread widens the tolerance, capped at the search window
+    assert precursor_calibration(prec, rng.normal(8, 8, len(prec)))[2] == pytest.approx(24, abs=2)
+    assert precursor_calibration(prec, rng.normal(0, 40, len(prec)))[2] == PRECURSOR_SEARCH_PPM
+    # too few spectra: no curve, the fixed tolerance, no correction
+    cal_mz, cal_ppm, tol, n = precursor_calibration(prec[1:20], d[1:20])
+    assert n == 19 and len(cal_mz) == 0 and tol == PRECURSOR_PPM
+    assert precursor_error(cal_mz, cal_ppm, prec[:3]).tolist() == [0.0, 0.0, 0.0]
+    # fewer than two bins' worth: one bin, a constant error
+    cal_mz, cal_ppm, _, _ = precursor_calibration(prec[:150], d[:150])
+    assert len(cal_mz) == 1 and cal_ppm[0] == pytest.approx(np.nanmedian(d[:150]))
+
+
+def _offset_file(tmp_path, ppm_off, n_peaks=30, seed=7):
+    """an mzML whose MS2 precursors are written ppm_off ppm above their MS1 peaks, one spectrum per peak apex"""
+    rng = np.random.default_rng(seed)
+    mzs = np.sort(rng.uniform(120, 850, n_peaks))
+    rts = rng.uniform(0.4, 2.6, n_peaks)
+    peaks = [Peak(float(m), float(r), 3e5, 0.05) for m, r in zip(mzs, rts)]
+    cloud, _ = make_cloud(peaks, n_scans=600, dt=DT, floor=50.0, n_noise=2000, seed=seed, name="off")
+    frags = [_frag(20 + k) for k in range(n_peaks)]
+    spectra = [(float(r) + 0.0001, float(m) * (1 + ppm_off * 1e-6), *f) for m, r, f in zip(mzs, rts, frags)]
+    p = tmp_path / "off.mzML"
+    write_mzml(cloud, p, ms2=spectra)
+    return p, mzs, rts
+
+
+def test_offset_precursors_found_in_ms1_and_mapped(tmp_path):
+    p, mzs, rts = _offset_file(tmp_path, 26.0)
+    col = ms2.Collector()
+    load_cloud(p, None, col)
+    assert col.cal_n == 30 and len(col.cal_mz) == 1 and col.cal_ppm[0] == pytest.approx(26.0, abs=1.5)
+    assert all(r[4] > 0 for r in col)                     # every precursor found in the MS1 scan before it
+    assert np.allclose(sorted(r[2] for r in col), mzs * (1 + 26e-6), rtol=1e-8)    # stored as the file gives it
+    s = ms2.from_collected(col, "pos")
+    ms2.save(s, tmp_path / "off.npz")
+    back = ms2.load(tmp_path / "off.npz")
+    assert back.cal_n == 30 and back.tol_ppm == col.tol_ppm and np.allclose(back.cal_ppm, col.cal_ppm)
+    assert np.allclose(np.sort(back.precursor_on_ms1()), mzs, rtol=3e-6)
+    out = tmp_path / "out"
+    (out / "ms2").mkdir(parents=True)
+    pd.DataFrame({"group_id": np.arange(30), "mz": mzs, "rt": rts, "rt_min": rts - 0.05, "rt_max": rts + 0.05,
+                  "off": 1e5}).to_csv(out / "aligned_feature_table.tsv", sep="\t", index=False)
+    ms2.save(s, out / "ms2" / "off.npz")
+    t = ms2.map_to_groups(out)
+    assert sorted(t["group_id"]) == list(range(30)) and (t["precursor_intensity"] > 0).all()
+    q = pd.read_csv(out / "qc" / "ms2_precursor.tsv", sep="\t")
+    assert q["mapped"].tolist() == [30] and q["error_ppm_median"][0] == pytest.approx(26.0, abs=1.5)
+    # the same spectra without the calibration (as stored before it existed): 26 ppm is past the 10 ppm tolerance
+    ms2.save(ms2.from_collected(list(col), "pos"), out / "ms2" / "off.npz")
+    assert len(ms2.map_to_groups(out)) < 5
+
+
+def test_map_applies_the_alignment_mz_offset(tmp_path):
+    out, m, i = _fake_output(tmp_path)
+    nan = float("nan")
+    # file B's m/z runs 15 ppm above the consensus: its 400 Da precursor sits at 400.006 on its own scale
+    b = [("scan=7", 1.9, 400.0 * (1 + 15e-6), "pos", nan, nan, m, i)]      # 1.9 native = 2.0 corrected
+    ms2.save(ms2.from_collected(b, "pos"), out / "ms2" / "B.npz")
+    assert ("B", "scan=7") not in {(r.file, r.scan) for r in ms2.map_to_groups(out).itertuples()}
+    pd.DataFrame({"file": ["A", "B"], "mz_offset_ppm": [nan, 15.0]}).to_csv(out / "rt_correction" / "summary.tsv",
+                                                                          sep="\t", index=False)
+    t = ms2.map_to_groups(out)
+    assert t.loc[(t["file"] == "B") & (t["scan"] == "scan=7"), "group_id"].tolist() == [13]
+
+
+def test_map_applies_the_offset_at_the_spectrum_time(tmp_path):
+    # an m/z offset that varies over the run (--mz-dynamic): 0 early, 15 ppm from 1.5 min on (native time)
+    out, m, i = _fake_output(tmp_path)
+    nan = float("nan")
+    b = [("scan=7", 1.9, 400.0 * (1 + 15e-6), "pos", nan, nan, m, i),     # late: read 15 ppm high
+         ("scan=8", 0.91, 300.0005, "pos", nan, nan, m, i)]                # early: on the consensus scale
+    ms2.save(ms2.from_collected(b, "pos"), out / "ms2" / "B.npz")
+    pd.DataFrame({"rt_native": [0.0, 1.49, 1.5, 3.0], "rt_corr": [0.1, 1.59, 1.6, 3.1],
+                  "mz_offset_ppm": [0.0, 0.0, 15.0, 15.0]}).to_csv(out / "rt_correction" / "B.tsv", sep="\t", index=False)
+    pd.DataFrame({"file": ["A", "B"], "mz_offset_ppm": [0.0, 7.5]}).to_csv(out / "rt_correction" / "summary.tsv",
+                                                                         sep="\t", index=False)
+    t = ms2.map_to_groups(out)
+    got = dict(zip(t.loc[t["file"] == "B", "scan"], t.loc[t["file"] == "B", "group_id"]))
+    assert got.get("scan=7") == 13 and got.get("scan=8") in (11, 12), got
 
 
 # ------------------------------------------------------------------ mapping ----

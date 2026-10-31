@@ -3,8 +3,12 @@
 The spectra are collected while io.load_cloud reads a file's MS1 scans (no second pass over the mzML) and stored
 per file in <output>/ms2/<stem>.npz. map_to_groups assigns them to the aligned features, the same way for every
 kernel (peak3d, asari, MassCube): a spectrum belongs to the feature whose m/z is within max(ppm, da_floor) of its
-precursor and whose RT window, widened by max(2 s, a quarter of its width) on each side, holds the spectrum's time
-on the aligned axis (the file's own RT correction applied when there is one). When several features qualify, the
+precursor (da_floor 0.004 Da = 10 ppm at m/z 400: below it, QTOF precursors scatter by more than their ppm)
+and whose RT window, widened by max(2 s, a quarter of its width) on each side, holds the spectrum's time
+on the aligned axis (the file's own RT correction applied when there is one). The precursor is first put on the
+table's m/z scale: corrected by the file's measured precursor error (io.precursor_calibration: some instruments
+write it tens of ppm off their MS1) and by the file's m/z offset from alignment, and ppm is widened to the file's
+measured tolerance when that is larger. When several features qualify, the
 one strongest in that file wins, then the one with the closest apex. Each feature keeps all its spectra in
 ms2_map.tsv and two spectra for the search: the consensus of all of them, from every file (consensus.build:
 precursor-weighted, a peak needs two spectra), in ms2_consensus.msp, and the single spectrum with the highest total
@@ -19,14 +23,20 @@ import numpy as np
 import pandas as pd
 from numba import njit
 
+from .io import precursor_error
+
 MAP_COLUMNS = ["group_id", "file", "scan", "rt_s", "rt_aligned_s", "precursor_mz", "precursor_intensity",
                "precursor_purity", "tic", "n_peaks", "representative", "in_consensus", "consensus_status"]
 SPECTRA = {"consensus": "ms2_consensus.msp", "single": "ms2_spectra.msp"}      # the two copies of each feature
 
 
 class Collector(list):
-    """io.load_cloud's MS2 collector: a list of spectra plus the count of empty or profile-mode ones it skipped"""
+    """io.load_cloud's MS2 collector: a list of spectra plus the count of empty or profile-mode ones it skipped and
+    the file's precursor calibration (io.precursor_calibration)"""
     n_skipped = 0
+    cal_mz = cal_ppm = np.zeros(0)
+    tol_ppm = 0.0
+    cal_n = 0
 
 
 @dataclass
@@ -41,6 +51,10 @@ class Ms2Set:
     polarity: str = ""
     prec_int: np.ndarray | None = None   # f8, the precursor's intensity in the MS1 scan before (0: not there)
     purity: np.ndarray | None = None     # f8, its share of the isolation window (nan: window unknown)
+    cal_mz: np.ndarray | None = None     # the file's precursor error curve (io.precursor_calibration): knot m/z,
+    cal_ppm: np.ndarray | None = None    # error there (ppm, precursor minus MS1); empty: not measured
+    tol_ppm: float = 0.0                 # its tolerance (0: not measured)
+    cal_n: int = 0                       # spectra it was measured on
 
     def __post_init__(self):
         n = len(self.rt)
@@ -48,6 +62,12 @@ class Ms2Set:
             self.prec_int = np.full(n, np.nan)
         if self.purity is None:
             self.purity = np.full(n, np.nan)
+        if self.cal_mz is None or self.cal_ppm is None:
+            self.cal_mz, self.cal_ppm = np.zeros(0), np.zeros(0)
+
+    def precursor_on_ms1(self) -> np.ndarray:
+        """the precursor m/z on the file's MS1 m/z scale (its calibration curve applied)"""
+        return self.prec_mz * (1.0 - precursor_error(self.cal_mz, self.cal_ppm, self.prec_mz) * 1e-6)
 
     def __len__(self):
         return len(self.rt)
@@ -73,19 +93,24 @@ def from_collected(rows, polarity: str = "") -> Ms2Set:
                   np.array([float(i.sum()) for i in its], np.float64), off,
                   np.concatenate(mzs) if mzs else np.zeros(0), np.concatenate(its) if its else np.zeros(0, np.float32),
                   polarity or (next(iter(pols)) if len(pols) == 1 else ""),
-                  np.array([r[4] for r in rows], np.float64), np.array([r[5] for r in rows], np.float64))
+                  np.array([r[4] for r in rows], np.float64), np.array([r[5] for r in rows], np.float64),
+                  np.asarray(getattr(rows, "cal_mz", np.zeros(0)), np.float64),
+                  np.asarray(getattr(rows, "cal_ppm", np.zeros(0)), np.float64),
+                  float(getattr(rows, "tol_ppm", 0.0)), int(getattr(rows, "cal_n", 0)))
 
 
 def save(ms: Ms2Set, path) -> None:
     np.savez(path, scan=ms.scan, rt=ms.rt, prec_mz=ms.prec_mz, tic=ms.tic, off=ms.off, mz=ms.mz, inten=ms.inten,
-             polarity=np.array(ms.polarity), prec_int=ms.prec_int, purity=ms.purity)
+             polarity=np.array(ms.polarity), prec_int=ms.prec_int, purity=ms.purity, cal_mz=ms.cal_mz,
+             cal_ppm=ms.cal_ppm, tol_ppm=np.array(ms.tol_ppm), cal_n=np.array(ms.cal_n))
 
 
 def load(path) -> Ms2Set:
     with np.load(path, allow_pickle=False) as z:
-        extra = [z[k] if k in z.files else None for k in ("prec_int", "purity")]
+        extra = [z[k] if k in z.files else None for k in ("prec_int", "purity", "cal_mz", "cal_ppm")]
         return Ms2Set(z["scan"], z["rt"], z["prec_mz"], z["tic"], z["off"], z["mz"], z["inten"], str(z["polarity"]),
-                      *extra)
+                      *extra, float(z["tol_ppm"]) if "tol_ppm" in z.files else 0.0,
+                      int(z["cal_n"]) if "cal_n" in z.files else 0)
 
 
 # ------------------------------------------------------------------ mapping ----
@@ -128,12 +153,36 @@ def _aligned_time(output: Path, stem: str, rt):
     return np.interp(rt, t["rt_native"].to_numpy(float), t["rt_corr"].to_numpy(float))
 
 
+def _mz_offset_curve(output: Path, stem: str, rt, default: float):
+    """the file's m/z offset (ppm) at native times rt (min): its per-scan curve in rt_correction/<stem>.tsv
+    (mz_offset_ppm, written since the dynamic offset), else default (its one number)"""
+    p = output / "rt_correction" / f"{stem}.tsv"
+    rt = np.asarray(rt, np.float64)
+    if p.exists():
+        t = pd.read_csv(p, sep="\t")
+        if "mz_offset_ppm" in t and len(t):
+            return np.interp(rt, t["rt_native"].to_numpy(float), t["mz_offset_ppm"].to_numpy(float))
+    return np.full(rt.shape, default)
+
+
+def _mz_offsets(output: Path) -> dict:
+    """file -> its m/z offset from alignment (ppm, file minus consensus; the table's m/z is the file's times
+    1 - offset), from rt_correction/summary.tsv; empty when the run was not aligned"""
+    p = output / "rt_correction" / "summary.tsv"
+    if not p.exists():
+        return {}
+    t = pd.read_csv(p, sep="\t", dtype={"file": str})
+    if "mz_offset_ppm" not in t:
+        return {}
+    return {f: float(v) for f, v in zip(t["file"], t["mz_offset_ppm"]) if np.isfinite(v)}
+
+
 def _stale(output: Path):
     for name in ("ms2_map.tsv", *SPECTRA.values()):
         (output / name).unlink(missing_ok=True)
 
 
-def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003, fragment_tol: float = 0.02) -> pd.DataFrame:
+def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_tol: float = 0.02) -> pd.DataFrame:
     """assign every stored MS2 spectrum to an aligned feature; writes ms2_map.tsv (all assigned spectra),
     ms2_spectra.msp (each feature's highest-TIC spectrum) and ms2_consensus.msp (each feature's consensus spectrum).
     Returns the map (empty when the files had no MS2)."""
@@ -156,7 +205,8 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003, fragment_t
     g_lo, g_hi = lo - pad, hi + pad
     order = np.argsort(g_mz, kind="stable")
     g_sorted = g_mz[order]
-    parts, sets = [], {}
+    parts, sets, qc = [], {}, []
+    mz_off = _mz_offsets(output)
     for s in stems:
         ms = load(ms2_dir / f"{s}.npz")
         if not len(ms):
@@ -164,14 +214,29 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.003, fragment_t
         sets[s] = ms
         val = np.nan_to_num(table[s].to_numpy(np.float64), nan=0.0)
         t_al = _aligned_time(output, s, ms.rt)
-        g = _assign(g_sorted, order, g_lo, g_hi, g_rt, val, ms.prec_mz, t_al, float(ppm), float(da_floor))
+        prec = ms.precursor_on_ms1() * (1.0 - _mz_offset_curve(output, s, ms.rt, mz_off.get(s, 0.0)) * 1e-6)
+        tol = max(float(ppm), ms.tol_ppm)
+        g = _assign(g_sorted, order, g_lo, g_hi, g_rt, val, prec, t_al, tol, float(da_floor))
         k = np.flatnonzero(g >= 0)
+        err = ms.cal_ppm if len(ms.cal_ppm) else np.zeros(1)
+        qc.append(dict(file=s, n_ms2=len(ms), n_measured=ms.cal_n, error_ppm_min=err.min(),
+                       error_ppm_median=float(np.median(precursor_error(ms.cal_mz, ms.cal_ppm, ms.prec_mz))),
+                       error_ppm_max=err.max(), tol_ppm=tol, mz_offset_ppm=mz_off.get(s, 0.0),
+                       precursor_in_ms1=int(np.sum(ms.prec_int > 0)), mapped=len(k)))
         parts.append(pd.DataFrame({"g": g[k], "group_id": g_id[g[k]], "file": s, "k": k, "scan": ms.scan[k],
                                    "rt_s": np.round(ms.rt[k] * 60.0, 3), "rt_aligned_s": np.round(t_al[k] * 60.0, 3),
                                    "precursor_mz": ms.prec_mz[k], "precursor_intensity": ms.prec_int[k],
                                    "precursor_purity": ms.purity[k], "tic": ms.tic[k],
                                    "n_peaks": np.diff(ms.off)[k]}))
     n_all = sum(len(m) for m in sets.values())
+    if qc:
+        (output / "qc").mkdir(exist_ok=True)
+        q = pd.DataFrame(qc)
+        q.to_csv(output / "qc" / "ms2_precursor.tsv", sep="\t", index=False, float_format="%.4g")
+        log(f"ms2: precursor m/z error against MS1 median {q['error_ppm_median'].median():+.1f} ppm "
+            f"(files {q['error_ppm_median'].min():+.1f} to {q['error_ppm_median'].max():+.1f}), "
+            f"tolerance {q['tol_ppm'].min():.0f}-{q['tol_ppm'].max():.0f} ppm; precursor found in the MS1 scan before "
+            f"for {q['precursor_in_ms1'].sum()} of {q['n_ms2'].sum()} spectra")
     m = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["g", "k", *MAP_COLUMNS])
     if not len(m):
         _stale(output)

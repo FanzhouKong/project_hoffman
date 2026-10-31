@@ -20,13 +20,14 @@ import pandas as pd
 
 from . import __version__
 from .align import AlignParams, AlignResult, FileAlignment, align_run, anchors_table, summary_table
-from .features import COLUMNS, build_features, precise_mz, write_features
+from .features import COLUMNS, MZ_TEXT, build_features, write_features
 from .estimate import apply_scan_gains, estimate, parse_overrides, refit_after_gains, scan_gains, variant_label
 from .gapfill import fill_file
 from .grouping import consensus, group_features, merge_complementary
 from .io import Cloud, load_cloud
 from .ms2 import Collector, from_collected, save as save_ms2
 from .pick import pick_cloud
+from .tsv import write_tsv
 from .warp import FitDiag, TableWarp
 
 RESERVED = {"group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_filled", "mz_ppm_spread", "rt_sd",
@@ -56,6 +57,8 @@ def _warm_jit():
     build_features(cloud, b)
     from .gapfill import fill_file as _ff
     _ff(cloud, TableWarp.identity(cloud.rt), np.array([300.0]), np.array([0.5]), np.array([0.05]), 5.0)
+    from .tsv import warm
+    warm()
 
 
 def _load_model(path):
@@ -115,7 +118,7 @@ def _pick_one(job):
     t["features"] = time.perf_counter() - tic
     write_features(feats, Path(features_dir) / f"{stem}.tsv")
     if rej is not None:
-        precise_mz(rej).to_csv(Path(features_dir) / f"{stem}.rejected.tsv", sep="\t", index=False, float_format="%.6g")
+        write_tsv(rej, Path(features_dir) / f"{stem}.rejected.tsv", "%.6g", text_formats=MZ_TEXT)
     params = b.params.to_dict()
     params.update(n_scans=int(cloud.n_scans), n_centroids=int(cloud.n_points), polarity=cloud.polarity,
                   n_basins_initial=b.n_basins_initial, n_after_merge=b.n_after_merge,
@@ -211,7 +214,9 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     grids = {s: _scan_rt(cache_dir, s) for s in stems}
     dts = [float(np.median(np.diff(g))) if len(g) > 1 else 0.01 for g in grids.values()]
     dt_med = float(np.median(dts))
-    P = AlignParams(ppm=args.ppm, rt_tol_max=args.rt_tol_max, holdout=args.holdout)
+    dyn = not bool(getattr(args, "mz_static", False))       # --mz-static: one offset per file, no jump handling
+    P = AlignParams(ppm=args.ppm, rt_tol_max=args.rt_tol_max, holdout=args.holdout, mz_dynamic=dyn,
+                    mz_relaxed_second_mode=dyn, mz_step_curve=dyn, mz_fallback_ref=dyn, mz_probe_features=dyn)
 
     tic = time.perf_counter()
     if args.no_rt_correction:
@@ -236,8 +241,9 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
         is_anchor = np.zeros(len(df), bool)
         is_anchor[fa.anchor_idx] = True
         df["is_anchor"] = is_anchor
-        df["mz_corr"] = df["mz"].values * (1.0 - fa.mz_offset_ppm * 1e-6)
-        pd.DataFrame({"scan": np.arange(len(fa.warp.native)), "rt_native": fa.warp.native, "rt_corr": fa.warp.corr}) \
+        df["mz_corr"] = df["mz"].values * (1.0 - fa.mz_offset_at(df["rt"].values) * 1e-6)
+        pd.DataFrame({"scan": np.arange(len(fa.warp.native)), "rt_native": fa.warp.native, "rt_corr": fa.warp.corr,
+                      "mz_offset_ppm": fa.mz_offset_at(fa.warp.native)}) \
             .to_csv(rtc_dir / f"{s}.tsv", sep="\t", index=False, float_format="%.6f")
     summary_table(res).to_csv(rtc_dir / "summary.tsv", sep="\t", index=False, float_format="%.4g")
     anchors_table(res).to_csv(rtc_dir / "anchors.tsv", sep="\t", index=False, float_format="%.6g")
@@ -291,12 +297,11 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     G = len(cons["mz"])
     log(f"complementary merge: {G0} -> {G} groups")
     A["gid"] = gid
-    for k, s in enumerate(stems):
+    for k, s in enumerate(stems):                # the lists are written once, with group_kept, after the presence rule
         sel = A["file"].values == k
         g = np.empty(len(feats[s]), np.int64)
         g[A["row"].values[sel]] = gid[sel]
         feats[s]["group_id"] = g
-        write_features(feats[s], features_dir / f"{s}.tsv")
     stage_times["group_s"] = round(time.perf_counter() - tic, 3)
     log(f"grouped {len(A)} features from {N} files into {G} groups ({stage_times['group_s']} s)")
 
@@ -309,7 +314,8 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     detected[gid, A["file"].values] = True
 
     # gap filling, with confirmation: a missing cell whose smoothed EIC holds a real peak at the group's
-    # position counts as presence of the group in that file
+    # position counts as presence of the group in that file; each file is read at the group m/z on its own
+    # scale (the group m/z is on the corrected one, the cached centroids are not)
     n_filled = np.zeros(G, np.int64)
     confirmed = np.zeros((G, N), bool)
     if not args.no_gap_fill and N > 0:
@@ -329,7 +335,9 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
             if len(miss) == 0:
                 continue
             fa = res.files[s]
-            jobs.append((s, str(cache_dir), fa.warp.native, fa.warp.corr, cons["mz"][miss], cons["rt"][miss],
+            native = np.interp(cons["rt"][miss], fa.warp.corr, fa.warp.native)
+            own_mz = cons["mz"][miss] / (1.0 - fa.mz_offset_at(native) * 1e-6)    # on this file's own scale
+            jobs.append((s, str(cache_dir), fa.warp.native, fa.warp.corr, own_mz, cons["rt"][miss],
                          half[miss], res.ppm_tol, miss, threads, g_noise[miss], g_h[miss], fwhm_scans.get(s, 0.0)))
         if n_workers == 1 or len(jobs) <= 1:
             out = [_fill_one(j) for j in jobs]
@@ -371,16 +379,16 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
                          "rt_sd": cons["rt_sd"], "iso_offset": g_iso.astype(int), "charge": g_z.astype(int)})
     # presence of every group (before the rule) in every file: 2 detected, 1 confirmed peak, 0 absent
     pres = np.where(detected, 2, np.where(confirmed, 1, 0)).astype(np.int8)
-    precise_mz(pd.concat([base[["group_id", "mz", "rt", "n_detected", "n_confirmed"]], pd.DataFrame(pres, columns=stems)], axis=1)) \
-        .to_csv(output / "presence_mask.tsv", sep="\t", index=False)
+    write_tsv(pd.concat([base[["group_id", "mz", "rt", "n_detected", "n_confirmed"]], pd.DataFrame(pres, columns=stems)],
+                        axis=1), output / "presence_mask.tsv", text_formats=MZ_TEXT)
     main_is_height = getattr(args, "quant", "height") == "height"
     main = pd.concat([base, pd.DataFrame(H if main_is_height else AR, columns=stems)], axis=1)[keep_g]
     other = pd.concat([base, pd.DataFrame(AR if main_is_height else H, columns=stems)], axis=1)[keep_g]
-    precise_mz(main).to_csv(output / "aligned_feature_table.tsv", sep="\t", index=False, float_format="%.6g")
-    precise_mz(other).to_csv(output / ("aligned_feature_area.tsv" if main_is_height else "aligned_feature_height.tsv"),
-                             sep="\t", index=False, float_format="%.6g")
-    pd.concat([base[["group_id"]], pd.DataFrame((~detected).astype(np.int8), columns=stems)], axis=1)[keep_g] \
-        .to_csv(output / "filled_mask.tsv", sep="\t", index=False)
+    write_tsv(main, output / "aligned_feature_table.tsv", "%.6g", text_formats=MZ_TEXT)
+    write_tsv(other, output / ("aligned_feature_area.tsv" if main_is_height else "aligned_feature_height.tsv"), "%.6g",
+              text_formats=MZ_TEXT)
+    write_tsv(pd.concat([base[["group_id"]], pd.DataFrame((~detected).astype(np.int8), columns=stems)], axis=1)[keep_g],
+              output / "filled_mask.tsv")
     stage_times["n_groups_all"] = int(G)
     stage_times["n_groups_kept"] = int(keep_g.sum())
     return res, cons, stage_times

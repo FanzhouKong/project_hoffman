@@ -1,6 +1,8 @@
 """Study-level RT alignment: medoid reference whose native axis is the output axis, refined by
 consensus iterations over the union of every file's anchors, then a do-no-harm check of every warp
-on held-out (non-anchor) features."""
+on held-out (non-anchor) features. Each file's m/z offset is found first, coarsely, against the medoid
+within MZ_SEARCH_PPM and removed before anchors are matched within the narrow tolerance; the fine offset
+is measured on the matched anchors, and the file's offset (mz_offset_ppm) is the sum."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,12 +12,17 @@ import pandas as pd
 
 from .anchors import _isolated, select_anchors
 from .grouping import group_features
-from .warp import FitDiag, TableWarp, coarse_shift, fit_warp, mad, match_anchors, weighted_median
+from .warp import (FitDiag, TableWarp, _pairs, coarse_mz_offset, coarse_shift, fit_warp, mad, match_anchors,
+                   weighted_median)
 
 
 CONSENSUS_MIN_FILES = 3    # a consensus anchor group must be present in at least this many files
 GATE_MIN_SEG = 25          # validation features per do-no-harm segment, at least
 GATE_MAX_SEG = 12          # do-no-harm segments per file, at most
+MZ_SEARCH_PPM = 50.0       # how far the coarse m/z offset search looks, either side (ppm)
+PROBE_BINS, PROBE_PER_BIN = 50, 40   # mz_probe_features: the run in equal RT bins, the tallest per bin
+ANCHOR_MATCH_MIN = 0.8     # a file matching fewer anchors than this share of the median file's is flagged
+WARN_FLAGS = ("few_anchors_matched",)    # shown first in FileAlignment.flag, so the report marks the file
 
 
 @dataclass
@@ -26,6 +33,21 @@ class AlignParams:
     n_medoid_candidates: int = 25
     holdout: bool = False
     gate: bool = True          # do-no-harm: scale each warp down where held-out features do not support it
+    # m/z: the five below are on by default since 2026-10-31 (judged on the PR002464 m/z error test: 25 injections
+    # whose calibration jumps mid-run; no change on the 12 clean benchmark datasets); all off = one offset per file
+    mz_dynamic: bool = True    # each file's m/z offset as a curve over its run time (running median over its
+                               # anchors, coarse and fine) instead of one number: calibration that drifts or jumps
+    mz_relaxed_second_mode: bool = True   # a second coarse m/z mode needs >= 10 pairs, not >= 10 % of the anchors:
+                               # a calibration jump early or late in the run leaves its short part too few pairs
+    mz_step_curve: bool = True    # mz_dynamic: a file with two coarse modes gets a step at the time its pairs
+                               # switch mode (when a step fits them as well as the running median does), not a
+                               # curve interpolated across a stretch without pairs
+    mz_fallback_ref: bool = True    # a file with no coarse mode against the reference is searched against the
+                               # files on a known scale (one mode) and takes the one it shares most pairs with:
+                               # a U-13C-only sample has no partners in a 12C reference
+    mz_probe_features: bool = True    # mz_dynamic + mz_step_curve: look for a calibration jump again with the
+                               # strongest features over the whole run (PROBE_BINS x PROBE_PER_BIN), not only the
+                               # anchors, which leave out the run's ends and can have gaps
 
 
 @dataclass
@@ -44,16 +66,28 @@ class FileAlignment:
     holdout: dict | None = None
     dt: float = float("nan")
     span: float = float("nan")
-    mz_offset_ppm: float = 0.0     # file m/z minus consensus m/z, median over inlier anchors
+    mz_offset_ppm: float = 0.0     # file m/z minus consensus m/z: coarse + median over inlier anchors
+    mz_coarse_ppm: float = 0.0     # the coarse part, removed before anchors are matched (0: no clear mode)
+    mz_coarse_support: int = 0     # anchor pairs at the coarse mode
     anchor_w: np.ndarray = field(default_factory=lambda: np.zeros(0))   # 1/cluster size per anchor
     gate: dict | None = None       # do-no-harm step: validation count, segment nodes and factors, |dev| before/after
     warp_fit: TableWarp | None = None   # the anchor fit before the do-no-harm step (None = applied as fitted)
+    match_ratio: float = float("nan")   # anchors matched / the median file's (not the medoid)
+    mz_coarse_curve: np.ndarray | None = None   # mz_dynamic: the coarse offset per scan of the native grid
+    mz_curve: np.ndarray | None = None          # mz_dynamic: the offset (coarse + fine) per scan of the native grid
+
+    def mz_offset_at(self, rt):
+        """the file's m/z offset (ppm) at native times rt: its curve (mz_dynamic), else the one number"""
+        rt = np.asarray(rt, np.float64)
+        if self.mz_curve is None:
+            return np.full(rt.shape, self.mz_offset_ppm)
+        return np.interp(rt, self.warp.native, self.mz_curve)
 
     @property
     def flag(self):
         base = "medoid" if self.role == "medoid" else self.diag.flag
-        extra = [f for f in self.flags]
-        return ";".join([base] + extra)
+        warn = [f for f in self.flags if f in WARN_FLAGS]
+        return ";".join(warn + [base] + [f for f in self.flags if f not in WARN_FLAGS])
 
 
 @dataclass
@@ -75,11 +109,236 @@ def _file_grid_info(scan_rt):
     return float(g[0]), float(g[-1]), dt, float(g[-1] - g[0])
 
 
+def _mz(fa: FileAlignment, feats: pd.DataFrame, idx=None):
+    """the file's feature m/z (all rows, or rows idx) with its coarse m/z offset removed (at each feature's time,
+    with mz_dynamic)"""
+    mz = feats["mz"].values if idx is None else feats["mz"].values[idx]
+    if fa.mz_coarse_curve is None:
+        return mz * (1.0 - fa.mz_coarse_ppm * 1e-6)
+    rt = feats["rt"].values if idx is None else feats["rt"].values[idx]
+    return mz * (1.0 - np.interp(rt, fa.warp.native, fa.mz_coarse_curve) * 1e-6)
+
+
+def _mz_curve(x, y, grid):
+    """running median of y (ppm) over x (native RT) in windows of k points (a quarter of them, 9 to 51, odd; moved
+    inward at the ends rather than padded), tabulated on grid and flat beyond the ends: a calibration drift is
+    followed and a jump stays a step (the median switches where the window's majority does), while on a steady
+    file the curve stays within the median's own noise; None with fewer than 10 points"""
+    n = len(x)
+    if n < 10:
+        return None
+    o = np.argsort(x, kind="stable")
+    x, y = np.asarray(x, np.float64)[o], np.asarray(y, np.float64)[o]
+    k = min(n, int(np.clip(n // 4, 9, 51)) | 1)
+    windows = np.median(np.lib.stride_tricks.sliding_window_view(y, k), axis=1)
+    return np.interp(grid, x, windows[np.clip(np.arange(n) - k // 2, 0, n - k)])
+
+
+def _mz_step(x, y, modes, grid):
+    """a calibration jump as one step on grid: each point (native RT x, ppm y) is labelled by the nearer of the two
+    modes, the step sits where the labels switch with fewest points on the wrong side (either order), and each side
+    takes the median of its own label's points; None when the labels interleave (either side < 80 % its own label)
+    or a side holds < 5 points of its label"""
+    n = len(x)
+    if n < 10:
+        return None
+    o = np.argsort(x, kind="stable")
+    x, y = np.asarray(x, np.float64)[o], np.asarray(y, np.float64)[o]
+    lab = np.argmin([np.abs(y - m) for m, _, _ in modes[:2]], axis=0)
+    best = None
+    for first in (0, 1):
+        is_first = lab == first
+        wrong = np.cumsum(~is_first)[:-1] + (is_first.sum() - np.cumsum(is_first)[:-1])   # split after i
+        i = int(np.argmin(wrong))
+        if best is None or wrong[i] < best[0]:
+            best = (int(wrong[i]), i + 1, first)
+    _, cut, first = best
+    left, right = y[:cut][lab[:cut] == first], y[cut:][lab[cut:] != first]
+    if len(left) < 0.8 * cut or len(right) < 0.8 * (n - cut) or len(left) < 5 or len(right) < 5:
+        return None
+    t_c = 0.5 * (x[cut - 1] + x[cut])
+    return np.where(np.asarray(grid) < t_c, float(np.median(left)), float(np.median(right)))
+
+
+def _step_or_curve(x, y, modes, grid):
+    """(curve, True) when a step (_mz_step) explains the points about as well as the running median (_mz_curve):
+    within 1.25x its median absolute residual, or 0.5 ppm, so a jump; a gradual drift between two levels fits the
+    running median clearly better and keeps it: (curve, False); (None, False) without enough points"""
+    med = _mz_curve(x, y, grid)
+    st = _mz_step(x, y, modes, grid)
+    if st is None or med is None:
+        return med, False
+    x, y, grid = np.asarray(x, np.float64), np.asarray(y, np.float64), np.asarray(grid, np.float64)
+    r_st = np.median(np.abs(y - np.interp(x, grid, st)))
+    r_med = np.median(np.abs(y - np.interp(x, grid, med)))
+    return (st, True) if r_st <= max(1.25 * r_med, 0.5) else (med, False)
+
+
+def _probe_idx(feats: pd.DataFrame, grid):
+    """the strongest clean monoisotopic features spread over the whole run: the run in PROBE_BINS equal RT bins, the
+    PROBE_PER_BIN tallest of each (score >= 0.5, S/N >= 5, >= 4 scans); no isolation rule and no margin at the ends,
+    unlike the anchors (anchors.select_anchors)"""
+    ok = (feats["score"].values >= 0.5) & (feats["snr"].values >= 5) & (feats["n_scans"].values >= 4) \
+        & (feats["iso_offset"].values == 0)
+    cand = np.flatnonzero(ok)
+    t0, t1 = float(grid[0]), float(grid[-1])
+    b = np.clip(((feats["rt"].values[cand] - t0) / max(t1 - t0, 1e-9) * PROBE_BINS).astype(int), 0, PROBE_BINS - 1)
+    h = feats["height"].values[cand]
+    o = np.lexsort((-h, b))
+    rank = np.arange(len(o)) - np.searchsorted(b[o], b[o])          # position within its bin, tallest first
+    return np.sort(cand[o[rank < PROBE_PER_BIN]])
+
+
+def _labelled_pairs(mz_f, rt_f, mz_t, rt_t, modes, W):
+    """per file anchor, its pair (within MZ_SEARCH_PPM and W) nearest one of the file's credible modes (offset,
+    support, half-width), when within that mode's half-width: (anchor RT, ppm difference)"""
+    i, j, d_rt = _pairs(mz_f, rt_f, mz_t, rt_t, MZ_SEARCH_PPM)
+    keep = np.abs(d_rt) <= W
+    i, j = i[keep], j[keep]
+    d = (mz_f[i] - mz_t[j]) / mz_t[j] * 1e6
+    dist = np.min([np.abs(d - m) - h for m, _, h in modes], axis=0) if len(d) else d
+    sel = dist <= 0
+    i, d, dist = i[sel], d[sel], dist[sel]
+    o = np.lexsort((dist, i))
+    first = o[np.r_[True, np.diff(i[o]) != 0]] if len(o) else o
+    return rt_f[i[first]], d[first]
+
+
+def _coarse_mz(files, features, stems, ref, ppm: float, dynamic: bool = False, relaxed_second: bool = False,
+               step: bool = False, fallback: bool = False, probes: bool = False):
+    """every file's coarse m/z offset against the anchors of file ref (coarse_mz_offset within MZ_SEARCH_PPM and
+    the file's coarse RT window). A mode is credible when it holds >= 10 pairs and >= 10 % of the smaller anchor
+    set and stands 4x above the chance pairs; a second mode also needs >= 25 % of the first's pairs and must lie
+    >= ppm (the narrow tolerance) from it. The study's centre is the median offset of the files with exactly one
+    credible mode (ref: 0). A file with two (its calibration jumps mid-run, as in 23 PR002464 ST004502 files:
+    0 ppm before ~4 min, -22 after; one offset cannot fit both parts) takes the mode nearer the centre, flagged
+    two_mz_modes; a file with none takes the centre, flagged no_mz_mode. All are then expressed against the
+    centre, so the study's scale is its typical file's, whichever file was the reference. Anchors matched within
+    the narrow tolerance see only offsets well inside it: a file 5 ppm off loses a third of its matches and its
+    fine offset can fall far short, one 10 ppm off loses nearly all, and with them its RT alignment and its chance
+    to be the medoid. dynamic: the offset is a curve over the file's RT instead (_mz_curve of each anchor's pair
+    nearest a credible mode: a file whose calibration jumps keeps both parts). relaxed_second: the second mode
+    needs >= 10 pairs instead of >= 10 % of the smaller anchor set (the other tests stay). step: with dynamic, a file
+    with two modes gets a step (_mz_step) instead of the running median. fallback: a file with no mode against ref is
+    searched against every file on a known scale (one mode, or ref) and takes the modes of the one it shares most
+    pairs with, moved by that file's own offset (flag mz_mode_via_other_file). probes (with dynamic and step): every
+    file is searched again with its probe features (_probe_idx) against those of the file its modes came from; a
+    second mode found there (>= 10 pairs, 4x the chance pairs, >= ppm from the first) that splits the run in two
+    (_mz_step) gives the file that step, placed by the denser probe pairs (flag mz_step_from_probes)."""
+    ma = files[ref].anchor_idx
+    mz_m, rt_m = features[ref]["mz"].values[ma], features[ref]["rt"].values[ma]
+
+    def anchors(s):
+        b = files[s].anchor_idx
+        return features[s]["mz"].values[b], features[s]["rt"].values[b]
+
+    def credible(s, mz_t, rt_t):
+        """the credible coarse modes of file s against anchors (mz_t, rt_t): up to two (offset, support, half)"""
+        mz_s, rt_s = anchors(s)
+        modes, bg = coarse_mz_offset(mz_s, rt_s, mz_t, rt_t, MZ_SEARCH_PPM, float(np.clip(0.1 * files[s].span, 0.3, 4.0)))
+        need = max(10, 0.1 * min(len(mz_s), len(mz_t)))
+        ok = [m for m in modes[:1] if m[1] >= need and m[1] >= 4 * bg]
+        if ok and len(modes) > 1:
+            m2 = modes[1]
+            need2 = 10 if relaxed_second else need
+            if m2[1] >= max(need2, 0.25 * ok[0][1], 4 * bg) and abs(m2[0] - ok[0][0]) >= ppm:
+                ok.append(m2)
+        return ok
+
+    def _probe_step(s, g, shift):
+        """a step for file s from its probe features against file g's (g's offset shift added), or None"""
+        ps = _probe_idx(features[s], files[s].warp.native)
+        pg = _probe_idx(features[g], files[g].warp.native)
+        mz_s, rt_s = features[s]["mz"].values[ps], features[s]["rt"].values[ps]
+        mz_g, rt_g = features[g]["mz"].values[pg], features[g]["rt"].values[pg]
+        W = float(np.clip(0.1 * files[s].span, 0.3, 4.0))
+        modes, bg = coarse_mz_offset(mz_s, rt_s, mz_g, rt_g, MZ_SEARCH_PPM, W)
+        if len(modes) < 2:
+            return None
+        m1, m2 = modes[0], modes[1]
+        if not (m1[1] >= max(10, 4 * bg) and m2[1] >= max(10, 4 * bg) and abs(m2[0] - m1[0]) >= ppm):
+            return None
+        x, d = _labelled_pairs(mz_s, rt_s, mz_g, rt_g, [m1, m2], W)
+        c, is_step = _step_or_curve(x, d + shift, [(m1[0] + shift,) + m1[1:], (m2[0] + shift,) + m2[1:]],
+                                    files[s].warp.native)
+        return c if is_step else None
+
+    found = {}
+    via = {}            # fallback: file -> (the file its modes were measured against, that file's offset)
+    for s in stems:
+        if s == ref:
+            found[s] = [(0.0, len(ma))]
+        elif len(files[s].anchor_idx) and len(ma):
+            found[s] = credible(s, mz_m, rt_m)
+    if fallback:
+        known = [g for g in stems if len(found.get(g, [])) == 1]
+        for s in [s for s in stems if s != ref and s in found and not found[s]]:
+            best, best_ok = None, []
+            for g in known:
+                if g != s and len(files[g].anchor_idx):
+                    ok = credible(s, *anchors(g))
+                    if ok and (not best_ok or ok[0][1] > best_ok[0][1]):
+                        best, best_ok = g, ok
+            if best_ok:
+                shift = found[best][0][0]
+                found[s] = [(o + shift, n, h) for o, n, h in best_ok]
+                via[s] = (best, shift)
+                files[s].flags.append("mz_mode_via_other_file")
+    for s, m in found.items():
+        if s != ref and not m:
+            files[s].flags.append("no_mz_mode")
+        elif s != ref and len(m) == 2:
+            files[s].flags.append("two_mz_modes")
+    single = [m[0][0] for m in found.values() if len(m) == 1]
+    centre = float(np.median(single)) if single else 0.0
+    chosen = {s: min(m, key=lambda x: abs(x[0] - centre))[:2] for s, m in found.items() if m}
+    if dynamic:
+        # each file's offset against ref over its RT, then the study's centre at each time: the median over the
+        # files (ref: 0) of their offsets there, so the scale follows the typical file even when ref itself jumps
+        curves = {}
+        for s, m in found.items():
+            if m and s != ref:
+                g, shift = via.get(s, (ref, 0.0))
+                mz_t, rt_t = (mz_m, rt_m) if g == ref else anchors(g)
+                x, d = _labelled_pairs(*anchors(s), mz_t, rt_t, [(o - shift, n, h) for o, n, h in m],
+                                       float(np.clip(0.1 * files[s].span, 0.3, 4.0)))
+                d = d + shift
+                c = None
+                if probes and step:
+                    c = _probe_step(s, g, shift)
+                    if c is not None:
+                        if "two_mz_modes" not in files[s].flags:
+                            files[s].flags.append("two_mz_modes")
+                        files[s].flags.append("mz_step_from_probes")
+                if c is None and step and len(m) == 2:
+                    c, is_step = _step_or_curve(x, d, m, files[s].warp.native)
+                    c = c if is_step else None
+                if c is None:
+                    c = _mz_curve(x, d, files[s].warp.native)
+                if c is not None:
+                    curves[s] = c
+        g = np.linspace(min(files[s].warp.native[0] for s in stems), max(files[s].warp.native[-1] for s in stems), 256)
+        at_g = [np.interp(g, files[s].warp.native, curves[s]) if s in curves else np.full(len(g), chosen[s][0])
+                for s in chosen]
+        centre_g = np.median(np.vstack(at_g), axis=0) if at_g else np.zeros(len(g))
+    for s in stems:
+        fa = files[s]
+        off, sup = chosen.get(s, (centre, 0))
+        fa.mz_coarse_ppm, fa.mz_coarse_support = off - centre, sup
+        fa.mz_offset_ppm = fa.mz_coarse_ppm
+        if dynamic:
+            cg = np.interp(fa.warp.native, g, centre_g)
+            own = curves[s] if s in curves else (off if s in chosen else cg)       # no mode: the study's scale
+            fa.mz_coarse_curve = own - cg
+            fa.mz_curve = fa.mz_coarse_curve.copy()
+            fa.mz_coarse_ppm = fa.mz_offset_ppm = float(np.median(fa.mz_coarse_curve))
+
+
 def _fit_file(fa: FileAlignment, feats: pd.DataFrame, grid, tgt_mz, tgt_rt, P: AlignParams):
     """coarse shift, mutual-unique matching and warp fit of one file against the target"""
     t0, t_end, dt, span = _file_grid_info(grid)
     a = fa.anchor_idx
-    mz_f, rt_f = feats["mz"].values[a], feats["rt"].values[a]
+    mz_f, rt_f = _mz(fa, feats, a), feats["rt"].values[a]
     W_coarse = float(np.clip(0.1 * span, 0.3, 4.0))
     bin_w = max(2 * dt, 0.5 / 60)
     delta, support, sigma = coarse_shift(mz_f, rt_f, tgt_mz, tgt_rt, P.ppm, W_coarse, bin_w)
@@ -95,8 +354,9 @@ def _fit_file(fa: FileAlignment, feats: pd.DataFrame, grid, tgt_mz, tgt_rt, P: A
     warp, diag = fit_warp(x, y, grid, dt, w0=w0)
     fa.warp, fa.diag = warp, diag
     fa.anchor_w_matched = w0
-    m = pd.DataFrame({"feature_id": feats["feature_id"].values[a][i], "mz": mz_f[i], "rt_native": x,
-                      "rt_corr": warp.forward(x), "consensus_rt": y, "cluster_w": w0 if w0 is not None else 1.0})
+    m = pd.DataFrame({"feature_id": feats["feature_id"].values[a][i], "mz": feats["mz"].values[a][i],
+                      "rt_native": x, "rt_corr": warp.forward(x), "consensus_rt": y,
+                      "cluster_w": w0 if w0 is not None else 1.0})
     m["residual_before_s"] = 60 * (y - x)
     m["residual_after_s"] = 60 * (y - m["rt_corr"].values)
     if diag.weight is not None and len(diag.weight) == len(m):
@@ -104,7 +364,14 @@ def _fit_file(fa: FileAlignment, feats: pd.DataFrame, grid, tgt_mz, tgt_rt, P: A
         m["is_inlier"] = diag.inlier
         inl = diag.inlier
         if inl.sum() >= 5:
-            fa.mz_offset_ppm = float(np.median((mz_f[i][inl] - tgt_mz[j][inl]) / tgt_mz[j][inl] * 1e6))
+            r = (mz_f[i][inl] - tgt_mz[j][inl]) / tgt_mz[j][inl] * 1e6
+            fine = float(np.median(r))
+            fa.mz_offset_ppm = fa.mz_coarse_ppm + fine
+            if P.mz_dynamic:
+                coarse = fa.mz_coarse_curve if fa.mz_coarse_curve is not None else fa.mz_coarse_ppm
+                curve = _mz_curve(x[inl], r, grid)          # None (too few inliers): the fine offset, flat
+                fa.mz_curve = np.zeros(len(grid)) + coarse + (curve if curve is not None else fine)
+                fa.mz_offset_ppm = float(np.median(fa.mz_curve))
     else:
         m["weight"] = np.nan
         m["is_inlier"] = np.abs(m["residual_after_s"].values) <= 60 * max(3 * 1.4826 * mad(y - warp.forward(x)), dt) \
@@ -164,7 +431,7 @@ def _validation_set(files, features, stems, P: AlignParams, dt_med):
         if len(cand):
             cand = cand[_isolated(f["mz"].values, f["rt"].values, cand, 2 * P.ppm, 2 * W)]
         x = f["rt"].values[cand]
-        parts.append(pd.DataFrame({"mz": f["mz"].values[cand], "x": x, "u": files[s].warp.forward(x),
+        parts.append(pd.DataFrame({"mz": _mz(files[s], f, cand), "x": x, "u": files[s].warp.forward(x),
                                    "h": f["height"].values[cand], "file": k}))
     V = pd.concat(parts, ignore_index=True)
     if len(V) == 0:
@@ -296,15 +563,18 @@ def align_run(features: dict, scan_rt: dict, P: AlignParams | None = None) -> Al
         return AlignResult(files, None, True, P.ppm, 2 * dt_med, dt_med, float("nan"), 0,
                            notes=["alignment skipped (single file)"])
 
-    # medoid: among the anchor-richest files, the one whose coarse match support to the others is largest
+    # coarse m/z offsets first (against the anchor-richest file), so that no step below sees them
     rich = sorted(stems, key=lambda s: -files[s].n_anchors)[:P.n_medoid_candidates]
+    _coarse_mz(files, features, stems, rich[0], P.ppm, P.mz_dynamic, P.mz_relaxed_second_mode, P.mz_step_curve,
+               P.mz_fallback_ref, P.mz_probe_features)
+    # medoid: among the anchor-richest files, the one whose coarse match support to the others is largest
     best, best_score = None, -1.0
     for c in rich:
         fc = files[c]
         if fc.n_anchors < 15:
             continue
         a = fc.anchor_idx
-        mz_c, rt_c = features[c]["mz"].values[a], features[c]["rt"].values[a]
+        mz_c, rt_c = _mz(fc, features[c], a), features[c]["rt"].values[a]
         sup = []
         for s in stems:
             if s == c:
@@ -314,23 +584,25 @@ def align_run(features: dict, scan_rt: dict, P: AlignParams | None = None) -> Al
                 sup.append(0)
                 continue
             b = fs.anchor_idx
-            _, support, _ = coarse_shift(features[s]["mz"].values[b], features[s]["rt"].values[b], mz_c, rt_c,
+            _, support, _ = coarse_shift(_mz(fs, features[s], b), features[s]["rt"].values[b], mz_c, rt_c,
                                          P.ppm, float(np.clip(0.1 * fs.span, 0.3, 4.0)), max(2 * fs.dt, 0.5 / 60))
             sup.append(support)
         score = float(np.median(sup)) if sup else 0.0
         if score > best_score:
             best, best_score = c, score
     notes = []
-    if best is None:   # no file has enough anchors: everything stays on its native axis
+    if best is None:   # no file has enough anchors: everything stays on its native axis and m/z
         for fa in files.values():
             fa.diag = FitDiag(flag="identity:no_anchors", n=0)
+            fa.mz_offset_ppm = fa.mz_coarse_ppm = 0.0
+            fa.mz_coarse_curve = fa.mz_curve = None
         notes.append("no file had >= 15 anchors; alignment skipped")
         return AlignResult(files, None, True, P.ppm, 2 * dt_med, dt_med, float("nan"), 0, notes)
     medoid = best
     files[medoid].role = "medoid"
     files[medoid].diag = FitDiag(flag="medoid", n=files[medoid].n_anchors)
     a = files[medoid].anchor_idx
-    tgt_mz = features[medoid]["mz"].values[a]
+    tgt_mz = _mz(files[medoid], features[medoid], a)
     tgt_rt = features[medoid]["rt"].values[a]
 
     n_done = 0
@@ -348,7 +620,7 @@ def align_run(features: dict, scan_rt: dict, P: AlignParams | None = None) -> Al
             f = features[s]
             idx = fa.anchor_idx
             rt_n = f["rt"].values[idx]
-            parts.append(pd.DataFrame({"mz": f["mz"].values[idx], "rt": fa.warp.forward(rt_n),
+            parts.append(pd.DataFrame({"mz": _mz(fa, f, idx), "rt": fa.warp.forward(rt_n),
                                        "rt_min": fa.warp.forward(f["rt_min"].values[idx]),
                                        "rt_max": fa.warp.forward(f["rt_max"].values[idx]),
                                        "height": f["height"].values[idx], "file": k}))
@@ -381,11 +653,25 @@ def align_run(features: dict, scan_rt: dict, P: AlignParams | None = None) -> Al
     rt_tol = float(np.clip(3 * pooled, 2 * dt_med, P.rt_tol_max))
     # medoid m/z offset against the final consensus (its anchors are the identity in RT)
     a = files[medoid].anchor_idx
-    i, j = match_anchors(features[medoid]["mz"].values[a], features[medoid]["rt"].values[a], tgt_mz, tgt_rt, P.ppm,
-                         0.0, max(0.1, 6 * files[medoid].dt))
+    mm = _mz(files[medoid], features[medoid], a)
+    i, j = match_anchors(mm, features[medoid]["rt"].values[a], tgt_mz, tgt_rt, P.ppm, 0.0,
+                         max(0.1, 6 * files[medoid].dt))
     if len(i) >= 5:
-        mm = features[medoid]["mz"].values[a][i]
-        files[medoid].mz_offset_ppm = float(np.median((mm - tgt_mz[j]) / tgt_mz[j] * 1e6))
+        r = (mm[i] - tgt_mz[j]) / tgt_mz[j] * 1e6
+        files[medoid].mz_offset_ppm = files[medoid].mz_coarse_ppm + float(np.median(r))
+        if P.mz_dynamic:
+            fm = files[medoid]
+            coarse = fm.mz_coarse_curve if fm.mz_coarse_curve is not None else fm.mz_coarse_ppm
+            curve = _mz_curve(features[medoid]["rt"].values[a][i], r, fm.warp.native)
+            fm.mz_curve = np.zeros(len(fm.warp.native)) + coarse + (curve if curve is not None else float(np.median(r)))
+            fm.mz_offset_ppm = float(np.median(fm.mz_curve))
+    # a file that matched far fewer anchors than the typical one is aligned (in RT and m/z) on little evidence
+    typical = float(np.median([files[s].diag.n for s in stems if s != medoid]))
+    for s in stems:
+        if s != medoid and typical > 0:
+            files[s].match_ratio = files[s].diag.n / typical
+            if files[s].match_ratio < ANCHOR_MATCH_MIN:
+                files[s].flags.append("few_anchors_matched")
     sd = np.concatenate([features[s]["mz_sd_ppm"].values[files[s].anchor_idx] for s in stems])
     ppm_tol = float(np.clip(max(P.ppm, 3 * np.median(sd)) if len(sd) else P.ppm, 5.0, 15.0))
     if P.holdout:
@@ -400,10 +686,11 @@ def summary_table(res: AlignResult) -> pd.DataFrame:
     for s, fa in res.files.items():
         sh = fa.warp.shift(fa.warp.native)
         rows.append(dict(file=s, role=fa.role, anchor_tier=fa.tier, n_anchors=fa.n_anchors, n_matched=fa.diag.n,
+                         match_vs_median=fa.match_ratio,
                          n_inlier=fa.diag.n_inlier, K_knots=fa.diag.K, coarse_shift_s=60 * fa.coarse_shift,
                          max_abs_shift_s=60 * float(np.max(np.abs(sh))) if len(sh) else 0.0,
                          mad_before_s=fa.diag.mad_before_s, mad_after_s=fa.diag.mad_after_s,
-                         mz_offset_ppm=fa.mz_offset_ppm,
+                         mz_offset_ppm=fa.mz_offset_ppm, mz_coarse_ppm=fa.mz_coarse_ppm,
                          gate_n_val=fa.gate["n_val"] if fa.gate else 0,
                          gate_lambda_min=float(fa.gate["lam"].min()) if fa.gate else np.nan,
                          gate_lambda_med=float(np.median(fa.gate["lam"])) if fa.gate else np.nan,

@@ -63,6 +63,12 @@ def build_parser():
                        help="a group must be detected, or confirmed by a peak in its gap-filled chromatogram, in at least "
                             "this many files (capped at the number of files; 1 = off; default 2)")
         p.add_argument("--holdout", action="store_true", help="held-out anchor check per file")
+        p.add_argument("--mz-static", action="store_true",
+                       help="one m/z offset per file, no jump handling (the default before 2026-10-31); by default the "
+                            "offset is a curve over each file's run time that also follows a calibration jump")
+        for old in ("--mz-dynamic", "--mz-relaxed-second-mode", "--mz-step-curve", "--mz-fallback-reference",
+                    "--mz-probe-features"):     # on by default since 2026-10-31; accepted so earlier command lines run
+            p.add_argument(old, action="store_true", help=argparse.SUPPRESS)
         p.add_argument("--quant", choices=["height", "area"], default="height",
                        help="value in the main aligned table (default height; the other is written too)")
 

@@ -266,12 +266,13 @@ def _read_one(job):
 def finish(files, args, table: pd.DataFrame, kernel: str, version: str, stage: dict, polarity: str | None) -> None:
     """everything after the kernel: the aligned table, peak3d's own read of every file (chromatogram cache, MS2),
     MS2 mapping, identity search, params.json, report.html"""
-    from .features import precise_mz
+    from .features import MZ_TEXT
     from .pipeline import _write_report, log, ms2_and_identify
+    from .tsv import write_tsv
     output = Path(args.output)
     files = [Path(f) for f in files]
     stems = [f.stem for f in files]
-    precise_mz(table).to_csv(output / "aligned_feature_table.tsv", sep="\t", index=False, float_format="%.6g")
+    write_tsv(table, output / "aligned_feature_table.tsv", "%.6g", text_formats=MZ_TEXT)
     cache_dir, ms2_dir, features_dir = output / ".cache", output / "ms2", output / "features"
     for d in (cache_dir, ms2_dir, features_dir):
         d.mkdir(parents=True, exist_ok=True)

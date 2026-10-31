@@ -164,13 +164,21 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
         s = stems[k]
         cloud = Cloud.load_npz(cache_dir / f"{s}.npz")
         warp = output / "rt_correction" / f"{s}.tsv"
+        moff = None
         if warp.exists():
-            corr = pd.read_csv(warp, sep="\t")["rt_corr"].to_numpy(float)
+            wt = pd.read_csv(warp, sep="\t")
+            corr = wt["rt_corr"].to_numpy(float)
             if len(corr) != cloud.n_scans:
                 corr = cloud.rt
+            elif "mz_offset_ppm" in wt:
+                moff = wt["mz_offset_ppm"].to_numpy(float)
         else:
             corr = cloud.rt
-        target = mz_c / (1.0 - offsets.get(s, 0.0) * 1e-6)
+        if moff is None:
+            target = mz_c / (1.0 - offsets.get(s, 0.0) * 1e-6)
+        else:                       # the file's offset at each group's time (a curve unless --mz-static)
+            native = np.interp(t["rt"].to_numpy(float), np.asarray(corr, np.float64), cloud.rt)
+            target = mz_c / (1.0 - np.interp(native, cloud.rt, moff) * 1e-6)
         traces[:, j, :] = eic_on_grid(cloud.off, cloud.mz, cloud.inten, np.asarray(corr, np.float64),
                                       target, target * ppm * 1e-6, x0, dx, n_pts)
     scale = traces.reshape(n_groups, -1).max(axis=1)

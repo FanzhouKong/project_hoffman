@@ -222,6 +222,44 @@ def coarse_shift(mz_f, rt_f, mz_t, rt_t, ppm: float, W: float, bin_width: float)
     return delta, support, float(max(sigma, 0.25 * bin_width))
 
 
+def _mz_mode(d, search_ppm: float, bin_ppm: float):
+    """(centre, half-width) of the strongest mode of the ppm differences d: the peak of their histogram (bins of
+    bin_ppm, smoothed over 5), refined to the median of the differences within 3 ppm of it; the half-width is
+    3 robust sd of those, 1 to 5 ppm"""
+    edges = np.arange(-search_ppm, search_ppm + bin_ppm / 2, bin_ppm)
+    h, _ = np.histogram(d, edges)
+    k = int(np.argmax(np.convolve(h, np.ones(5), mode="same")))
+    near = d[np.abs(d - 0.5 * (edges[k] + edges[k + 1])) <= 3.0]
+    return float(np.median(near)), float(np.clip(3 * 1.4826 * mad(near), 1.0, 5.0))
+
+
+def coarse_mz_offset(mz_f, rt_f, mz_t, rt_t, search_ppm: float, W: float, bin_ppm: float = 0.5):
+    """Modes of the m/z difference (ppm, file minus target) over all anchor pairs within +/- search_ppm and
+    +/- W minutes: a file's m/z offset, found before anchors are matched within the narrow tolerance, which
+    sees only offsets well inside it. Returns (modes, background): up to two (offset, support, half-width), the
+    strongest mode first (offset = median of the pairs within its half-width, support = their number), then the
+    strongest mode of the pairs beyond twice that half-width (a file whose calibration jumps mid-run has two);
+    background = how many of the pairs outside the first mode a uniform spread over the search range would put
+    within its half-width."""
+    mz_f, mz_t = np.asarray(mz_f, float), np.asarray(mz_t, float)
+    i, j, d_rt = _pairs(mz_f, np.asarray(rt_f, float), mz_t, np.asarray(rt_t, float), search_ppm)
+    keep = np.abs(d_rt) <= W
+    if not keep.any():
+        return [], 0.0
+    d = (mz_f[i[keep]] - mz_t[j[keep]]) / mz_t[j[keep]] * 1e6
+    modes, rest, half1 = [], d, None
+    for _ in range(2):
+        if len(rest) == 0:
+            break
+        c, half = _mz_mode(rest, search_ppm, bin_ppm)
+        near = np.abs(d - c) <= half
+        modes.append((float(np.median(d[near])), int(near.sum()), half))
+        half1 = half if half1 is None else half1
+        rest = rest[np.abs(rest - c) > 2 * half]
+    background = (len(d) - modes[0][1]) * half1 / max(search_ppm - half1, 1e-9)
+    return modes, float(background)
+
+
 def match_anchors(mz_f, rt_f, mz_t, rt_t, ppm: float, delta: float, W_fine: float):
     """mutual-unique matches (file anchor i, target anchor j) after shifting file RTs by delta"""
     i_idx, j_idx, d = _pairs(np.asarray(mz_f, float), np.asarray(rt_f, float), np.asarray(mz_t, float),

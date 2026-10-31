@@ -9,6 +9,7 @@ from .estimate import Params
 from .io import Cloud
 from .isotopes import annotate_isotopes
 from .pick import Basins
+from .tsv import write_tsv
 
 COLUMNS = ["feature_id", "mz", "rt", "rt_apex", "height", "area", "area_bsub", "rt_min", "rt_max",
            "scan_apex", "scan_min", "scan_max", "n_scans", "n_points", "n_gaps", "fwhm", "asym",
@@ -494,6 +495,7 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
 
 
 MZ_COLUMNS = ("mz", "mz_min", "mz_max", "mz_corr")
+MZ_TEXT = {c: "%.6f" for c in MZ_COLUMNS}      # write_tsv's text_formats: what precise_mz does
 
 
 def precise_mz(df: pd.DataFrame) -> pd.DataFrame:
@@ -509,4 +511,4 @@ def precise_mz(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def write_features(df: pd.DataFrame, path) -> None:
-    precise_mz(df).to_csv(path, sep="\t", index=False, float_format="%.6g", lineterminator="\n")
+    write_tsv(df, path, "%.6g", "\n", MZ_TEXT)
