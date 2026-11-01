@@ -1,0 +1,26 @@
+{
+  "trace_noise": 6.696642435228582,
+  "own_noise": 6.441012889712305,
+  "cell_floor": 4.0,
+  "default_reference": 6.696642435228582,
+  "off_peak_samples": 106,
+  "own_samples": 157,
+  "verified_against": [
+    "eic_shape.ES_NOISE",
+    "eic_shape.ES_OWN",
+    "window_noise"
+  ],
+  "panels": [
+    "08_cloud_trace_noise_panel_1",
+    "08_cloud_trace_noise_panel_2",
+    "08_cloud_trace_noise_panel_3",
+    "09_cloud_trace_own_noise_panel_1",
+    "09_cloud_trace_own_noise_panel_2",
+    "09_cloud_trace_own_noise_panel_3"
+  ],
+  "source_sha256": {
+    "peak3d/kernels.py": "7d83b558d5230a2a248d9ee91c264f6e734afec479eb341b1641d60402855b7a",
+    "peak3d/features.py": "95495e23f2cb5ae89408202332c66a41a83eb8205e285f7acef830f9043d767f",
+    "presentation/peak3d/render_trace_noise.py": "ca215f271113b3f0368760b0c125281d6e460fe1f6654916adfe268e224e9c69"
+  }
+}

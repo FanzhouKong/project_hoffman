@@ -1,6 +1,6 @@
 import numpy as np
 
-from peak3d.estimate import estimate, fwhm_at, strongest_distinct
+from peak3d.estimate import VARIANT, VARIANT_SETS, Params, estimate, fwhm_at, strongest_distinct, variant_label
 from peak3d.synth import Peak, make_cloud
 
 
@@ -44,3 +44,10 @@ def test_estimate_rules_for_narrow_peaks():
     cloud, _ = _study(seed=2, fwhm=0.02, dt=0.005)   # 4 scans per FWHM
     P = estimate(cloud)
     assert P.K == 2 and P.min_scans == 3
+
+
+def test_defaults_are_the_named_variant():
+    P = Params()
+    assert VARIANT == "GLRS" and {k: getattr(P, k) for k in VARIANT_SETS} == VARIANT_SETS
+    assert variant_label() == variant_label({"narrow_rule": "local_median"}) == "GLRS"     # a default is no change
+    assert variant_label({"scan_gain": False, "merge_test": "noise"}) == "GLRS + merge_test=noise scan_gain=False"

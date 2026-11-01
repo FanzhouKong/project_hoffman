@@ -7,7 +7,7 @@ import pytest
 
 from peak3d import kernels as K
 from peak3d.estimate import Params, estimate
-from peak3d.features import basins_to_frame, build_features, gate, ridge_ratio, rule_score
+from peak3d.features import add_local_width, basins_to_frame, build_features, gate, ridge_ratio, rule_score
 from peak3d.io import from_scans
 from peak3d.pick import pick_cloud
 from peak3d.synth import Peak, make_cloud
@@ -100,6 +100,7 @@ def test_zigzag_trace_counts_valleys_and_is_gated_when_asked():
     g = df[np.abs(df["mz"] - 400.2) < 0.005].iloc[0]
     assert g["n_valleys"] == 0
     P = b.params
+    add_local_width(df, cloud, P)
     for name, vals in ridge_ratio(df, cloud, P).items():
         df[name] = vals
     ok_off = gate(df, replace(P, max_valleys=-1))

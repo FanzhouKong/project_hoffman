@@ -69,10 +69,11 @@ def _best_in_scan(off, mz, inten, sig, t, m, sp, cap, jptr):
 
 
 @njit(cache=True, parallel=True)
-def find_neighbors(off, mz, inten, sig, K, tol_max_ppm, same_scan_k, same_scan_floor_ppm):
+def find_neighbors(off, mz, inten, sig, K, tol_max_ppm, same_scan_k, same_scan_floor_ppm, same_scan_floor_da=0.0):
     """int32[N, 4] neighbour indices (-1 = none): same-scan m/z neighbours (split pieces of one
     centroid) within same_scan_k x the pair tolerance 3*sqrt(sig_p^2 + sig_q^2) or within
-    same_scan_floor_ppm, whichever is larger: a split piece sits at a small systematic offset that
+    max(same_scan_floor_ppm, same_scan_floor_da in Da), whichever is larger (the Da floor governs
+    at low m/z, where a few mDa are tens of ppm): a split piece sits at a small systematic offset that
     precision does not explain (the floor absorbs a 2 ppm sliver of a strong centroid), while a
     factor above 1 on the pair tolerance let a weak piece's large sigma reach a second ion 10-20
     ppm away; on each side the most intense centroid within the pair tolerance of the nearest scan
@@ -95,7 +96,7 @@ def find_neighbors(off, mz, inten, sig, K, tol_max_ppm, same_scan_k, same_scan_f
             sp = sig[p]
             cap = m * tol_max_ppm * 1e-6
             # same scan
-            floor = same_scan_floor_ppm * m * 1e-6
+            floor = max(same_scan_floor_ppm * m * 1e-6, same_scan_floor_da)
             if p - 1 >= a:
                 q = p - 1
                 tol = same_scan_k * 3.0 * np.sqrt(sp * sp + sig[q] * sig[q]) * m * 1e-6
@@ -398,7 +399,9 @@ def _find(uf, x):
 
 @njit(cache=True)
 def persistence_merge(ea, eb, es, apex_int, noise_b, rel_frac, k_noise, apex_scan, apex_mz, apex_sig,
-                      min_sep_scans, es_s, apex_s_in, far_scans, far_frac):
+                      min_sep_scans, es_s, apex_s_in, far_scans, far_frac,
+                      dip_test=False, noise_c=0.0, noise_r=0.0, gain_s=1.0, k_dip=3.0,
+                      own_test=False, off=None, mz=None, inten=None, own_half=0, ppm_min=5.0):
     """ToMATo: process edges by descending saddle; the lower apex dies into the higher one when
     apex_lower - saddle < max(rel_frac * apex_lower, k_noise * noise), or when the two apexes are
     the same ion (within the pair m/z tolerance) closer than min_sep_scans: two chromatographic
@@ -407,11 +410,24 @@ def persistence_merge(ea, eb, es, apex_int, noise_b, rel_frac, k_noise, apex_sca
     smoothed surface (es_s, per-basin smoothed apex apex_s_in) falls far_frac below the lower
     smoothed apex: a dip inside one peak lies within about one width of its apex, so far apart
     a shallower valley separates; the smoothing keeps single-scan ripple on a tail from counting
-    as a valley (far_frac = 0 disables the rule). Returns (root per basin, saddle to the first
-    higher survivor per basin, or 0)."""
+    as a valley (far_frac = 0 disables the rule). With dip_test the fixed fractions (rel_frac, the far
+    rule) are replaced by the file's noise law for apexes at least min_sep_scans apart (closer apexes
+    cannot hold a chromatographic valley: their saddle is a split centroid or m/z jitter, judged as
+    before): the lower apex survives when the dip from its apex to the saddle on the es_s / apex_s_in
+    surface exceeds k_dip sd of that difference, sd = gain_s * sqrt(noise_at(apex)^2 + noise_at(saddle)^2)
+    with the basin's cell noise as floor and gain_s the noise reduction of that surface's smoothing (1 for
+    the raw surface). With own_test, two apexes of the same ion at least min_sep_scans apart, the lower
+    standing k_noise x its cell noise high, are two peaks whenever the dip from the lower apex to the
+    saddle (raw surface) exceeds k_dip x sqrt(2) x the noise of that ion's own trace (own_noise of its EIC
+    from own_half scans before the earlier apex to own_half after the later one; the file's noise law at
+    the lower apex, cell floor included, when the trace has too few scans with signal), whatever the rules
+    above say; when it does not, those rules decide. Whether a trace holds two peaks is judged against
+    that trace's noise, not a fixed fraction, and such a lower apex is flagged in the third return value
+    (shoulder: its significance against its own trace is established). Returns (root per basin, saddle to the first higher survivor per basin, or 0, shoulder)."""
     B = len(apex_int)
     uf = np.arange(B, dtype=np.int32)
     pers_saddle = np.zeros(B, np.float32)
+    shoulder = np.zeros(B, np.bool_)
     seen = np.zeros(B, np.bool_)
     apex_s = apex_s_in.copy()
     order = np.argsort(-es, kind="mergesort")
@@ -434,9 +450,26 @@ def persistence_merge(ea, eb, es, apex_int, noise_b, rel_frac, k_noise, apex_sca
             tol = 3.0 * np.sqrt(apex_sig[lower] ** 2 + apex_sig[higher] ** 2) * m * 1e-6
             too_close = abs(apex_mz[lower] - m) <= tol
         merge = pers < tau or too_close
-        if merge and not too_close and far_frac > 0 and sep >= far_scans:
+        if dip_test and not too_close and sep >= min_sep_scans:
+            a = apex_s[lower]
+            sd_dip = gain_s * np.sqrt(noise_at(a, noise_b[lower], noise_c, noise_r) ** 2
+                                      + noise_at(es_s[e], noise_b[lower], noise_c, noise_r) ** 2)
+            merge = a - es_s[e] < k_dip * sd_dip
+        elif merge and not too_close and far_frac > 0 and sep >= far_scans:
             if apex_s[lower] - es_s[e] >= max(far_frac * apex_s[lower], k_noise * noise_b[lower]):
                 merge = False
+        if own_test and not too_close and sep >= min_sep_scans and apex_int[lower] >= k_noise * noise_b[lower]:
+            m = apex_mz[higher]
+            tol = 3.0 * np.sqrt(apex_sig[lower] ** 2 + apex_sig[higher] ** 2) * m * 1e-6
+            if abs(apex_mz[lower] - m) <= tol:
+                s0 = max(0, min(apex_scan[lower], apex_scan[higher]) - own_half)
+                s1 = min(len(off) - 1, max(apex_scan[lower], apex_scan[higher]) + own_half + 1)
+                sd = window_noise(off, mz, inten, m, m * max(3.0 * apex_sig[higher] + 1.0, ppm_min) * 1e-6, s0, s1)
+                if sd < 0:
+                    sd = noise_at(apex_int[lower], noise_b[lower], noise_c, noise_r)
+                if apex_int[lower] - sad > k_dip * np.sqrt(2.0) * sd:
+                    merge = False
+                    shoulder[lower] = True
         if merge:
             uf[lower] = higher
             if apex_s[lower] > apex_s[higher]:
@@ -446,7 +479,7 @@ def persistence_merge(ea, eb, es, apex_int, noise_b, rel_frac, k_noise, apex_sca
             pers_saddle[lower] = sad
     for b in range(B):
         uf[b] = _find(uf, b)
-    return uf, pers_saddle
+    return uf, pers_saddle, shoulder
 
 
 @njit(cache=True)
@@ -519,9 +552,11 @@ def _parabola_r2(t, y, w, n):
 
 
 @njit(cache=True)
-def _walk(trace, tidx, nbr, inten, rt, smin, ka, span, cap, lo_thr, step, side):
+def _walk(trace, tidx, nbr, inten, rt, smin, ka, span, cap, lo_thr, step, side, bridge, bfrac):
     """walk from the apex in direction step (-1 left, +1 right) along the per-scan-max trace.
-    Stops at the basin end, at two consecutive scans <= lo_thr, or at the width cap.
+    Stops at the basin end, at two consecutive scans <= lo_thr, or at the width cap. With bridge > 0
+    a hole of at most bridge scans without a centroid is crossed when the scans on both sides of it
+    hold >= bfrac x the apex (a dropout inside the peak body, not a return to the baseline).
     Returns (k_end, end_value, hit_cap, floor_value): k_end is the last scan kept inside the
     bounds, end_value the intensity level the walk ended on (the saddle to a neighbouring basin,
     the second low value, the capped value, or 0 when the trace dropped out), floor_value the
@@ -548,6 +583,17 @@ def _walk(trace, tidx, nbr, inten, rt, smin, ka, span, cap, lo_thr, step, side):
         k = kn
         v = trace[k]
         if v <= lo_thr:
+            if bridge > 0 and v <= 0.0 and low == 0 and trace[last_good] >= bfrac * trace[ka]:
+                j = k + step
+                n = 1
+                while j >= 0 and j < span and trace[j] <= 0.0 and n <= bridge:
+                    j += step
+                    n += 1
+                if (n <= bridge and j >= 0 and j < span and trace[j] >= bfrac * trace[ka]
+                        and abs(rt[smin + j] - rt[sa]) <= cap):
+                    k = j
+                    last_good = j
+                    continue
             low += 1
             low_val = v
             low_min = v if low == 1 else min(low_min, v)
@@ -568,7 +614,7 @@ def noise_at(level, floor, c, r):
 
 @njit(cache=True, parallel=True)
 def basin_stats(sel, order, boff, scan_of, nbr, mz, inten, eff, rt, noise_b, fwhm_med, max_width_fwhm,
-                noise_c, noise_r, k_valley, rep_raw):
+                noise_c, noise_r, k_valley, rep_raw, bridge_scans, bridge_frac):
     """descriptors for the selected basins; see COLS for the column order. The per-scan trace is
     the most intense point of the basin in that scan with its same-scan split neighbours summed
     (``eff``), never the sum of every basin point, which would count background centroids.
@@ -627,8 +673,10 @@ def basin_stats(sel, order, boff, scan_of, nbr, mz, inten, eff, rt, noise_b, fwh
         noise = noise_b[b]
         lo_thr = max(2.0 * noise, 0.01 * apex)
         cap = max_width_fwhm * fwhm_med
-        klo, end_left, cap_l, floor_left = _walk(trace, tidx, nbr, inten, rt, smin, ka, span, cap, lo_thr, -1, NB_LEFT)
-        khi, end_right, cap_r, floor_right = _walk(trace, tidx, nbr, inten, rt, smin, ka, span, cap, lo_thr, 1, NB_RIGHT)
+        klo, end_left, cap_l, floor_left = _walk(trace, tidx, nbr, inten, rt, smin, ka, span, cap, lo_thr, -1, NB_LEFT,
+                                                 bridge_scans, bridge_frac)
+        khi, end_right, cap_r, floor_right = _walk(trace, tidx, nbr, inten, rt, smin, ka, span, cap, lo_thr, 1, NB_RIGHT,
+                                                   bridge_scans, bridge_frac)
         baseline = max(end_left, end_right)
         if rep_raw:
             mz_min = 1e300
@@ -935,7 +983,78 @@ def gaussian_kernel(fwhm_scans):
     return k / k.sum()
 
 
-ES_TOP, ES_SCAN, ES_APEX, ES_PROM, ES_NOISE = 0, 1, 2, 3, 4
+@njit(cache=True, parallel=True)
+def local_scan_dt(rt, s_lo, s_hi, pad):
+    """per query: the median time between consecutive scans over scans s_lo - pad .. s_hi + pad (the local MS1
+    sampling interval; it changes along a data-dependent run as MS2 scans are interleaved)"""
+    S = len(rt)
+    n = len(s_lo)
+    out = np.empty(n, np.float64)
+    for i in prange(n):
+        a = max(0, s_lo[i] - pad)
+        b = min(S - 1, s_hi[i] + pad)
+        if b <= a:
+            a = max(0, a - 1)
+            b = min(S - 1, b + 1)
+        d = np.empty(b - a, np.float64)
+        for k in range(a, b):
+            d[k - a] = rt[k + 1] - rt[k]
+        out[i] = np.median(d) if b > a else 0.0
+    return out
+
+
+ES_TOP, ES_SCAN, ES_APEX, ES_PROM, ES_NOISE, ES_OWN = 0, 1, 2, 3, 4, 5
+OWN_MIN_POINTS = 10   # scans with signal needed to measure a trace's own noise (-1 below)
+
+
+@njit(cache=True)
+def own_noise(e):
+    """a trace's own scan-to-scan noise: each scan against the 5-point local quadratic (Savitzky-Golay)
+    through its neighbours, at scans whose 5-point stretch holds signal in every scan (empty scans and the
+    zeros around a trace say nothing about its noise), scaled by 1 / sqrt(1 - 17/35) to the sd of white
+    noise, robust sd (1.4826 x MAD); -1 with fewer than OWN_MIN_POINTS such scans. A local quadratic
+    follows a peak's own curvature, so a clean peak reads near 0 however sharp it is (fit_intensity_noise
+    measures the file's noise law the same way)."""
+    m = len(e)
+    sg_corr = 1.0 / np.sqrt(1.0 - 17.0 / 35.0)
+    own = np.empty(max(m, 1), np.float64)
+    c = 0
+    for j in range(2, m - 2):
+        if e[j - 2] > 0 and e[j - 1] > 0 and e[j] > 0 and e[j + 1] > 0 and e[j + 2] > 0:
+            sg = (-3.0 * e[j - 2] + 12.0 * e[j - 1] + 17.0 * e[j] + 12.0 * e[j + 1] - 3.0 * e[j + 2]) / 35.0
+            own[c] = (e[j] - sg) * sg_corr
+            c += 1
+    if c < OWN_MIN_POINTS:
+        return -1.0
+    rr = own[:c]
+    mo = np.median(rr)
+    return 1.4826 * np.median(np.abs(rr - mo))
+
+
+@njit(cache=True)
+def window_noise(off, mz, inten, q_mz, q_tol, s0, s1):
+    """own_noise of the EIC (per-scan maximum within +/- q_tol of q_mz) over scans s0..s1-1"""
+    e = np.zeros(max(s1 - s0, 0), np.float64)
+    for s in range(s0, s1):
+        a = off[s]
+        b = off[s + 1]
+        lo = a
+        hi = b
+        v = q_mz - q_tol
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if mz[mid] < v:
+                lo = mid + 1
+            else:
+                hi = mid
+        best = 0.0
+        p = lo
+        while p < b and mz[p] <= q_mz + q_tol:
+            if inten[p] > best:
+                best = inten[p]
+            p += 1
+        e[s - s0] = best
+    return own_noise(e)
 
 
 @njit(cache=True, parallel=True)
@@ -947,11 +1066,13 @@ def eic_shape(off, mz, inten, q_mz, q_tol, s_apex, s_lo, s_hi, half_win, kern):
     hold a slice of a slope: a tail, ramp, step or a neighbour's flank), its topographic prominence
     within the window, and the residual scan-to-scan noise of the raw trace outside the bounds
     (1.4826 x MAD of raw - smoothed; the whole window when fewer than 10 scans lie outside).
-    Returns float64[n, 5] indexed by ES_*."""
+    ES_OWN: the trace's own noise over the window, inside the bounds too (own_noise; -1 when it has too few
+    scans with signal).
+    Returns float64[n, 6] indexed by ES_*."""
     n = len(q_mz)
     S = len(off) - 1
     K2 = len(kern) // 2
-    out = np.zeros((n, 5), np.float64)
+    out = np.zeros((n, 6), np.float64)
     for i in prange(n):
         a0 = max(0, s_apex[i] - half_win)
         a1 = min(S, s_apex[i] + half_win + 1)
@@ -1029,6 +1150,7 @@ def eic_shape(off, mz, inten, q_mz, q_tol, s_apex, s_lo, s_hi, half_win, kern):
             r = e - es
         med = np.median(r)
         noise = 1.4826 * np.median(np.abs(r - med))
+        out[i, ES_OWN] = own_noise(e)
         out[i, ES_TOP] = top
         out[i, ES_SCAN] = a0 + k
         out[i, ES_APEX] = 1.0 if (left_ok and right_ok) else 0.0
@@ -1038,14 +1160,14 @@ def eic_shape(off, mz, inten, q_mz, q_tol, s_apex, s_lo, s_hi, half_win, kern):
 
 
 @njit(cache=True)
-def duplicate_mask(mz_s, scan_s, height_s, ppm, max_dscan):
-    """inputs sorted by m/z: True where another feature of the same ion (within ppm) sits on the
-    same smoothed maximum (scan within max_dscan) with a larger height: the weaker one duplicates
-    the stronger one's peak"""
+def duplicate_mask(mz_s, scan_s, height_s, ppm, max_dscan, abs_da=0.0):
+    """inputs sorted by m/z: True where another feature of the same ion (within ppm, or abs_da in
+    Da if that is wider) sits on the same smoothed maximum (scan within max_dscan) with a larger
+    height: the weaker one duplicates the stronger one's peak"""
     n = len(mz_s)
     out = np.zeros(n, np.bool_)
     for i in range(n):
-        lim = mz_s[i] * ppm * 1e-6
+        lim = max(mz_s[i] * ppm * 1e-6, abs_da)
         j = i - 1
         while j >= 0 and mz_s[i] - mz_s[j] <= lim:
             if abs(scan_s[j] - scan_s[i]) <= max_dscan and height_s[j] > height_s[i]:

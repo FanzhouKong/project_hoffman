@@ -46,6 +46,8 @@ def build_parser():
                        help="keep only this polarity (required for polarity-switching files)")
         p.add_argument("--model", type=Path, default=None, help="pickled re-scorer (optional)")
         p.add_argument("--keep-rejected", action="store_true", help="also write rejected candidates")
+        p.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                       help="override a fixed picker parameter, e.g. --set merge_test=noise (repeatable)")
 
     def align_opts(p):
         p.add_argument("--ppm", type=_positive(float), default=5.0, help="m/z tolerance for anchors/grouping")
@@ -56,6 +58,9 @@ def build_parser():
                        help="a group must be detected, or confirmed by a peak in its gap-filled chromatogram, in at least "
                             "this many files (capped at the number of files; 1 = off; default 2)")
         p.add_argument("--holdout", action="store_true", help="held-out anchor check per file")
+        p.add_argument("--no-compounds", action="store_true",
+                       help="skip compound grouping (adducts, in-source fragments, multimers and their isotopes of "
+                            "one compound, joined on peak-shape and intensity correlation)")
         p.add_argument("--quant", choices=["height", "area"], default="height",
                        help="value in the main aligned table (default height; the other is written too)")
 

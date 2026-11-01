@@ -24,3 +24,9 @@ bench/diag/hzv029_missed_page.py
 *.egg-info/
 /build/
 /dist/
+
+# caches, job logs and zip bundles of figures that sit beside them
+specdenoise/.cache/
+presentation/**/*.out
+presentation/**/*.err
+presentation/**/*.zip

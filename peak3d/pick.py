@@ -1,6 +1,7 @@
 """Per-file 3D pick: Cloud -> basin table (numpy arrays). No pandas here."""
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -12,6 +13,8 @@ from .io import Cloud
 
 MAX_WIDTH_FWHM = 6.0   # bounds walk stops this many median FWHMs from the apex
 MIN_SEP_FWHM = 0.8     # same-ion apexes closer than this (in FWHMs) are one peak with a dip
+OWN_HALF_FWHM = 2.0    # merge_test "own": the trace's noise is measured this many FWHMs beyond both apexes
+OWN_TOL_MIN_PPM = 5.0  # ... on its EIC, at least this wide in m/z (as the chromatogram check)
 TRACE_MIN_SCANS = 5    # a merged basin this long is a real ion's trace (for the noise surface)
 SIDEBAND_PPM = 100.0   # an isolated centroid this close in m/z to a trace point ...
 SIDEBAND_RATIO = 10.0  # ... at least this many times stronger, in the same scan, is a sideband
@@ -29,28 +32,47 @@ class Basins:
     n_after_merge: int
     timings: dict = field(default_factory=dict)
     noise_surface: np.ndarray | None = None   # (n_bands, n_blocks) the surface the S/N used
+    shoulder: np.ndarray | None = None        # (n,) kept apart by its own trace's noise (merge_test "own")
 
     def col(self, name):
         return self.stats[:, K.C[name]]
 
 
-def _merge(P, nbr, lab, eff, smooth, apex_int, apex_scan, apex_mz, apex_sig, noise_b, B):
-    """persistence merge of the initial basins; returns (lab2, B2, surv, persistence per survivor)"""
-    if P.far_frac > 0:
+def smooth_gain(n_pass: int) -> float:
+    """sd of white noise after n_pass [1, 2, 1] / 4 passes, per unit sd: sqrt(sum of squared binomial
+    weights) = sqrt(C(4n, 2n) / 16^n)"""
+    n = int(n_pass)
+    return math.exp(0.5 * (math.lgamma(4 * n + 1) - 2 * math.lgamma(2 * n + 1) - n * math.log(16.0)))
+
+
+def _needs_smooth(P) -> bool:
+    return P.far_frac > 0 or P.merge_test == "noise"
+
+
+def _merge(P, nbr, lab, eff, smooth, apex_int, apex_scan, apex_mz, apex_sig, off, mz, inten, noise_b, B):
+    """persistence merge of the initial basins; returns (lab2, B2, surv, persistence per survivor, n edges,
+    shoulder per survivor)"""
+    if smooth is not None:
         ea, eb, es, es_s = K.saddle_edges(nbr, lab, eff, smooth)
         apex_s = K.basin_max(lab, smooth, B)
     else:
         ea, eb, es = K.saddle_edges(nbr, lab, eff)
         es_s, apex_s = es, apex_int
-    uf, pers_saddle = K.persistence_merge(ea, eb, es, apex_int, noise_b, P.rel_frac, P.k_noise,
-                                          apex_scan, apex_mz, apex_sig, MIN_SEP_FWHM * P.fwhm_scans,
-                                          es_s, apex_s, P.far_fwhm * P.fwhm_scans, P.far_frac)
+    raw = P.merge_test == "noise_raw"      # the dip on the raw surface, raw noise law (gain 1)
+    uf, pers_saddle, shoulder = K.persistence_merge(ea, eb, es, apex_int, noise_b, P.rel_frac, P.k_noise,
+                                                    apex_scan, apex_mz, apex_sig, MIN_SEP_FWHM * P.fwhm_scans,
+                                                    es if raw else es_s, apex_int if raw else apex_s,
+                                                    P.far_fwhm * P.fwhm_scans, P.far_frac,
+                                                    P.merge_test in ("noise", "noise_raw"), P.noise_c, P.noise_r,
+                                                    1.0 if raw else smooth_gain(P.n_smooth), P.k_valley,
+                                                    P.merge_test == "own", off, mz, inten,
+                                                    int(round(OWN_HALF_FWHM * P.fwhm_scans)), OWN_TOL_MIN_PPM)
     surv = np.flatnonzero(uf == np.arange(B, dtype=uf.dtype))
     remap = np.full(B, -1, np.int32)
     remap[surv] = np.arange(len(surv), dtype=np.int32)
     lab2 = remap[uf[lab]]
     persistence = apex_int[surv].astype(np.float64) - np.where(pers_saddle[surv] > 0, pers_saddle[surv], 0.0)
-    return lab2, len(surv), surv, persistence, len(es)
+    return lab2, len(surv), surv, persistence, len(es), shoulder[surv]
 
 
 def pick_cloud(cloud: Cloud, params: Params | None = None) -> Basins:
@@ -64,7 +86,8 @@ def pick_cloud(cloud: Cloud, params: Params | None = None) -> Basins:
 
     tic = time.perf_counter()
     sig = K.per_point_sigma(inten, P.sig_a, P.sig_b)
-    nbr = K.find_neighbors(off, mz, inten, sig, P.K, P.tol_max_ppm, P.same_scan_k, P.same_scan_floor_ppm)
+    nbr = K.find_neighbors(off, mz, inten, sig, P.K, P.tol_max_ppm, P.same_scan_k, P.same_scan_floor_ppm,
+                           P.link_da)
     t["neighbors"] = time.perf_counter() - tic
 
     tic = time.perf_counter()
@@ -94,9 +117,9 @@ def pick_cloud(cloud: Cloud, params: Params | None = None) -> Basins:
     apex_scan = scan_of[roots].astype(np.int64)
     apex_mz = mz[roots]
     apex_sig = sig[roots].astype(np.float64)
-    smooth = K.smooth_traces(nbr, eff, P.n_smooth) if P.far_frac > 0 else None
-    margs = (P, nbr, lab, eff, smooth, apex_int, apex_scan, apex_mz, apex_sig)
-    lab2, B2, surv, persistence, n_edges = _merge(*margs, med[band, blk], B)
+    smooth = K.smooth_traces(nbr, eff, P.n_smooth) if _needs_smooth(P) else None
+    margs = (P, nbr, lab, eff, smooth, apex_int, apex_scan, apex_mz, apex_sig, off, mz, inten)
+    lab2, B2, surv, persistence, n_edges, shoulder = _merge(*margs, med[band, blk], B)
     t["merge"] = time.perf_counter() - tic
 
     if P.noise_post_merge:
@@ -111,17 +134,19 @@ def pick_cloud(cloud: Cloud, params: Params | None = None) -> Basins:
         med, _ = K.cell_medians(off, mz, inten, isolated & ~side, *cell_args)
         t["noise2"] = time.perf_counter() - tic
         tic = time.perf_counter()
-        lab2, B2, surv, persistence, n_edges = _merge(*margs, med[band, blk], B)
+        lab2, B2, surv, persistence, n_edges, shoulder = _merge(*margs, med[band, blk], B)
         t["merge2"] = time.perf_counter() - tic
     noise2 = med[band, blk][surv]
 
     tic = time.perf_counter()
     smin2, smax2, npts2 = K.basin_extent(lab2, off, B2)
-    sel = np.flatnonzero((smax2 - smin2 + 1 >= P.min_scans) & (npts2 >= P.min_scans))
+    ms = P.min_scans_pick if P.min_scans_rule == "local" else P.min_scans
+    sel = np.flatnonzero((smax2 - smin2 + 1 >= ms) & (npts2 >= ms))
     order, boff = K.sort_by_label(lab2, B2)
     stats = K.basin_stats(sel, order, boff, scan_of, nbr, mz, inten, eff, rt, noise2, P.fwhm_med, MAX_WIDTH_FWHM,
-                          P.noise_c, P.noise_r, P.k_valley, P.rep_raw)
+                          P.noise_c, P.noise_r, P.k_valley, P.rep_raw, P.bridge_scans, P.bridge_frac)
     t["stats"] = time.perf_counter() - tic
     t["n_edges"] = int(n_edges)
     return Basins(stats=stats, persistence=persistence[sel], noise=noise2[sel], basin_id=sel, lab=lab2,
-                  params=P, n_basins_initial=int(B), n_after_merge=int(B2), timings=t, noise_surface=med)
+                  params=P, n_basins_initial=int(B), n_after_merge=int(B2), timings=t, noise_surface=med,
+                  shoulder=shoulder[sel])

@@ -2,7 +2,9 @@
 # reference for every version (the post-merge 3D noise surface of each file, computed once), so the
 # checks are equally strict for all versions. Junk = no peak in either other injection of the same
 # sample, or the feature's own smoothed trace fails the EIC check (junk_classes.py); good = a peak
-# in at least half the other injections and a clean trace.
+# in at least half the other injections and a clean trace. Since 2026-10-22 the replicate search uses the feature's raw RT
+# and a fixed per-run window (junk_classes.JUNK_RT_WINDOW_S), and the reference noise comes from pinned picker settings
+# (REFERENCE), so the yardstick does not move when the default changes.
 # usage: version_junk.py LABEL=PEAK3D_RESULTS_DIR ... -- RUN ...
 import json
 import os
@@ -23,8 +25,11 @@ from peak3d.io import load_cloud  # noqa: E402
 from peak3d.pick import pick_cloud  # noqa: E402
 
 
+REFERENCE = {"link_da": 0.0}       # the picker settings of the reference noise surface (the 2026-10-06 linking)
+
+
 def reference_noise(cloud):
-    P = estimate(cloud)
+    P = estimate(cloud, overrides=REFERENCE)
     b = pick_cloud(cloud, P)
     S = b.noise_surface
     mz_lo, mz_hi = float(cloud.mz.min()), float(cloud.mz.max()) * (1 + 1e-9)
@@ -56,7 +61,7 @@ def one(job):
         C = classify_file(cloud, F, P)
         others = [(others_c[k], pd.read_csv(d / "rt_correction" / f"{stems[k]}.tsv", sep="\t"),
                    json.load(open(d / "features" / f"{stems[k]}.params.json"))) for k in others_c]
-        rep = rep_check(F.assign(_top=C["top_s"].values), P, others)
+        rep = rep_check(F.assign(_top=C["top_s"].values), P, others, run=run)
         out[label] = pd.DataFrame({"cls": C["cls"].values, "rep": rep, "height": F["height"].values})
     return run, stem, out
 
