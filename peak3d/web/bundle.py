@@ -25,7 +25,9 @@ from ..io import Cloud, _lower_bound, _upper_bound
 
 FORMAT = 1
 BASE_COLS = ("group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
-             "rt_sd", "iso_offset", "charge")
+             "rt_sd", "iso_offset", "charge", "compound_id", "role", "neutral_mass", "is_base", "n_members")
+C13 = 1.0033548378          # 13C - 12C
+ISO_MAX_STEP = 3            # possible isotopes: M+1 .. M+3
 # defaults keep a report of a few hundred files under ~15 MB
 EIC_BUDGET = 3_000_000      # chromatogram values (uint16) across all groups
 EIC_FILES = 16              # traces per group; larger studies show an evenly spaced subset of files
@@ -305,6 +307,39 @@ def ms2_ids_blob(output) -> bytes:
 
 
 # ------------------------------------------------------------------ build ----
+def possible_isotopes(mz, rt, height, iso_offset, charge, ppm: float, rt_win: float):
+    """features the isotope annotation left monoisotopic that nevertheless sit k x 1.00335/z above a stronger
+    feature within rt_win minutes (mass arithmetic only, no peak-shape evidence): (k per feature, 0 = none;
+    row of that stronger feature, -1 = none). The viewer marks them as possible isotopes"""
+    G = len(mz)
+    k_out = np.zeros(G, np.int8)
+    of_out = np.full(G, -1, np.int32)
+    if G == 0:
+        return k_out, of_out
+    mz = np.asarray(mz, np.float64); rt = np.asarray(rt, np.float64); height = np.asarray(height, np.float64)
+    z = np.where(np.asarray(charge) > 0, np.asarray(charge), 1).astype(np.float64)
+    order = np.argsort(mz)
+    mz_s = mz[order]
+    tol = mz * ppm * 1e-6
+    best_h = np.zeros(G)
+    for k in range(1, ISO_MAX_STEP + 1):
+        target = mz - k * C13 / z
+        lo = np.searchsorted(mz_s, target - tol, side="left")
+        hi = np.searchsorted(mz_s, target + tol, side="right")
+        has = (hi > lo) & (np.asarray(iso_offset) == 0)
+        for g in np.flatnonzero(has):
+            cand = order[lo[g]:hi[g]]
+            cand = cand[(np.abs(rt[cand] - rt[g]) <= rt_win) & (height[cand] > height[g]) & (cand != g)]
+            if len(cand) == 0:
+                continue
+            p = cand[np.argmax(height[cand])]
+            if k_out[g] == 0 or height[p] > best_h[g]:       # the nearest step wins unless a farther parent is stronger
+                k_out[g] = k
+                of_out[g] = p
+                best_h[g] = height[p]
+    return k_out, of_out
+
+
 def _read(path: Path) -> pd.DataFrame | None:
     return pd.read_csv(path, sep="\t") if path.exists() else None
 
@@ -348,6 +383,8 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
     files_info = _records(files)
 
     # groups
+    ppm = float(options.get("ppm") or 5.0)
+
     def col(name, dtype, default=0):
         return table[name].to_numpy(dtype) if name in table else np.full(G, default, dtype)
 
@@ -364,6 +401,23 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
               "g_rtsd": col("rt_sd", np.float32, np.nan), "g_iso": col("iso_offset", np.int8),
               "g_z": col("charge", np.int8), "g_max": table["_max"].to_numpy(np.float32),
               "g_cv": cv.astype(np.float32)}
+    # compound groups (adducts, in-source fragments, multimers and their isotopes of one compound) and the isotope
+    # candidates the shape test did not confirm
+    compounds = None
+    if "compound_id" in table:
+        roles = table["role"].fillna("").astype(str) if "role" in table else pd.Series([""] * G)
+        names = sorted(set(roles) - {""})
+        code = {r: i + 1 for i, r in enumerate(names)}
+        nmem = col("n_members", np.uint16, 1)
+        arrays.update({"g_cid": col("compound_id", np.int32, -1), "g_role": roles.map(lambda r: code.get(r, 0)).to_numpy(np.uint16),
+                       "g_nm": col("neutral_mass", np.float64, np.nan), "g_base": col("is_base", np.uint8), "g_nmem": nmem})
+        compounds = {"roles": [""] + names, "n_multi": int(np.unique(arrays["g_cid"][nmem > 1]).size),
+                     "n_in_multi": int((nmem > 1).sum())}
+    rt_win = float(params.get("rt_tol_min") or 0.05)
+    k_iso, of_iso = possible_isotopes(arrays["g_mz"], arrays["g_rt"], arrays["g_max"], arrays["g_iso"], arrays["g_z"],
+                                      max(ppm, 5.0), rt_win)
+    arrays["g_isoq"] = k_iso
+    arrays["g_isoq_of"] = of_iso
 
     # per-file values and how each cell was obtained: 3 detected, 2 gap-filled with a confirmed peak,
     # 1 gap-filled (no confirmed peak), 0 nothing
@@ -411,7 +465,6 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
                      "n_after": int(len(a)), "mad_before": _mad(b), "mad_after": _mad(a)}
 
     eic, eic_note = None, None
-    ppm = float(options.get("ppm") or 5.0)
     if G and N and eic_budget > 0:
         got, eic_note = _chromatograms(output, cache_dir, stems, table, files_info, ppm, eic_budget, eic_files,
                                        eic_points)
@@ -431,5 +484,6 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
               "created": time.strftime("%Y-%m-%d %H:%M"), "viewer_version": __version__,
               "quant": options.get("quant", "height"), "n_groups": G, "stems": stems, "files": files_info,
               "params": _clean(params), "matrix": matrix, "matrix_note": matrix_note, "eic": eic,
-              "eic_note": eic_note, "residuals": residuals}
+              "eic_note": eic_note, "residuals": residuals, "compounds": compounds,
+              "iso_rt_win": rt_win}
     return pack(_clean(header), arrays)

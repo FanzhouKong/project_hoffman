@@ -165,6 +165,12 @@ equivalent command shown), runs peak3d with live progress, and opens the results
 ordinary `peak3d process` subprocesses, so results are identical to the command line. `peak3d report OUT`
 rebuilds `report.html` for an existing output.
 
+The Features tab shows what each feature is within its compound group: `M+1` a confirmed isotope, `M+1?` a
+possible one (m/z and RT fit a 13C step from a stronger feature, but the peak shapes did not confirm it), a named
+ion such as `[M+Na]+`, or `Δ -57.0215`, the m/z difference to the group's base ion when no relation names it. The
+Feature group column's button lists only that group's features (the adducts, fragments, multimers and isotopes of
+one compound, `compound_id` in the tables); the same button sits in the feature's header.
+
 The standalone app above is the same GUI without a Python installation.
 
 On a cluster, start the GUI inside a job with `--host 0.0.0.0` and reach it through an SSH tunnel to that
