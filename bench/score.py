@@ -6,7 +6,8 @@ scored (isotopes included): both tools report isotopic peaks as features, and th
 truth sets label real chromatographic peaks whether or not they are monoisotopic.
 
 usage: python bench/score.py [SCORER ...]   (run with envs/masscube/bin/python: needs pandas/scipy;
-       SCORER = idsl, hzv029, yeast_neg, credentialing, credtruth, ratio, spike, runtime; default all)
+       SCORER = idsl, hzv029, yeast_neg, credentialing, credtruth, ratio, spike, mc_synth, mc_eic, pr2464_spike,
+       pr2464_yeast, pr2464_plasma, runtime; default all)
 """
 import csv
 import re
@@ -54,7 +55,7 @@ def load(tool, run):
             t = pd.read_csv(next(o.glob("peaklists/peaklist_*.csv")))
             feats = pd.DataFrame({"mz": t["m/z 12C"], "rt": t["retentionTimeApex"]})
             t[stems[0]] = t["PeakHeight"]
-    elif tool == "peak3d":
+    elif tool == "peak3d" or tool.startswith("peak3d_"):  # peak3d_* = variants (scripts/42_peak3d_variant.sbatch)
         if not (d / "DONE").exists():
             return None
         t = pd.read_csv(d / "peak3d_out/aligned_feature_table.tsv", sep="\t")
@@ -324,10 +325,324 @@ def score_spike():
     return pd.DataFrame(rows)
 
 
+# MassCube paper benchmark (Yu et al. 2025; truth built by bench/masscube_truth.py). As in the authors'
+# notebooks, a signal is correct when the tool reports exactly n_peaks features in its window; the
+# authors' own results (MassCube 1.0, MS-DIAL 4.9, MZmine 3.90, xcms 4.0) are rescored as "(published)"
+MC_TRUTH = ROOT / "data/truth/MASSCUBE"
+
+
+def window_counts(feats, q_mz, mz_tol, q_rt=None, rt_tol=None):
+    """features with |dm/z| < mz_tol (scalar or per query, Da) and, if q_rt is given, |dRT| < rt_tol"""
+    order = np.argsort(feats["mz"].values)
+    mz, rt = feats["mz"].values[order], feats["rt"].values[order]
+    lo = np.searchsorted(mz, q_mz - mz_tol, side="right")
+    hi = np.searchsorted(mz, q_mz + mz_tol, side="left")
+    if q_rt is None:
+        return hi - lo
+    return np.array([int(np.sum(np.abs(rt[a:b] - r) < rt_tol)) for a, b, r in zip(lo, hi, q_rt)])
+
+
+def count_summary(cnt, k):
+    """accuracy (count == k) plus how the wrong ones fail: missed (0), merged (0 < count < k), extra (> k)"""
+    n = len(cnt) or np.nan  # no labels of this class (some files have no double peaks): NaN, not 0
+    return dict(n=len(cnt), correct=int((cnt == k).sum()), accuracy=(cnt == k).sum() / n,
+                missed=(cnt == 0).sum() / n, merged=((cnt > 0) & (cnt < k)).sum() / n, extra=(cnt > k).sum() / n)
+
+
+def mc_rows(name, cnt, n_peaks, found=None, **key):
+    """one row: single / double accuracy, their mean, and the failure fractions; with `found` (per signal: both
+    labelled peaks found, other features nearby allowed; synth_found_both, or count >= 2 for the EIC labels)
+    also double_found and its mean with single_acc"""
+    row = dict(tool=name, **key)
+    for k, cls in ((1, "single"), (2, "double")):
+        s = count_summary(cnt[n_peaks == k], k)
+        row.update({f"{cls}_n": s["n"], f"{cls}_acc": s["accuracy"], f"{cls}_missed": s["missed"],
+                    f"{cls}_extra": s["extra"]} | ({"double_merged": s["merged"]} if k == 2 else {}))
+    row["avg_acc"] = (row["single_acc"] + row["double_acc"]) / 2
+    if found is not None:
+        row["double_found"] = found[n_peaks == 2].mean() if (n_peaks == 2).any() else np.nan
+        row["avg_found"] = (row["single_acc"] + row["double_found"]) / 2
+    return row
+
+
+def synth_found_both(feats, t, mz_tol=0.01):
+    """per double signal: each labelled apex (truth apex1_rt, apex2_rt) has a feature of its own (|dm/z| < mz_tol,
+    |dRT| < half the apex separation, so one feature cannot serve both). Other features at the m/z do not count
+    against it; merged into one or missed -> False. Single signals (no apex2_rt) -> False."""
+    a1, a2 = t["apex1_rt"].values, t["apex2_rt"].values
+    half = (a2 - a1) / 2
+    order = np.argsort(feats["mz"].values)
+    mz, rt = feats["mz"].values[order], feats["rt"].values[order]
+    q = t["mz"].values
+    lo = np.searchsorted(mz, q - mz_tol, side="right")
+    hi = np.searchsorted(mz, q + mz_tol, side="left")
+    return np.array([bool(np.any(np.abs(rt[a:b] - p) < h) and np.any(np.abs(rt[a:b] - s) < h))
+                     for a, b, p, s, h in zip(lo, hi, a1, a2, half)])
+
+
+def score_mc_synth():
+    """27,000 inserted Gaussian peaks; m/z window 0.01 Da over the whole run. The paper's accuracy is the
+    mean over the six noise levels (per-level table: mc_synth_by_noise.tsv); *_pooled = correct / n.
+    double_found: a double signal is a hit when both labelled peaks are found, whatever else is reported at its
+    m/z (synth_found_both); tools run here only, the published outputs give counts, not positions."""
+    t = pd.read_csv(MC_TRUTH / "synth_peaks.tsv", sep="\t")
+    n_peaks, noise = t["n_peaks"].values, t["noise"].values
+    counts = {f"{c[4:]} (published)": t[c].values for c in t.columns if c.startswith("pub_")}
+    found = {}
+    for tool in TOOLS:
+        x = load(tool, "MC_SYNTH")
+        if x is not None:
+            counts[tool] = window_counts(x[0], t["mz"].values, 0.01)
+            found[tool] = synth_found_both(x[0], t)
+    rows, detail = [], []
+    for name, cnt in counts.items():
+        f = found.get(name)
+        levels = [mc_rows(name, cnt[noise == z], n_peaks[noise == z], None if f is None else f[noise == z], noise=z)
+                  for z in sorted(set(noise))]
+        detail += levels
+        row = mc_rows(name, cnt, n_peaks, f)
+        for cls in ("single", "double"):
+            row[f"{cls}_pooled"] = row[f"{cls}_acc"]
+            row[f"{cls}_acc"] = np.mean([r[f"{cls}_acc"] for r in levels])
+        row["avg_acc"] = (row["single_acc"] + row["double_acc"]) / 2
+        if f is not None:
+            row["double_found_pooled"] = row["double_found"]
+            row["double_found"] = np.mean([r["double_found"] for r in levels])
+            row["avg_found"] = (row["single_acc"] + row["double_found"]) / 2
+        rows.append(row)
+    pd.DataFrame(detail).to_csv(OUT / "mc_synth_by_noise.tsv", sep="\t", index=False)
+    return pd.DataFrame(rows)
+
+
+def score_mc_eic():
+    """722 labeled EICs on eight files (one run each). rule 'paper': |dm/z| < 0.002 Da (single) / 0.005 Da
+    (double), |dRT| < 0.2 min; rule 'wide': m/z window max(paper, 10 ppm), because the label m/z are
+    MassCube's own feature m/z. Rows pool the eight files (per file: mc_eic_by_file.tsv).
+    double_found: a double label is a hit when >= 2 features lie in its window (neighbouring real peaks are
+    allowed; a label has one RT, so the two peaks cannot be told apart by position)."""
+    lab = pd.read_csv(MC_TRUTH / "eic_labels.tsv", sep="\t")
+    pub = pd.read_csv(MC_TRUTH / "published_features.tsv", sep="\t")
+    n_peaks, files = lab["n_peaks"].values, lab["file"].values
+    tol = np.where(n_peaks == 1, 0.002, 0.005)
+    rules = {"paper": tol, "wide": np.maximum(tol, lab["mz"].values * 10e-6)}
+    feats = {f"{t} (published)": dict(tuple(g.groupby("file"))) for t, g in pub.groupby("tool")}
+    for tool in TOOLS:
+        per = {f: x[0] for f in sorted(set(files)) if (x := load(tool, f"MC_{f}")) is not None}
+        if per:
+            feats[tool] = per
+    rows, detail = [], []
+    for name, per in feats.items():
+        for rule, mz_tol in rules.items():
+            cnt = np.full(len(lab), -1)
+            for f, d in per.items():
+                m = files == f
+                cnt[m] = window_counts(d, lab["mz"].values[m], mz_tol[m], lab["rt"].values[m], 0.2)
+            for f in sorted(per):
+                m = files == f
+                detail.append(mc_rows(name, cnt[m], n_peaks[m], cnt[m] >= 2, rule=rule, file=f,
+                                      n_features=len(per[f])))
+            done = cnt >= 0
+            rows.append(mc_rows(name, cnt[done], n_peaks[done], cnt[done] >= 2, rule=rule, n_files=len(per)))
+    pd.DataFrame(detail).to_csv(OUT / "mc_eic_by_file.tsv", sep="\t", index=False)
+    return pd.DataFrame(rows)
+
+
+# PR002464 (Broeckling/Du/Patti): one run per Orbitrap study (PR2464_<study>, all 224 MS1 injections). Truth tables in
+# data/truth/PR002464/<study>/ from bench/spiketruth.py (spiked standards), bench/credtruth.py + biotruth.py (yeast
+# 12C/13C) and biotruth.py (plasma). peak3d runs here as the GLR variant (narrow_rule=local_median,
+# scripts/42_peak3d_variant.sbatch -> results/peak3d_GLR/); a default peak3d run would be scored too if present.
+PR2464_TRUTH = ROOT / "data/truth/PR002464"
+PR2464_EXTRA = ["peak3d_GLR"]
+PR2464_RUNS = {r: r.removeprefix("PR2464_") for r in RUNS if r.startswith("PR2464_")}
+# chance-match control: the truth list moved by these m/z offsets (Da) at the same RT; a tool reporting many features
+# matches some of these by accident, at about the rate it matches the truth by accident
+PR2464_DECOY_DA = (-0.05, 0.05)
+
+
+def truthy(s):
+    """bool column written by pandas (True/False), whether read back as bool or as text"""
+    return s.astype(str).str.lower().eq("true")
+
+
+def nearest(feats, q_mz, q_rt, ppm, rt_tol):
+    """row index of the feature closest in RT among those within ppm and rt_tol of each query; -1 if none"""
+    order = np.argsort(feats["mz"].values)
+    mz, rt = feats["mz"].values[order], feats["rt"].values[order]
+    out = np.full(len(q_mz), -1)
+    for i, (m, r) in enumerate(zip(q_mz, q_rt)):
+        lo, hi = np.searchsorted(mz, m - m * ppm * 1e-6), np.searchsorted(mz, m + m * ppm * 1e-6, side="right")
+        k = lo + np.flatnonzero(np.abs(rt[lo:hi] - r) <= rt_tol)
+        if len(k):
+            out[i] = order[k[np.argmin(np.abs(rt[k] - r))]]
+    return out
+
+
+def vial_medians(S, files, vials):
+    """median intensity over each vial's injections (missing = 0), features x vials, as the truth builders read
+    heights (median of the 4 injections, robust to one lost injection)"""
+    v = files.set_index("file")["vial"]
+    cols = [c for c in S.columns if c in v.index]
+    M = S[cols].fillna(0).values
+    return np.stack([np.median(M[:, [i for i, c in enumerate(cols) if v[c] == x]], axis=1) for x in vials], axis=1)
+
+
+def log_slopes(H, amt, min_levels=3):
+    """log2-log2 slope of each row of H on amt over the levels with H > 0 (>= min_levels, else NaN), as the truth
+    builders fit dilution series"""
+    x = np.log2(np.asarray(amt, float))
+    out = np.full(len(H), np.nan)
+    for i, h in enumerate(H):
+        ok = h > 0
+        if ok.sum() >= min_levels:
+            out[i] = np.polyfit(x[ok], np.log2(h[ok]), 1)[0]
+    return out
+
+
+def dilution_cols(slope, raw):
+    """tool dilution slopes vs the truth builder's slopes from the raw data (peaks with both)"""
+    ok = np.isfinite(slope) & np.isfinite(raw)
+    d = np.abs(slope[ok] - raw[ok])
+    return dict(dil_quantified=int(ok.sum()), dil_slope_median=np.median(slope[ok]) if ok.any() else np.nan,
+                dil_median_abs_err_vs_raw=np.median(d) if ok.any() else np.nan,
+                dil_within_025_of_raw=(d <= 0.25).mean() if ok.any() else np.nan)
+
+
+def pr2464_study(run):
+    """files.tsv of the spike truth (file, vial, amounts) and the amount of each vial in a dilution series"""
+    files = pd.read_csv(PR2464_TRUTH / PR2464_RUNS[run] / "files.tsv", sep="\t")
+    return files, files.groupby("vial").first()
+
+
+def pr2464_grid(run, truth_fn, row_fn):
+    """rows for every tool with a finished run x ppm x RT tolerance; truth_fn() -> truth table, row_fn(t, feats, S,
+    idx, ppm, rt_tol) -> dict of scores, idx = matched feature row per truth row (-1 = not found)"""
+    rows = []
+    t = truth_fn()
+    for tool in TOOLS + PR2464_EXTRA:
+        x = load(tool, run)
+        if x is None:
+            continue
+        feats, S = x
+        for ppm in GRID_PPM:
+            for rt_tol in GRID_RT:
+                idx = nearest(feats, t["mz"].values, t["rt"].values, ppm, rt_tol)
+                dec = [nearest(feats, t["mz"].values + d, t["rt"].values, ppm, rt_tol) >= 0 for d in PR2464_DECOY_DA]
+                row = dict(study=PR2464_RUNS[run], tool=tool, ppm=ppm, rt_tol_min=rt_tol, n_truth=len(t),
+                           n_features=len(feats), recall=(idx >= 0).mean(), decoy_match=np.mean(dec))
+                rows.append(row | row_fn(t, feats, S, idx, ppm, rt_tol))
+    return rows
+
+
+def score_pr2464_spike():
+    """Spiked-standard truth (spiked_truth.tsv): recall (all, tier A / B, tier A without ft_artifact?/broad flags,
+    formula ions); A/B ratio of tier-A peaks whose weak side is above noise: tool log2(vial 18 / vial 19) vs the
+    designed log2(a/b) (vial 18 = mix A only, 19 = mix B only); dilution slope over vials 9-12 vs the raw-data slope."""
+    rows = []
+    for run in PR2464_RUNS:
+        files, vinfo = pr2464_study(run)
+        C = [9, 10, 11, 12]
+        amt = [vinfo.loc[v, "A"] + vinfo.loc[v, "B"] for v in C]
+
+        def truth():
+            t = pd.read_csv(PR2464_TRUTH / PR2464_RUNS[run] / "spiked_truth.tsv", sep="\t", keep_default_na=False,
+                            na_values=[""])
+            return t.assign(mz=t["mz_obs"].fillna(t["mz"]), rt=t["rt_apex"], flags=t["flags"].fillna(""),
+                            weak_at_noise=truthy(t["weak_at_noise"]))
+
+        def score(t, feats, S, idx, ppm, rt_tol):
+            h = idx >= 0
+            A = (t["tier"] == "A").values
+            out = dict(n_tierA=int(A.sum()), recall_A=h[A].mean(), recall_B=h[~A].mean(),
+                       recall_A_unflagged=h[A & (t["flags"] == "").values].mean(),
+                       recall_formula_ion=h[(t["annotation_class"] == "formula_ion").values].mean())
+            V = np.full((len(t), 6), np.nan)
+            V[h] = vial_medians(S.iloc[idx[h]], files, [18, 19] + C)
+            ok = A & ~t["weak_at_noise"].values
+            q = ok & h & (V[:, 0] > 0) & (V[:, 1] > 0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                err = np.log2(V[:, 0] / V[:, 1]) - t["log2FC"].values
+            exp = t["log2FC"].values[q]
+            out.update(ratio_eligible=int(ok.sum()),
+                       ratio_quantified=int(q.sum()),
+                       ratio_median_abs_log2_err=np.median(np.abs(err[q])) if q.any() else np.nan,
+                       ratio_within_2fold=(np.abs(err[q]) <= 1).mean() if q.any() else np.nan,
+                       ratio_right_direction=(np.sign(err[q] + exp) == np.sign(exp)).mean() if q.any() else np.nan)
+            sl = np.full(len(t), np.nan)
+            sl[A & h] = log_slopes(V[A & h, 2:], amt)
+            return out | dilution_cols(sl, t["c_dilution_slope"].values)
+        rows += pr2464_grid(run, truth, score)
+    return pd.DataFrame(rows)
+
+
+def score_pr2464_yeast():
+    """Credentialed yeast truth (yeast_truth.tsv; 12C vial 23 vs U-13C vial 24): recall of the 12C peaks (all, tier
+    A / B, primary, confirmed in the 12C:13C 1:1 vial 25), of their 13C partners (m/z mz_13C, same RT) and of both;
+    12C dilution slope over vials 5-8 (12C 500 / 250 / 100 / 50 uL) vs the raw-data slope."""
+    rows = []
+    for run in PR2464_RUNS:
+        files, vinfo = pr2464_study(run)
+        D = [5, 6, 7, 8]
+        amt = [vinfo.loc[v, "Yeast 12C"] for v in D]
+
+        def truth():
+            t = pd.read_csv(PR2464_TRUTH / PR2464_RUNS[run] / "yeast_truth.tsv", sep="\t")
+            return t.assign(confirmed=truthy(t["confirmed"]))
+
+        def score(t, feats, S, idx, ppm, rt_tol):
+            h = idx >= 0
+            h13 = nearest(feats, t["mz_13C"].values, t["rt"].values, ppm, rt_tol) >= 0
+            A = (t["tier"] == "A").values
+            out = dict(n_tierA=int(A.sum()), recall_A=h[A].mean(), recall_B=h[~A].mean(),
+                       recall_primary=h[(t["feature_class"] == "primary").values].mean(),
+                       recall_confirmed=h[t["confirmed"].values].mean(),
+                       recall_13C_partner=h13.mean(), recall_both=(h & h13).mean())
+            sl = np.full(len(t), np.nan)
+            sl[h] = log_slopes(vial_medians(S.iloc[idx[h]], files, D), amt)
+            return out | dilution_cols(sl, t["dil_slope_12C"].values)
+        rows += pr2464_grid(run, truth, score)
+    return pd.DataFrame(rows)
+
+
+def score_pr2464_plasma():
+    """Plasma truth (plasma_truth.tsv): recall (all, tier A / B, tier A without flags); dilution slope over vials 1-4
+    (1000 / 500 / 200 / 100 uL plasma) vs the raw-data slope; SRM 1950 / SRM 8231 ratio (vial 13 / vial 14) vs the
+    raw-data ratio."""
+    rows = []
+    for run in PR2464_RUNS:
+        files, vinfo = pr2464_study(run)
+        D = [1, 2, 3, 4]
+        amt = [vinfo.loc[v, "SRM 1950"] + vinfo.loc[v, "SRM 8231"] for v in D]
+
+        def truth():
+            t = pd.read_csv(PR2464_TRUTH / PR2464_RUNS[run] / "plasma_truth.tsv", sep="\t", keep_default_na=False,
+                            na_values=[""])
+            return t.assign(mz=t["mz_obs"], rt=t["rt_apex"], flags=t["flags"].fillna(""))
+
+        def score(t, feats, S, idx, ppm, rt_tol):
+            h = idx >= 0
+            A = (t["tier"] == "A").values
+            out = dict(n_tierA=int(A.sum()), recall_A=h[A].mean(), recall_B=h[~A].mean(),
+                       recall_A_unflagged=h[A & (t["flags"] == "").values].mean())
+            V = np.full((len(t), 6), np.nan)
+            V[h] = vial_medians(S.iloc[idx[h]], files, D + [13, 14])
+            sl = np.full(len(t), np.nan)
+            sl[h] = log_slopes(V[h, :4], amt)
+            q = h & (V[:, 4] > 0) & (V[:, 5] > 0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                err = np.abs(np.log2(V[:, 4] / V[:, 5]) - t["log2_1950_8231"].values)
+            return out | dilution_cols(sl, t["dil_slope"].values) | dict(
+                mix_quantified=int(q.sum()), mix_median_abs_log2_err_vs_raw=np.median(err[q]) if q.any() else np.nan,
+                mix_within_2fold_of_raw=(err[q] <= 1).mean() if q.any() else np.nan)
+        rows += pr2464_grid(run, truth, score)
+    return pd.DataFrame(rows)
+
+
 def score_runtime():
     rows = []
-    for tool in TOOLS:
+    for tool in TOOLS + PR2464_EXTRA:
         for run in RUNS:
+            if tool in PR2464_EXTRA and run not in PR2464_RUNS:
+                continue
             t = RES / tool / run / "time.txt"
             if not (RES / tool / run / "DONE").exists() or not t.exists():
                 continue
@@ -352,7 +667,10 @@ def main():
     for name, fn in [("idsl", score_idsl), ("hzv029", score_hzv029), ("yeast_neg", score_yeastneg), ("credentialing", score_cred),
                      ("credtruth", score_credtruth),
                      ("credtruth_screened", lambda: score_credtruth(screened=True)),
-                     ("ratio", score_ratio), ("spike", score_spike), ("runtime", score_runtime)]:
+                     ("ratio", score_ratio), ("spike", score_spike),
+                     ("mc_synth", score_mc_synth), ("mc_eic", score_mc_eic),
+                     ("pr2464_spike", score_pr2464_spike), ("pr2464_yeast", score_pr2464_yeast),
+                     ("pr2464_plasma", score_pr2464_plasma), ("runtime", score_runtime)]:
         if only and name not in only:
             continue
         df = fn()

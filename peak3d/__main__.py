@@ -69,6 +69,9 @@ def build_parser():
         for old in ("--mz-dynamic", "--mz-relaxed-second-mode", "--mz-step-curve", "--mz-fallback-reference",
                     "--mz-probe-features"):     # on by default since 2026-10-31; accepted so earlier command lines run
             p.add_argument(old, action="store_true", help=argparse.SUPPRESS)
+        p.add_argument("--no-compounds", action="store_true",
+                       help="skip compound grouping (adducts, in-source fragments, multimers and their isotopes of "
+                            "one compound, joined on peak-shape and intensity correlation)")
         p.add_argument("--quant", choices=["height", "area"], default="height",
                        help="value in the main aligned table (default height; the other is written too)")
 

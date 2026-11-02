@@ -1,0 +1,132 @@
+{
+  "n_centroids": 3828,
+  "n_noise": 1635,
+  "n_sidebands_excluded": 250,
+  "n_trace": 1693,
+  "noise_cell_counts": [
+    [
+      83,
+      175,
+      206
+    ],
+    [
+      119,
+      132,
+      177
+    ],
+    [
+      190,
+      90,
+      163
+    ],
+    [
+      161,
+      135,
+      4
+    ]
+  ],
+  "noise_floor": [
+    [
+      4.441081523895264,
+      5.553394317626953,
+      6.784097194671631
+    ],
+    [
+      5.923344135284424,
+      7.023835182189941,
+      8.045395851135254
+    ],
+    [
+      7.353374481201172,
+      9.078741073608398,
+      9.35824966430664
+    ],
+    [
+      8.59387493133545,
+      9.945216178894043,
+      2.884775495529175
+    ]
+  ],
+  "file_fallback": 2.884775495529175,
+  "params": {
+    "dt": 0.016666666666666666,
+    "span": 3.0,
+    "floor": 2.884775495529175,
+    "fwhm_med": 0.16666666666666666,
+    "fwhm_scans": 10,
+    "sig_a": 0.5,
+    "sig_b": 0,
+    "n_seeds": 0,
+    "n_fwhm_seeds": 0,
+    "n_sigma_points": 0,
+    "tol_max_ppm": 10.0,
+    "K": 1,
+    "min_scans": 3,
+    "same_scan_k": 1.0,
+    "same_scan_floor_ppm": 5.0,
+    "link_da": 0.002,
+    "rep_raw": true,
+    "rel_frac": 0.5,
+    "far_fwhm": 2.0,
+    "far_frac": 0.2,
+    "smooth_fwhm": 0.5,
+    "n_smooth": 9,
+    "merge_test": "frac",
+    "scan_gain": false,
+    "gain_sd": 0.0,
+    "n_gain_scans": 0,
+    "width_rule": "fwhm",
+    "narrow_rule": "median",
+    "narrow_frac": 0.3,
+    "narrow_q": 0.02,
+    "narrow_k": 100,
+    "min_scans_rule": "file",
+    "min_scans_pick": 3,
+    "bridge_scans": 0,
+    "bridge_frac": 0.5,
+    "satellite_merge": false,
+    "sat_da": 0.0,
+    "n_sat": 0,
+    "noise_post_merge": true,
+    "snr_floor_baseline": true,
+    "ripple_k": 0.0,
+    "ridge_w_cap": 2.0,
+    "noise_c": 0.0,
+    "noise_r": 0.0,
+    "noise_s0": NaN,
+    "n_noise_pts": 0,
+    "n_noise_bins": 0,
+    "k_valley": 3.0,
+    "max_valleys": -1,
+    "score_loc_rip": true,
+    "eic_check": true,
+    "eic_smooth_fwhm": 0.5,
+    "eic_half_win_fwhm": 10.0,
+    "eic_k_snr": 3.0,
+    "eic_dup_fwhm": 0.25,
+    "eic_noise": "max",
+    "far_level_max": 0.5,
+    "k_noise": 3.0,
+    "min_snr": 3.0,
+    "min_prominence_rel": 0.2,
+    "min_score": 0.5,
+    "n_mz_bands": 4,
+    "rt_block_min": 1.0,
+    "noise_cell_min_points": 50
+  },
+  "exact_match_to_pick_cloud": true,
+  "cell_medians_independently_verified": true,
+  "panel_stems": [
+    "07_cloud_noise_estimation_panel_1",
+    "07_cloud_noise_estimation_panel_2",
+    "07_cloud_noise_estimation_panel_3"
+  ],
+  "source_sha256": {
+    "peak3d/kernels.py": "7d83b558d5230a2a248d9ee91c264f6e734afec479eb341b1641d60402855b7a",
+    "peak3d/pick.py": "54ae352a2272990f16d425ed411821ae167ba4f66f6a682d6edb1b65809e635b",
+    "peak3d/estimate.py": "1ff20d901de7efb3a225d8901c309a618f1e8c8e6ba2acf53d3faf52920e244d",
+    "presentation/peak3d/render_figures.py": "410ebb64a03e0dfa10598e182f1d81ad440d8b5416434d6b71e7a21de699ec0a",
+    "presentation/peak3d/render_merge_clouds.py": "1beb7d39296d77184d0ec9653c466c05cfff3f648d5055c119e7e993ddae84ad",
+    "presentation/peak3d/render_noise_cloud.py": "0f6d2fcaf95351ec27c6dafbd8cdce59eab537f3d0aef4a28b539b543507c082"
+  }
+}

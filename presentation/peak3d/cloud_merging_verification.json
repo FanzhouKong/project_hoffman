@@ -1,0 +1,58 @@
+{
+  "05_cloud_split_merging": {
+    "saddle": 60.0,
+    "lower_apex": 70.0,
+    "higher_apex": 100.0,
+    "persistence": 10.0,
+    "threshold": 35.0,
+    "apex_separation_scans": 14,
+    "local_noise": 1,
+    "median_fwhm_scans": 10,
+    "initial_basins": 2,
+    "surviving_basins": 1,
+    "points": 765,
+    "centroids_unchanged": true,
+    "lower": 487,
+    "higher": 277,
+    "saddle_point": 382
+  },
+  "06_cloud_separation_preserved": {
+    "saddle": 15.0,
+    "lower_apex": 70.0,
+    "higher_apex": 100.0,
+    "persistence": 55.0,
+    "threshold": 35.0,
+    "apex_separation_scans": 14,
+    "local_noise": 1,
+    "median_fwhm_scans": 10,
+    "initial_basins": 2,
+    "surviving_basins": 2,
+    "points": 765,
+    "centroids_unchanged": true,
+    "lower": 487,
+    "higher": 277,
+    "saddle_point": 382
+  },
+  "subfigures": {
+    "count": 6,
+    "stems": [
+      "05_cloud_split_merging_panel_1",
+      "05_cloud_split_merging_panel_2",
+      "05_cloud_split_merging_panel_3",
+      "06_cloud_separation_preserved_panel_1",
+      "06_cloud_separation_preserved_panel_2",
+      "06_cloud_separation_preserved_panel_3"
+    ],
+    "titles_removed": true,
+    "slide_captions_removed": true,
+    "axes_and_annotations_retained": true
+  },
+  "source_sha256": {
+    "peak3d/kernels.py": "7d83b558d5230a2a248d9ee91c264f6e734afec479eb341b1641d60402855b7a",
+    "peak3d/pick.py": "54ae352a2272990f16d425ed411821ae167ba4f66f6a682d6edb1b65809e635b",
+    "peak3d/estimate.py": "1ff20d901de7efb3a225d8901c309a618f1e8c8e6ba2acf53d3faf52920e244d",
+    "presentation/peak3d/render_figures.py": "410ebb64a03e0dfa10598e182f1d81ad440d8b5416434d6b71e7a21de699ec0a",
+    "presentation/peak3d/render_merge_clouds.py": "e9822e13cae8caee95b87844e332c50c4c3ebd538f2d2caa573dd37c393b185c"
+  },
+  "scope": "Synthetic demonstrations of the default fractional merge rule; not benchmark evidence."
+}

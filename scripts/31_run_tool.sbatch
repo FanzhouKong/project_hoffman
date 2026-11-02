@@ -18,6 +18,11 @@ set -euo pipefail
 source /etc/profile.d/modules.sh
 cd "$SLURM_SUBMIT_DIR"
 ROOT=$PWD
+# tool envs; override with sbatch --export=ALL,ASARI_ENV=... (e.g. a renamed env: each tool is run through
+# its env's own python, so a moved env still works)
+ASARI_ENV=${ASARI_ENV:-$ROOT/envs/asari}
+MASSCUBE_ENV=${MASSCUBE_ENV:-$ROOT/envs/masscube}
+PEAK3D_ENV=${PEAK3D_ENV:-$ROOT/envs/peak3d}
 
 row=$(awk -F'\t' -v t="$SLURM_ARRAY_TASK_ID" '$1==t' manifest/bench_jobs.tsv)
 IFS=$'\t' read -r task tool run mode nfiles <<<"$row"
@@ -40,12 +45,12 @@ case "$tool" in
   asari)
     # defaults; only mode and core count are given
     /usr/bin/time -v -o "$work/time.txt" \
-      "$ROOT/envs/asari/bin/asari" process --mode "$mode" --input data --output asari_out \
+      "$ASARI_ENV/bin/python" "$ASARI_ENV/bin/asari" process --mode "$mode" --input data --output asari_out \
       --multicores "$SLURM_CPUS_PER_TASK" > "$work/tool.log" 2>&1 ;;
   masscube)
     # defaults; instrument type and ion mode are auto-detected from the files
     /usr/bin/time -v -o "$work/time.txt" \
-      "$ROOT/envs/masscube/bin/python" "$ROOT/scripts/run_masscube.py" "$work" \
+      "$MASSCUBE_ENV/bin/python" "$ROOT/scripts/run_masscube.py" "$work" \
       > "$work/tool.log" 2>&1 ;;
   idslipa)
     # template spreadsheet; only paths, threads and RT reference samples are filled in
@@ -57,7 +62,7 @@ case "$tool" in
   peak3d)
     # in-house 3D picker + RT correction; defaults only, cores from the allocation
     /usr/bin/time -v -o "$work/time.txt" \
-      env PYTHONPATH="$ROOT" "$ROOT/envs/peak3d/bin/python" -m peak3d process --input data --output peak3d_out \
+      env PYTHONPATH="$ROOT" "$PEAK3D_ENV/bin/python" -m peak3d process --input data --output peak3d_out \
       --cores "$SLURM_CPUS_PER_TASK" --cache-dir "$work/.cache" > "$work/tool.log" 2>&1 ;;
   *)
     # tools that are not published: scripts/local/run_<tool>.sh (git-ignored)

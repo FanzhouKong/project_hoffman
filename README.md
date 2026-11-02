@@ -110,7 +110,9 @@ reuse the compiled code.
 
 | file | content |
 |---|---|
-| `aligned_feature_table.tsv` | one row per feature: `mz`, `rt` (min), RT range, detection counts, isotope label (`iso_offset`, 0 = monoisotopic), `charge`, and one **height** column per file |
+| `aligned_feature_table.tsv` | one row per feature: `mz`, `rt` (min), RT range, detection counts, isotope label (`iso_offset`, 0 = monoisotopic), `charge`, its compound group (`compound_id`, `role`, `neutral_mass`, `is_base`, `n_members`; see below), and one **height** column per file |
+| `compounds.tsv` | one row per compound group: base ion, members (group ids, m/z, roles), neutral mass |
+| `compound_pairs.tsv` | every co-eluting pair that was tested: shape correlation, intensity correlation, mass relation, joined or not |
 | `aligned_feature_area.tsv` | the same table with peak areas |
 | `filled_mask.tsv` | 1 where a value was gap-filled rather than detected |
 | `features/<file>.tsv` | every feature of each file, with shape, S/N and quality descriptors |
@@ -123,6 +125,15 @@ reuse the compiled code.
 | `identifications.tsv`, `feature_annotations.tsv` | with `--library`: every library hit above 0.1 for both spectra, and each feature's annotation (step 5) |
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
+
+**Compound groups.** Features of one compound (adducts, in-source fragments, multimers, charge states and
+their isotopes) share a `compound_id`. Co-eluting features are joined when their peak shapes correlate
+(EIC Pearson r in the strongest files where both are detected) and, where the study makes it informative,
+their intensities correlate across files; the cutoffs are calibrated on the study itself (unrelated pairs
+shifted onto one apex as the null, M/M+1 pairs as positive controls). `role` names the ion when a mass
+relation to the group's neutral mass fits (`[M+H]+`, `[M+Na]+`, `[M-H-H2O]-`, `[2M+H]+`, ...), `[M+H]+ M+1`
+for isotopes, and otherwise the m/z difference to the base ion (`is_base` = 1, the strongest monoisotopic
+member), e.g. `-44.0262`. Nothing is removed: every feature keeps its own row.
 
 ### 5. MS2 and library search (DDA files)
 
@@ -173,6 +184,7 @@ to be used as they are. The options you are most likely to need:
 | `--ppm X` | 5 | m/z tolerance for aligning runs |
 | `--no-rt-correction` | off | group runs on their native RT |
 | `--no-gap-fill` | off | leave undetected cells empty (0) |
+| `--no-compounds` | off | skip compound grouping |
 
 Other commands: `peak3d pick FILE.mzML ... --output OUT` (per-file tables only) and
 `peak3d align --output OUT` (re-run alignment on an existing output with other options).
@@ -236,6 +248,7 @@ The benchmark scripts were written for the UC Davis HPC cluster (Slurm account, 
 | MTBLS1684 | MetaboLights | Agilent Q-TOF | full study behind IDSL_IPA |
 | LI2018_QE | MetaboLights MTBLS733 | Q Exactive HF | ~1100 standards at defined ratios |
 | LI2018_TTOF | MetaboLights MTBLS736 | TripleTOF 6600 | same design; **.wiff.scan files appear missing** |
+| PR002464 | MWB PR002464 (ST004500/01/02/04 used) | Orbitrap ID-X, RP/HILIC, pos/neg | 96 spiked standards at designed A/B ratios -> spiked-standard truth (below) |
 | MASSCUBE_SI | Zenodo 14159704 | Orbitrap + QTOF | secondary check only (low priority) |
 
 ### Benchmark tiers
@@ -258,10 +271,117 @@ The benchmark scripts were written for the UC Davis HPC cluster (Slurm account, 
    in `manifest/convert_status/`; rerunning skips finished files. `scripts/check_mzml.py` reports
    centroid/profile per MS level.
 5. `sbatch scripts/20_build_envs.sbatch`, `21_build_idslipa.sbatch`, `22_build_peak3d_env.sbatch` - tool envs
-6. `python3 scripts/30_make_jobs.py && sbatch --array=1-N scripts/31_run_tool.sbatch` - one array task per
-   (tool, run) from `bench/runs.py`; results in `results/<tool>/<run>/` (`DONE`, `time.txt`, `tool.log`)
+6. `python3 scripts/30_make_jobs.py [--tools T1,T2] [RUN ...] && sbatch --array=1-N scripts/31_run_tool.sbatch` - one
+   array task per (tool, run) from `bench/runs.py`; results in `results/<tool>/<run>/` (`DONE`, `time.txt`, `tool.log`)
 7. `envs/peak3d/bin/python bench/score.py` - match features to truth (ppm x RT grid) -> `results/scores/*.tsv`
 8. (next) injection / noise / decoy generator -> `data/bench/` + truth tables
+
+### Spiked-standard truth (PR002464)
+
+The Broeckling/Du/Patti benchmark (Metabolomics Workbench PR002464) spikes
+96 standards into two mixes: standard k sits in spike A and B at amounts a_k, b_k with log2(a/b) = +-1..4. The vials
+include matrix-free A:B series (1:0, 0:1, 1:3, 3:1, 1:1; vials 18-22) and a 1:1 dilution series (vials 9-12), each injected
+once per batch (4x). `bench/spiketruth.py` turns this into a tool-independent list of every peak the standards produce:
+
+- discovery: EICs of 9-12 adducts per standard in vials 9/18/19 -> local maxima (height >= 10x floor, >= 3x running
+  20th percentile, >= 30 % prominence)
+- spike-derived (on matrix-free vials only): apex (local max of +-3 scans, >= 4 contiguous scans) in >= 3/4 injections,
+  blank median <= 10 % of it, E series fits alpha A + beta B (residual <= 0.3), A and B differ (|log2 h18/h19| >= 0.4),
+  C series falls with dilution
+- tier A: also matches the labelled standard's own log2(A/B) within 0.75 (one-sided when the weak vial is at noise),
+  and the standard's peak group holds a primary ion; tier B: spike-derived, label uncertain (co-eluting isomers,
+  compressed ratios, ions of another mixture at this mass)
+- co-elution sweep: every other m/z at a standard's main apex with the same profile (r >= 0.8) that passes the same
+  tests -> isotopes, adducts, in-source fragments, impurities
+- flags (kept, for the scorer to decide): `ft_artifact?` (within 0.05 Da of a >= 20x stronger co-eluting ion: Orbitrap
+  sidebands), `broad` (FWHM > 3x the study median: overload smears, bands)
+
+Run: `sbatch scripts/05_download_pr002464.sbatch` (centroid mzML + design, ~20 GB for the four Orbitrap studies;
+`bench/pr2464_design.py` exports the design spreadsheet), then `sbatch scripts/44_spiketruth.sbatch ST0045xx` (2-4 min,
+~3.5 GB; writes `data/truth/PR002464/<study>/`: `spiked_truth.tsv`, `per_file.tsv.gz` (height / area / apex per truth
+peak and file), `standards_summary.tsv`, `all_tested_candidates.tsv`, `decoy_qc.tsv`, `files.tsv` (incl. RT offsets),
+`params.json`, `gallery/`). Synthetic end-to-end test: `bench/tests/test_spiketruth.py`.
+
+| study | mode | truth peaks | tier A (on standards) | tier B | flagged |
+|---|---|---|---|---|---|
+| ST004500 | RP neg | 2,650 | 1,933 (48) | 717 | 148 ft, 54 broad |
+| ST004501 | HILIC pos | 473 | 357 (37) | 116 | 40 ft, 2 broad |
+| ST004502 | HILIC neg | 976 | 692 (35) | 284 | 125 ft, 16 broad |
+| ST004504 | RP pos | not usable | | | |
+
+67 of the 96 standards are found in at least one study (19 in all three); the rest are volatile or do not ionise.
+Tier-A formula ions: median |m/z error| 0.4-0.8 ppm, median |observed - designed log2(A/B)| 0.25-0.30.
+
+Known gaps:
+- **ST004504 (RP pos) is not usable as deposited**: the file contents do not match the sample metadata (spike
+  standards at full height in files labelled solvent blank / plasma-only / yeast-only, absent from files labelled A+B
+  spike and from 2 of the test.QC injections, while the fixed-position QCs agree). Every candidate fails the blank test.
+- Peaks whose RT moves with load (acesulfame in RP neg: 2.70 min at 1/8 load, 3.04 min at full load) fail the
+  fixed-RT design test and are missing.
+- Ratio reads take the maximum within +-3 s of the apex, so isomers closer than that (2'- and 5-methoxyflavone in
+  HILIC pos, 2.4 s apart) contaminate each other's ratio and land in tier B.
+- `decoy_qc.tsv` (formula masses +-0.02 Da) is not a false-truth rate here: about half the decoy passes are peaks
+  already in the truth (spike ions of other standards at that mass) and the rest pass the same spike-derived tests.
+
+### Yeast and plasma truth (PR002464)
+
+The same studies also hold CIL yeast extract (12C and U-13C) and two NIST plasmas, which give truth for biological
+peaks. `sbatch scripts/45_biotruth.sbatch ST0045xx` (after the spike truth, whose RT offsets it uses) runs:
+
+- **Yeast credentialing**: `bench/credtruth.py PR2464_<study>`, the SZ22 / NetID pipeline on vial 23 (12C) vs
+  vial 24 (U-13C), 4 injections each (3 of 4 required), seeds >= 10x floor -> `yeast_cred/` (credentialed.tsv,
+  decoys, gallery). `bench/biotruth.py yeast` then adds what this design offers on top -> `yeast_truth.tsv`:
+  both partners in vial 25 (12C : 13C 1:1, same injection), blank read, dilution slope over vials 5-8;
+  `confirmed` = present on both sides in vial 25 and absent from the blanks.
+- **Plasma truth**: `bench/biotruth.py plasma` -> `plasma_truth.tsv`. Seeds from the 1000 uL plasma vials
+  (13, 14, 17); a peak is truth when present in >= 3/4 injections of vial 17, absent from the blanks, proportional
+  to the plasma dilution (vials 1-4, 1000 / 500 / 200 / 100 uL: tier A slope 1 +- 0.25, R^2 >= 0.95; tier B
+  1 +- 0.5, R^2 >= 0.8) and consistent with the SRM 1950 : SRM 8231 mixing series (vials 13-17). Null: the same
+  tests with the dilution amounts permuted (`plasma_null_qc.tsv`). Columns flag peaks also seen in yeast-only or
+  spike-only vials and peaks that are spike-truth peaks.
+
+| study | yeast credentialed (tier A) | confirmed in vial 25 | decoy rate A / B | plasma truth (tier A) | permuted-dilution passes |
+|---|---|---|---|---|---|
+| ST004500 RP neg | 8,160 (2,742) | 4,452 | 4.1 % / 9.2 % | 13,549 (7,054) | 1-45 |
+| ST004501 HILIC pos | 1,241 (204) | 804 | 2.0 % / 1.4 % | 1,410 (820) | 0-25 |
+| ST004502 HILIC neg | 2,185 (249) | 736 | 2.8 % / 2.2 % | 3,456 (1,782) | 1-25 |
+
+Checks: known metabolites in the plasma truth (amino acids, carnitines, hypoxanthine, xanthine, uridine,
+pantothenate: 20-24 of the list per study); credentialed carbon count = formula carbon count for every tier-A
+known-metabolite match. RP-negative yeast is dominated by lipids (median 28 carbons, 10-16 min), where co-eluting
+labelled species make wrong spacings pass more often (higher decoy rate): prefer tier A there.
+`bench/diag/pr2464_label_audit.py` estimates each injection's spike A / B, plasma and yeast 12C / 13C content from
+marker peaks and flags injections that disagree with their metadata (`results/pr2464_label_audit/`).
+
+### PR002464 runs and scores
+
+Each Orbitrap study is one run, `PR2464_ST004500` / `01` / `02` in `bench/runs.py`: all 224 MS1 injections (samples,
+QCs, blanks) processed together, because the design mixes 12C and 13C yeast in the same vials. peak3d runs here as the
+GLR variant (`narrow_rule=local_median`, `scripts/42_peak3d_variant.sbatch` -> `results/peak3d_GLR/`):
+
+```bash
+envs/peak3d/bin/python scripts/30_make_jobs.py --tools asari,masscube,idslipa PR2464_ST004500 PR2464_ST004501 PR2464_ST004502
+sbatch --array=1-9 scripts/31_run_tool.sbatch
+envs/peak3d/bin/python scripts/41_variant_jobs.py --out manifest/variant_jobs_pr2464.tsv \
+    --runs PR2464_ST004500,PR2464_ST004501,PR2464_ST004502 GLR
+sbatch --array=1-3 --export=ALL,VARIANT_JOBS=manifest/variant_jobs_pr2464.tsv scripts/42_peak3d_variant.sbatch
+envs/peak3d/bin/python bench/score.py pr2464_spike pr2464_yeast pr2464_plasma runtime
+```
+
+Scorers, each over
+the ppm x RT grid, a truth peak matched to the feature closest in RT; quantities are each vial's median over its 4
+injections, missing = 0:
+
+- `pr2464_spike`: recall (all, tier A / B, tier A without flags, formula ions); A/B ratio of tier-A peaks whose weak
+  side is above noise, tool log2(vial 18 / vial 19) vs the designed log2(a/b) (median |error|, within 2-fold, right
+  direction); dilution slope over vials 9-12 vs the raw-data slope of the truth builder.
+- `pr2464_yeast`: recall of the 12C peaks (all, tier A / B, primary, confirmed in vial 25), of their 13C partners and
+  of both; 12C dilution slope over vials 5-8 vs the raw-data slope.
+- `pr2464_plasma`: recall (all, tier A / B, tier A without flags); dilution slope over vials 1-4 vs the raw-data
+  slope; SRM 1950 / 8231 ratio (vial 13 / 14) vs the raw-data ratio.
+
+A tool's full-study table also holds features of every other sample type, so no precision is computed here.
+Synthetic check of the scorers: `bench/tests/test_score_pr2464.py`.
 
 ### Scoring decisions
 
