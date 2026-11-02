@@ -202,6 +202,7 @@ to be used as they are. The options you are most likely to need:
 | `--no-rt-correction` | off | group runs on their native RT |
 | `--no-gap-fill` | off | leave undetected cells empty (0) |
 | `--no-compounds` | off | skip compound grouping |
+| `--compound-veto` | auto | intensity veto in compound grouping: `auto` rejects co-eluting pairs whose heights do not correlate across files (when the study makes that informative), `off` tests every co-eluting pair on peak shape; on the PR002464 spike truth `off` gains recall in one study but triples the unlabelled members per compound in all three |
 
 Other commands: `peak3d pick FILE.mzML ... --output OUT` (per-file tables only) and
 `peak3d align --output OUT` (re-run alignment on an existing output with other options).

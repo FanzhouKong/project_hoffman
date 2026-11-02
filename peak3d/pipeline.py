@@ -392,7 +392,8 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
         tic = time.perf_counter()
         comp, comp_pairs, comp_info = cluster_compounds(
             cons, H, detected | confirmed, detected, A, stems, cache_dir, fwhm_scans, fwhm_study, dt_med, rt_tol,
-            res.ppm_tol, g_iso, g_z, g_iso_parent, cores=args.cores, log=log)
+            res.ppm_tol, g_iso, g_z, g_iso_parent, cores=args.cores, log=log,
+            int_veto=getattr(args, "compound_veto", "auto"))
         stage_times["compounds_s"] = round(time.perf_counter() - tic, 3)
         stage_times["compounds"] = {k: (v.item() if hasattr(v, "item") else v) for k, v in comp_info.items()}
         log(f"compounds: {comp_info['n_candidates']} co-eluting pairs, {comp_info['n_edges']} joined "
