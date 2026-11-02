@@ -138,6 +138,78 @@ def _eic_files(n_files: int, limit: int) -> list[int]:
     return sorted(set(np.linspace(0, n_files - 1, limit).round().astype(int).tolist()))
 
 
+def _file_axis(output: Path, stem: str, cloud: Cloud):
+    """the file's corrected scan times (float64, aligned axis) and its m/z offset per scan (ppm) or None"""
+    warp = output / "rt_correction" / f"{stem}.tsv"
+    moff = None
+    corr = cloud.rt
+    if warp.exists():
+        wt = pd.read_csv(warp, sep="\t")
+        c = wt["rt_corr"].to_numpy(float)
+        if len(c) == cloud.n_scans:
+            corr = c
+            if "mz_offset_ppm" in wt:
+                moff = wt["mz_offset_ppm"].to_numpy(float)
+    return np.asarray(corr, np.float64), moff
+
+
+def _native_mz(mz, rt, cloud: Cloud, corr, moff, offset_ppm: float):
+    """consensus m/z at aligned times rt -> what the file measured: its offset at that time (a curve unless
+    --mz-static), or the file's single offset when the warp table has no curve"""
+    mz = np.asarray(mz, np.float64)
+    if moff is None:
+        return mz / (1.0 - offset_ppm * 1e-6)
+    native = np.interp(np.asarray(rt, np.float64), corr, cloud.rt)
+    return mz / (1.0 - np.interp(native, cloud.rt, moff) * 1e-6)
+
+
+def table_stems(output, cols) -> list[str]:
+    """the file columns of an aligned table (the picking manifest's stems when it is there)"""
+    stems = [c for c in cols if c not in BASE_COLS]
+    man = _read(Path(output) / "features" / "manifest.tsv")
+    if man is not None and "stem" in man and set(man["stem"].astype(str)) <= set(stems):
+        stems = [s for s in stems if s in set(man["stem"].astype(str))]   # extra columns of newer versions
+    return stems
+
+
+def file_offsets(output) -> dict:
+    """each file's m/z offset (ppm) from the alignment summary, 0 where unknown"""
+    summ = _read(Path(output) / "rt_correction" / "summary.tsv")
+    if summ is None or "file" not in summ or "mz_offset_ppm" not in summ:
+        return {}
+    off = pd.to_numeric(summ["mz_offset_ppm"], errors="coerce").fillna(0.0)
+    return {str(f): float(o) for f, o in zip(summ["file"], off)}
+
+
+def ms1_pattern(output, cache_dir, stem: str, mz: float, rt: float, rt_lo: float, rt_hi: float, z: int, ppm: float,
+                offset_ppm: float = 0.0) -> dict:
+    """the MS1 isotope pattern of one feature in one file (peak3d.halogen.test_feature on the cached point cloud):
+    the scans between the aligned peak bounds rt_lo..rt_hi (minutes), at least 3 around rt"""
+    from ..halogen import test_feature
+    output, cache_dir = Path(output), Path(cache_dir)
+    npz = cache_dir / f"{stem}.npz"
+    if not npz.exists():
+        raise FileNotFoundError(f"no point-cloud cache for {stem} (re-run with --keep-cache)")
+    cloud = Cloud.load_npz(npz)
+    corr, moff = _file_axis(output, stem, cloud)
+    target = float(_native_mz([mz], [rt], cloud, corr, moff, offset_ppm)[0])
+    s0 = int(np.searchsorted(corr, rt_lo))
+    s1 = int(np.searchsorted(corr, rt_hi, side="right"))
+    if s1 - s0 < 3:
+        c = int(np.clip(np.searchsorted(corr, rt), 1, max(cloud.n_scans - 2, 1)))
+        s0, s1 = min(s0, c - 1), max(s1, c + 2)
+    s0, s1 = max(s0, 0), min(s1, cloud.n_scans)
+    pat = test_feature(cloud, target, z, s0, s1, ppm)
+    out = {"file": stem, "target_mz": target, "offset_ppm": float(target / mz * 1e6 - 1e6) if mz else 0.0,
+           "scans": [s0, s1], "ppm": ppm, "z": max(int(z), 1)}
+    if pat is None:
+        out["note"] = "nothing at the feature's m/z in these scans"
+        return out
+    a = pat["apex_scan"]
+    out.update(pat, rt_s=float(60 * corr[a]), rt_native_s=float(60 * cloud.rt[a]))
+    return out
+
+
 def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm, budget, max_files, n_pts):
     """corrected-RT chromatograms of the most intense groups in up to max_files files, or (None, reason)"""
     if not cache_dir.is_dir():
@@ -165,24 +237,9 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
     for j, k in enumerate(shown):
         s = stems[k]
         cloud = Cloud.load_npz(cache_dir / f"{s}.npz")
-        warp = output / "rt_correction" / f"{s}.tsv"
-        moff = None
-        if warp.exists():
-            wt = pd.read_csv(warp, sep="\t")
-            corr = wt["rt_corr"].to_numpy(float)
-            if len(corr) != cloud.n_scans:
-                corr = cloud.rt
-            elif "mz_offset_ppm" in wt:
-                moff = wt["mz_offset_ppm"].to_numpy(float)
-        else:
-            corr = cloud.rt
-        if moff is None:
-            target = mz_c / (1.0 - offsets.get(s, 0.0) * 1e-6)
-        else:                       # the file's offset at each group's time (a curve unless --mz-static)
-            native = np.interp(t["rt"].to_numpy(float), np.asarray(corr, np.float64), cloud.rt)
-            target = mz_c / (1.0 - np.interp(native, cloud.rt, moff) * 1e-6)
-        traces[:, j, :] = eic_on_grid(cloud.off, cloud.mz, cloud.inten, np.asarray(corr, np.float64),
-                                      target, target * ppm * 1e-6, x0, dx, n_pts)
+        corr, moff = _file_axis(output, s, cloud)
+        target = _native_mz(mz_c, t["rt"].to_numpy(float), cloud, corr, moff, offsets.get(s, 0.0))
+        traces[:, j, :] = eic_on_grid(cloud.off, cloud.mz, cloud.inten, corr, target, target * ppm * 1e-6, x0, dx, n_pts)
     scale = traces.reshape(n_groups, -1).max(axis=1)
     q = np.zeros_like(traces, dtype=np.uint16)
     ok = scale > 0
@@ -366,9 +423,7 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
     options = params.get("options", {})
     table = pd.read_csv(table_path, sep="\t")
     man = _read(output / "features" / "manifest.tsv")
-    stems = [c for c in table.columns if c not in BASE_COLS]
-    if man is not None and "stem" in man and set(man["stem"].astype(str)) <= set(stems):
-        stems = [s for s in stems if s in set(man["stem"].astype(str))]   # extra columns of newer versions
+    stems = table_stems(output, table.columns)
     G, N = len(table), len(stems)
     V = table[stems].to_numpy(np.float32) if N else np.zeros((G, 0), np.float32)
     table["_max"] = V.max(axis=1) if N else 0.0

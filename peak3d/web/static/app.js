@@ -515,7 +515,8 @@
       const noted = (r) => { cur = Object.assign({}, cur, { ann: true }); addActions(quant, cur); return r; };
       const annotate = async (group_id, hit) => noted(await post("/api/results/annotate", { path, group_id, hit }));
       const note = async (group_id, parts) => noted(await post("/api/results/note", Object.assign({ path, group_id }, parts)));
-      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, identify, annotate, note, browseLibrary, methods: S.info.methods || {} });
+      const ms1 = (group_id, file) => post("/api/results/ms1", { path, group_id, file });
+      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, identify, annotate, note, ms1, browseLibrary, methods: S.info.methods || {} });
     } catch (e) {
       holder.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "16px" } }, icon("error"), h("div", e.message))));
     }

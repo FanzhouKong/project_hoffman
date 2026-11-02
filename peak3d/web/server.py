@@ -536,6 +536,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._addon(body, "remove")
             if url.path == "/api/results/identify":
                 return self._identify(body)
+            if url.path == "/api/results/ms1":
+                return self._ms1(body)
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
             if m and m.group(1) in self.app.runs:
                 self.app.runs[m.group(1)].cancel()
@@ -690,6 +692,31 @@ class Handler(BaseHTTPRequestHandler):
                 v[i] = _seconds(v[i])
             lines.append("\t".join(v + extra["rows"].get(int(k), extra["empty"])) + eol)
         self._send(200, "".join(lines).encode("utf-8"), "text/tab-separated-values; charset=utf-8")
+
+    def _ms1(self, body):
+        """the MS1 isotope pattern of one feature at its apex in one file (the file where it is most intense unless
+        "file" names one), with the halogen test: {"path", "group_id", "file"?}"""
+        out = self._output({"path": [body.get("path") or ""]})
+        header, rows = self.app.table_lines(out / "aligned_feature_table.tsv")
+        key = str(int(body.get("group_id")))
+        if key not in rows:
+            return self._error(404, f"no feature #{key}")
+        cols = header.rstrip("\r\n").split("\t")
+        row = dict(zip(cols, rows[key].rstrip("\r\n").split("\t")))
+        stems = bundle.table_stems(out, cols)
+        stem = body.get("file")
+        if stem is None or stem == "":
+            vals = {s: float(row.get(s) or 0) for s in stems}
+            stem = max(vals, key=vals.get) if vals else None
+        if stem not in stems:
+            return self._error(400, f"not a file of this output: {stem!r}")
+        params = json.loads((out / "params.json").read_text()) if (out / "params.json").exists() else {}
+        ppm = float((params.get("options") or {}).get("ppm") or 5.0)
+        res = bundle.ms1_pattern(out, out / ".cache", stem, float(row["mz"]), float(row["rt"]), float(row["rt_min"]),
+                                 float(row["rt_max"]), int(float(row.get("charge") or 1)), ppm,
+                                 bundle.file_offsets(out).get(stem, 0.0))
+        res.update(group_id=int(key), files=stems, value=float(row.get(stem) or 0))
+        return self._json(res)
 
     def _identify(self, body):
         """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify); rewrites
