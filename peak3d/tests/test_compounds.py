@@ -80,6 +80,16 @@ def test_group_iso_parent_majority():
     assert out.tolist() == [-1, 0, -1]
 
 
+
+def test_group_iso_parent_parent_row_missing_from_alignment():
+    """an isotope whose parent row was dropped before alignment (e.g. by the m/z offset check) gets no parent
+    instead of an out-of-range lookup"""
+    A = pd.DataFrame({"file": [0, 0, 1, 1], "row": [0, 1, 0, 1], "iso_parent": [-1, 0, -1, 7]})   # file 1: row 7 absent
+    gid = np.array([0, 1, 0, 1])
+    out = C.group_iso_parent(A, gid, 2, np.array([0, 1]))
+    assert out.tolist() == [-1, 0]
+
+
 def test_pair_relations_hold_na_h_and_c13():
     rel = C.pair_relations("pos")
     assert np.any(np.isclose(rel, 22.9892207 - C.PROTON, atol=1e-6))
