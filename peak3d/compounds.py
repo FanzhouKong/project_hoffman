@@ -317,12 +317,14 @@ def _nanmedian_by_pair(values, pair_idx, P):
 # --------------------------------------------------------------------- main --
 def cluster_compounds(cons, H, present, detected, A, stems, cache_dir, fwhm_scans: dict, fwhm_study: float,
                       dt_med: float, rt_tol: float, ppm_tol: float, g_iso, g_z, g_iso_parent, cores: int = 1,
-                      log=print):
+                      log=print, int_veto: str = "auto"):
     """Returns (table: DataFrame with one row per aligned group, pairs: DataFrame of evaluated pairs, info: dict).
 
     cons: consensus dict (mz, rt, rt_min, rt_max); H (G x N) heights incl. filled cells; present/detected (G x N)
     bool; A: per-file member frame with columns gid, file, row, height, mz_native, sig, scan_lo, scan_hi,
-    scan_apex; g_iso_parent: group index of the monoisotopic parent (-1 none)."""
+    scan_apex; g_iso_parent: group index of the monoisotopic parent (-1 none); int_veto: "auto" rejects pairs
+    whose intensity correlation across files is below the null's q90 when the study makes that informative,
+    "off" never rejects on intensity (every co-eluting pair goes to the shape test)."""
     tic = time.perf_counter()
     t_last = [tic]
 
@@ -375,9 +377,9 @@ def cluster_compounds(cons, H, present, detected, A, stems, cache_dir, fwhm_scan
             ri = r_int[iso_pair]; ri = ri[np.isfinite(ri)]
             if len(ri) >= 20:
                 int_iso_median = float(np.median(ri))
-                int_active = int_iso_median >= q_int[2]
+                int_active = int_veto != "off" and int_iso_median >= q_int[2]
                 t_int = float(q_int[0])
-    info.update(int_active=bool(int_active), int_null_q90=float(q_int[0]), int_null_q95=float(q_int[1]),
+    info.update(int_veto=int_veto, int_active=bool(int_active), int_null_q90=float(q_int[0]), int_null_q95=float(q_int[1]),
                 int_null_q99=float(q_int[2]), int_iso_median=float(int_iso_median), int_cut=float(t_int))
 
     # 3. shape correlation in the strongest shared files, for the pairs the veto has not already rejected

@@ -61,6 +61,9 @@ def build_parser():
         p.add_argument("--no-compounds", action="store_true",
                        help="skip compound grouping (adducts, in-source fragments, multimers and their isotopes of "
                             "one compound, joined on peak-shape and intensity correlation)")
+        p.add_argument("--compound-veto", choices=["auto", "off"], default="auto",
+                       help="intensity veto in compound grouping: auto (default) rejects co-eluting pairs whose "
+                            "heights do not correlate across files, off tests every co-eluting pair on peak shape")
         p.add_argument("--quant", choices=["height", "area"], default="height",
                        help="value in the main aligned table (default height; the other is written too)")
 
