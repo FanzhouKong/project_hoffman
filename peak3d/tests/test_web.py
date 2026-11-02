@@ -340,6 +340,40 @@ def _ms2_output(out: Path):
     return out
 
 
+def test_ms1_pattern_through_the_server(processed):
+    """the Show MS1 request: the apex-scan spectrum of a feature in the file where it is strongest, its isotope ratios
+    (the synthetic study has M+1 at 15 %) and the halogen test (none: there are no halogens in it)"""
+    d, out = processed
+    httpd, url = server.make_server("127.0.0.1", 0, root=out.parent, token="t0ken")
+    th = threading.Thread(target=httpd.serve_forever, daemon=True)
+    th.start()
+    c = _Client(url.split("?")[0].rstrip("/"), "t0ken")
+    try:
+        t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
+        mono = t[t["iso_offset"] == 0].sort_values("S0", ascending=False)
+        gid = int(mono.iloc[0]["group_id"])
+        code, r = c.json("/api/results/ms1", {"path": str(out), "group_id": gid})
+        assert code == 200, r
+        assert r["group_id"] == gid and r["files"] == ["S0", "S1", "S2"] and r["file"] in r["files"]
+        row = t[t["group_id"] == gid].iloc[0]
+        assert r["file"] == max(["S0", "S1", "S2"], key=lambda s: row[s])
+        assert abs(r["target_mz"] - row["mz"]) / row["mz"] * 1e6 < 10
+        assert row["rt_min"] * 60 - 1 <= r["rt_s"] <= row["rt_max"] * 60 + 1
+        j0 = r["k"].index(0)
+        assert r["rel"][j0] == 1.0 and abs(r["rel"][j0 + 1] - 0.15) < 0.05
+        assert r["test"]["verdict"] == "none" and r["test"]["hypotheses"][0]["chi2"] < 20
+        assert len(r["apex_mz"]) == len(r["apex_inten"]) >= 2
+        json.dumps(r)
+        # a chosen file, a wrong file, a wrong feature
+        code, r2 = c.json("/api/results/ms1", {"path": str(out), "group_id": gid, "file": "S2"})
+        assert code == 200 and r2["file"] == "S2"
+        assert c.json("/api/results/ms1", {"path": str(out), "group_id": gid, "file": "S9"})[0] == 400
+        assert c.json("/api/results/ms1", {"path": str(out), "group_id": 10 ** 9})[0] == 404
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_identity_search_through_the_server(gui):
     c, root, _ = gui
     out = _ms2_output(root / "res")

@@ -156,6 +156,17 @@ rebuilds `report.html` for an existing output.
 
 The standalone app above is the same GUI without a Python installation.
 
+**Show MS1** (beside a feature's chromatograms) reads the MS1 spectrum at the feature's apex from the point-cloud
+cache of the file where it is strongest (any file can be chosen) and tests its isotope pattern for chlorine and
+bromine: the ratios M+1..M+4 / M, summed over the top half of the peak, are fitted under elemental hypotheses (no
+halogen, S, S2, Cl1-4, Br1-3, BrCl, Br2Cl, BrCl2; the carbon count from M+1, the rest of the skeleton scaled like an
+average organic molecule), and where the mass accuracy allows, the spacing of M+2 adds evidence (37Cl and 81Br sit
+0.010 and 0.009 Da below 13C2). A halogen is called when its best hypothesis beats the best halogen-free one by 9
+chi-square units, "possible" above 4. Windows that do not co-elute with M are left out, a saturated M and a weak
+signal are flagged, and a co-eluting peak one or two units below warns that the feature may not be the monoisotopic
+peak. The measured spectrum is drawn head-to-tail against the best hypothesis's pattern; a halogen call also marks
+the feature's header. The report has no button: it needs the server and the cache (`--keep-cache`).
+
 On a cluster, start the GUI inside a job with `--host 0.0.0.0` and reach it through an SSH tunnel to that
 node; the access token in the link keeps other users out.
 

@@ -457,6 +457,19 @@ dialog.dialog::backdrop { background: rgba(28, 28, 30, .28); backdrop-filter: bl
 .cmd { display: flex; align-items: center; gap: 4px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r); padding: 3px 3px 3px 10px; }
 .cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font: 400 11.5px/1.5 var(--mono); color: var(--ink-2); padding: 5px 0; scrollbar-width: thin; }
 .section-title { margin: 22px 0 10px; }
+.section-title.with-action { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.section-title.with-action > .btn { flex: none; margin-top: 2px; }
+.section-title.ms1-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-top: 18px; }
+.section-title.ms1-title .field .box { margin-top: 0; min-height: 30px; }
+.ms1-box:empty { display: none; }
+.ms1-box { border-top: 1px dashed var(--line); margin-top: 12px; }
+.ms1-wait { display: flex; align-items: center; gap: 6px; padding: 12px 0; }
+.ms1-verdict { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 10px 0 8px; }
+.chip.static.halogen { background: #fff1dc; color: #9a5b00; }
+.ms1-table { margin: 6px 0 8px; box-shadow: none; }
+.ms1-table table.data td, .ms1-table table.data th { padding: 4px 8px; font-size: 12px; }
+.ms1-table td.num, .ms1-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ms1-table tr.off td { color: var(--ink-3); }
 .section-title p { margin-top: 2px; }
 /* results pages use the width they are given; the Features page all of it: the feature list on the left, then the
    chromatogram column (with the feature map below) and the annotation column */

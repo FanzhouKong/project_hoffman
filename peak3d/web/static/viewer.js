@@ -213,6 +213,7 @@
       headEl = annoEl = shown = null;
       chromCharts.length = 0;              // their charts are among those clearCharts destroys now
       annoCharts.length = 0;
+      ms1Charts.length = 0;
       tabs.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === id)));
       clearCharts();
       body.replaceChildren();
@@ -574,12 +575,13 @@
     // ---------------------------------------------------------------- feature detail
     // a header (with the user's stars), the annotation column (candidates, head-to-tail plot, structure, the user's
     // annotation, comment) and the chromatogram column, which stays as it is while the annotation changes
-    const chromCharts = [], annoCharts = [];
+    const chromCharts = [], annoCharts = [], ms1Charts = [];
     const drop = (list) => { for (const c of list) { c.destroy(); const k = charts.indexOf(c); if (k >= 0) charts.splice(k, 1); } list.length = 0; };
     let headEl = null, annoEl = null, shown = null;
     function renderDetail(g) {
       drop(chromCharts);
       drop(annoCharts);
+      drop(ms1Charts);
       shown = g;
       const D = detailRefs;
       if (!D) return;
@@ -868,6 +870,7 @@
       const a = R.a, parts = [];
       const e = R.eic(g);
       const statusOf = (f) => R.status(g, f);
+      const ms1 = ms1Control(g);
       if (e) {
         const chartEl = h("div");
         const t0 = 60 * a.g_rt_min[g], t1 = 60 * a.g_rt_max[g];
@@ -901,11 +904,11 @@
         }
         const vlines = [{ x: t0, color: "--viz-ink-2", dash: [5, 4], width: 1.25 }, { x: t1, color: "--viz-ink-2", dash: [5, 4], width: 1.25 },
           ...tic.map((m) => ({ x: m.t, color: "--viz-ms2", dash: [], width: 2.5 }))];
-        parts.push(h("div.section-title.first", h("h3.title-small", "Chromatograms"),
+        parts.push(h("div.section-title.first.with-action", h("div", h("h3.title-small", "Chromatograms"),
           h("p.body-small.muted", `±${R.h.eic.ppm} ppm around the feature, on the aligned RT axis${R.h.eic.files.length < R.N ? `; ${R.h.eic.files.length} of ${R.N} files (evenly spaced)` : ""}. ` +
             `Peak ${fixed(t0, 1)}–${fixed(t1, 1)} s (dashed), apex of each trace (dot)` +
             (tic.length ? (one ? "; red line: where the MS2 spectrum was taken" : `; red line: the highest-TIC MS2 spectrum; red stars: the ${int(merged.length)} spectra merged into the consensus, on their file's trace`) : "") +
-            ". Hover a trace to name its file.")), chartEl);
+            ". Hover a trace to name its file.")), ms1.button), chartEl);
         const c = track(P3.plot.line(chartEl, {
           height: 250, series, vlines, dots, xLabel: "Aligned RT (s)", yLabel: "Intensity",
           xFmt: (v, d) => fixed(v, Math.min(d, 1)),
@@ -919,10 +922,11 @@
           ...(tic.length ? (one ? [{ kind: "line", bold: true, color: "--viz-ms2", label: "MS2 spectrum" }] :
             [{ kind: "line", bold: true, color: "--viz-ms2", label: "highest-TIC MS2" }, { kind: "star", color: "--viz-ms2", label: "MS2 in the consensus" }]) : [])]));
       } else {
-        parts.push(h("div.section-title.first", h("h3.title-small", "Chromatograms")),
+        parts.push(h("div.section-title.first.with-action", h("h3.title-small", "Chromatograms"), ms1.button),
           banner(R.h.eic ? "Not stored for this feature: the report keeps chromatograms for the most intense features only (peak3d report --eic-budget raises the limit)." :
             `Not available: ${R.h.eic_note || "no point-cloud cache"}. Re-run with --keep-cache, or build the report while the cache exists.`));
       }
+      if (ms1.box) parts.push(ms1.box);
       if (R.a.m_q) {
         const vals = R.stems.map((_, f) => R.value(g, f));
         const cols = R.stems.map((_, f) => (statusOf(f) === 3 ? S1 : S2));
@@ -945,6 +949,102 @@
         ["Found by", `picker in ${a.g_ndet[g]}, confirmed by gap filling in ${a.g_nconf[g]}, filled in ${a.g_nfill[g]}`],
       ]));
       return parts;
+    }
+
+    // ---------------------------------------------------------------- MS1 at the apex
+    // on request (the Show MS1 button beside the chromatograms): the MS1 spectrum at the feature's apex in one file, its
+    // isotope pattern against the best elemental hypothesis, and the halogen test (peak3d.halogen). Needs the app's
+    // server and the point-cloud cache, so a report shows no button.
+    const SUB = { 0: "₀", 1: "₁", 2: "₂", 3: "₃", 4: "₄", 5: "₅", 6: "₆", 7: "₇", 8: "₈", 9: "₉" };
+    const sub = (t) => String(t).replace(/\d/g, (d) => SUB[d]);
+    const hypName = (name) => (name === "none" ? "no halogen" : sub(name));
+    function ms1Control(g) {
+      if (!opts.ms1) return { button: null, box: null };
+      const box = h("div.ms1-box");
+      let open = false, file = null;
+      const button = h("button.btn.outlined.state.ms1-btn", { type: "button", "aria-pressed": "false",
+        title: "The MS1 spectrum at this feature's apex: its isotope pattern, tested for chlorine and bromine" }, icon("bar_chart"), "Show MS1");
+      let bestF = 0, bv = -1;
+      for (let f = 0; f < R.N; f++) { const v = R.a.m_q ? R.value(g, f) : 0; if (v > bv) { bv = v; bestF = f; } }
+      const load = async (stem) => {
+        file = stem;
+        drop(ms1Charts);
+        box.replaceChildren(h("p.body-small.muted.ms1-wait", P3.spinner(14), h("span", " Reading the MS1 spectrum…")));
+        try {
+          const r = await opts.ms1(R.a.g_id[g], stem);
+          if (shown !== g || !open || file !== stem) return;
+          box.replaceChildren(...ms1Panel(g, r, load));
+        } catch (e) {
+          if (shown === g && open) box.replaceChildren(banner(e.message || String(e), "error"));
+        }
+      };
+      button.addEventListener("click", () => {
+        open = !open;
+        button.setAttribute("aria-pressed", String(open));
+        button.replaceChildren(icon(open ? "close" : "bar_chart"), open ? "Hide MS1" : "Show MS1");
+        if (open) load(R.stems[bestF]);
+        else { drop(ms1Charts); box.replaceChildren(); }
+      });
+      return { button, box };
+    }
+
+    function ms1Panel(g, r, reload) {
+      const out = [];
+      const sel = h("select", { "aria-label": "File" }, r.files.map((s) => h("option", { value: s }, s)));
+      sel.value = r.file;
+      sel.addEventListener("change", () => reload(sel.value));
+      const t = r.test;
+      const verdictChip = !t ? null : t.verdict === "halogen" ?
+        h("span.chip.static.halogen", icon("science"), `Halogen pattern: ${hypName(t.best)}`) :
+        t.verdict === "possible" ? h("span.chip.static.info", icon("info"), `Possibly halogenated: ${hypName(t.best)}`) :
+          h("span.chip.static", "No halogen pattern");
+      out.push(h("div.section-title.ms1-title", h("div", h("h3.title-small", "MS1 isotope pattern"),
+        h("p.body-small.muted", r.note ? "" : `Apex scan ${int(r.apex_scan)} at ${fixed(r.rt_s, 1)} s (aligned), m/z ${fixed(r.target_mz, 4)} in this file` +
+          (Math.abs(r.offset_ppm) >= 0.05 ? ` (${r.offset_ppm > 0 ? "+" : ""}${fixed(r.offset_ppm, 1)} ppm offset)` : "") +
+          `; ratios summed over the top half of the peak (scans ${int(r.top_scans[0])}–${int(r.top_scans[1])}).`)),
+        field("File", sel, h("span.select-arrow", icon("expand_more")), "200px")));
+      if (r.note) { out.push(banner(r.note)); return out; }
+      const z = r.z, j0 = r.k.indexOf(0), best = t.hypotheses[0], none = t.hypotheses.find((d) => d.name === "none") || best;
+      const mono = r.mz[j0] != null ? r.mz[j0] : r.target_mz;
+      const tol = 0.004 + mono * r.ppm * 1e-6;
+      const specEl = h("div");
+      ms1Charts.push(track(P3.plot.mirror(specEl, {
+        height: 240, tol, prec: mono,
+        top: { mz: r.apex_mz, inten: r.apex_inten },
+        bottom: { mz: best.shift.map((d) => mono + d / z), inten: best.rel },
+        topLabel: `measured · ${r.file}`, bottomLabel: `predicted · ${best.formula} (${hypName(best.name)})`,
+        score: t.verdict === "halogen" ? `${hypName(t.best)} pattern` : t.verdict === "possible" ? `${hypName(t.best)}?` : "",
+      })));
+      out.push(specEl, P3.plot.legend([{ color: S1, label: "measured, at a predicted peak" }, { color: S2, label: "predicted pattern" },
+        { color: "--viz-neutral", label: "other ions in the scan" }, { kind: "dash", color: "--viz-muted", label: "the feature (M)" }]));
+      // the verdict and the numbers behind it
+      const head = h("div.ms1-verdict", verdictChip,
+        t.delta_chi2 != null ? h("span.body-small.muted", `Δχ² ${fixed(t.delta_chi2, 1)} for the best halogen hypothesis against the best halogen-free one (9 = call, 4 = possible)`) : null);
+      out.push(head);
+      if (t.verdict !== "none") {
+        const line = headEl && headEl.querySelector(".head-line:last-of-type");
+        if (line && !line.querySelector(".chip.halogen, .chip.maybe-halogen")) {
+          line.append(t.verdict === "halogen" ? h("span.chip.static.halogen", icon("science"), `${hypName(t.best)} isotope pattern`) :
+            h("span.chip.static.info.maybe-halogen", icon("info"), `${hypName(t.best)} pattern?`));
+        }
+      }
+      const rows = [];
+      for (let k = 1; k <= 4 && k < t.observed.rel.length; k++) {
+        const o = t.observed.rel[k], use = t.observed.usable[k], d = t.observed.shift[k];
+        rows.push(h("tr" + (use ? "" : ".off"),
+          h("td", `M+${k}`), h("td.num", o == null ? "–" : fixed(o, 3) + (use ? "" : " ✕")),
+          h("td.num", fixed(best.rel[k], 3)), h("td.num", fixed(none.rel[k], 3)),
+          h("td.num", k >= 2 && d != null ? fixed(d, 4) : "–"), h("td.num", k >= 2 ? fixed(best.shift[k], 4) : "–"), h("td.num", k >= 2 ? fixed(none.shift[k], 4) : "–")));
+      }
+      out.push(h("div.table-wrap.ms1-table", h("table.data",
+        h("thead", h("tr", h("th", "Peak"), h("th.num", "Observed / M"), h("th.num", `${hypName(best.name)} (best)`), h("th.num", "No halogen"),
+          h("th.num", "Spacing (Da·z)"), h("th.num", "Best"), h("th.num", "No halogen"))),
+        h("tbody", rows))));
+      const alt = t.hypotheses.slice(0, 4).map((d) => `${hypName(d.name)} ${d.formula} χ² ${fixed(d.chi2, 1)}`).join(" · ");
+      out.push(h("p.body-small.muted", `Carbon count fitted to M+1 (${int(best.n_c)} C in the best hypothesis); the rest of the skeleton scaled like an average organic molecule. ` +
+        `Spacing: 37Cl and 81Br sit ${fixed(0.0097, 4)} and ${fixed(0.0088, 4)} Da below 13C2 (σ ${fixed(t.sigma_da, 4)} Da at ${r.ppm} ppm). Ranking: ${alt}.`));
+      for (const f of t.flags) out.push(h("p.body-small.ms2-timing.off", icon("info"), f));
+      return out;
     }
 
     // ---------------------------------------------------------------- alignment
