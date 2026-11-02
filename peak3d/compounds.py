@@ -581,11 +581,12 @@ def group_iso_parent(A, gid, G, g_iso):
     has = par >= 0
     if not has.any():
         return out
-    # (file, row) -> gid of that row
+    # (file, row) -> gid of that row; a parent row that is not in A (dropped before alignment) resolves to -1, so the
+    # per-file table is sized by the largest row index referenced, not only by the rows present
     files = A["file"].values; rows = A["row"].values
     N = int(files.max()) + 1
     nrow = np.zeros(N, np.int64)
-    np.maximum.at(nrow, files, rows + 1)
+    np.maximum.at(nrow, files, np.maximum(rows, par) + 1)
     off = np.r_[0, np.cumsum(nrow)]
     row_gid = np.full(off[-1], -1, np.int64)
     row_gid[off[files] + rows] = gid
