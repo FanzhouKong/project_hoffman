@@ -25,7 +25,8 @@ from ..io import Cloud, _lower_bound, _upper_bound
 
 FORMAT = 1
 BASE_COLS = ("group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
-             "rt_sd", "iso_offset", "charge", "compound_id", "role", "neutral_mass", "is_base", "n_members")
+             "rt_sd", "iso_offset", "charge", "compound_id", "role", "neutral_mass", "is_base", "n_members",
+             "possible_halogen", "halogen_pattern")
 C13 = 1.0033548378          # 13C - 12C
 ISO_MAX_STEP = 3            # possible isotopes: M+1 .. M+3
 # defaults keep a report of a few hundred files under ~15 MB
@@ -263,14 +264,29 @@ def _take(off, arrays, idx):
 
 
 ID_TEXT = ("name", "precursor_type", "formula", "inchikey", "smiles")
-SPEC_CODE = {"consensus": 0, "single": 1}
+SPEC_CODE = {"consensus": 0, "single": 1, "consensus_denoised": 2, "single_denoised": 3}
 # what refresh_ids swaps: these arrays and header keys
 MS2_PREFIXES = ("ms2_", "ms2c_", "id_", "mk_")
 MS2_KEYS = ("ms2", "ms2c", "ids", "ann", "ms2_note")
 
 
-def _spectra(reps, row_of, prefix):
-    """one MS2 copy (ms2.read_representatives) as arrays keyed by table row, and its header part"""
+def _keep_mask(reps, den, k):
+    """per peak of the records k of reps (in that order): 1 when den, its denoised copy, holds the peak (the same m/z:
+    both files carry the same peak lines), else 0; a record den lacks lost all its peaks"""
+    off, doff = np.asarray(reps["off"]), np.asarray(den["off"])
+    at = {int(g): j for j, g in enumerate(den["group_id"])}
+    parts = []
+    for i in k:
+        m = reps["mz"][off[i]:off[i + 1]]
+        j = at.get(int(reps["group_id"][i]))
+        parts.append(np.zeros(len(m), np.uint8) if j is None else
+                     np.isin(m, den["mz"][doff[j]:doff[j + 1]]).astype(np.uint8))
+    return np.concatenate(parts) if parts else np.zeros(0, np.uint8)
+
+
+def _spectra(reps, row_of, prefix, den=None):
+    """one MS2 copy (ms2.read_representatives) as arrays keyed by table row, and its header part; with den (its
+    denoised copy) also {prefix}keep, which peaks the denoising kept"""
     k = np.array([i for i, g in enumerate(reps["group_id"]) if int(g) in row_of], np.int64)
     off, (mz, inten) = _take(np.asarray(reps["off"]), (reps["mz"], reps["inten"]), k)
     arrays = {f"{prefix}row": np.array([row_of[int(reps["group_id"][i])] for i in k], np.int32),
@@ -281,7 +297,10 @@ def _spectra(reps, row_of, prefix):
               f"{prefix}prec": np.asarray(reps["prec_mz"], np.float64)[k],
               f"{prefix}rt": np.asarray(reps["rt_s"], np.float32)[k], f"{prefix}off": off,
               f"{prefix}mz": mz.astype(np.float32), f"{prefix}int": inten.astype(np.float32)}
-    return arrays, {"n": int(len(k)), "file": [str(reps["file"][i]) for i in k], "scan": [str(reps["scan"][i]) for i in k]}
+    if den is not None:
+        arrays[f"{prefix}keep"] = _keep_mask(reps, den, k)
+    return arrays, {"n": int(len(k)), "file": [str(reps["file"][i]) for i in k], "scan": [str(reps["scan"][i]) for i in k],
+                    "denoised": den is not None}
 
 
 def _marks(output: Path, row_of, stems):
@@ -304,20 +323,25 @@ def _marks(output: Path, row_of, stems):
 
 def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
     """both MS2 copies of every group that has MS2 (ms2.read_representatives: the highest-TIC spectrum as ms2_*, the
-    consensus as ms2c_*), where their spectra were taken (mk_*), the hits of the last identity search on both
-    (identifications.tsv, .msp, .json; id_spec 0 consensus, 1 single) and the user's annotations, as header parts and
+    consensus as ms2c_*, each with the peaks its denoised copy kept as ms2_keep / ms2c_keep when the output has one),
+    where their spectra were taken (mk_*), the hits of the last identity search on all copies (identifications.tsv,
+    .msp, .json; id_spec SPEC_CODE, id_lib the library record, id_lk its spectrum among id_off/id_mz/id_int, each
+    library spectrum once) and the user's annotations, as header parts and
     arrays keyed by row of the aligned table (group_ids in table order; stems: its file columns, read from the table
     when not given). Header keys ms2 / ms2c / ids are None when the output has no such part; ann maps a row (as
     text) to the user's notes on it (annotations.load_user)"""
     from ..annotations import load_user, read_hits
-    from ..ms2 import read_representatives
+    from ..ms2 import DENOISED, SPECTRA, _comment, read_representatives
     output = Path(output)
     row_of = {int(g): i for i, g in enumerate(np.asarray(group_ids))}
     head, arrays = {"ms2": None, "ms2c": None, "ids": None, "ann": None}, {}
     for which, key, prefix in (("single", "ms2", "ms2_"), ("consensus", "ms2c", "ms2c_")):
         reps = read_representatives(output, which)
         if reps is not None and len(reps["group_id"]):
-            a, head[key] = _spectra(reps, row_of, prefix)
+            den = read_representatives(output, DENOISED[which])
+            if den is None and (output / SPECTRA[DENOISED[which]]).exists():
+                den = {"group_id": np.zeros(0, np.int64), "off": np.zeros(1, np.int64), "mz": np.zeros(0)}  # all removed
+            a, head[key] = _spectra(reps, row_of, prefix, den)
             arrays.update(a)
     if head["ms2"] is not None:
         if stems is None:
@@ -329,13 +353,19 @@ def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
         hits = hits.copy()                      # read_hits keeps its frame for the next caller
         meta = json.loads((output / "identifications.json").read_text()) if (output / "identifications.json").exists() else {}
         lib = None
+        hits["_rec"] = -1                         # each hit's record in identifications.msp
         if (output / "identifications.msp").exists():
             from ..library import read_msp
             lib = read_msp(output / "identifications.msp")
-            if len(lib.names) != len(hits):        # written together; a mismatch means a damaged pair
+            info = [_comment(c) for c in lib.comments]
+            if info and all("library_index" in d for d in info) and "library_index" in hits:   # one per library record
+                rec = {int(d["library_index"]): i for i, d in enumerate(info)}
+                hits["_rec"] = [rec.get(int(v), -1) for v in hits["library_index"]]
+            elif len(lib.names) == len(hits):        # older searches: one record per hit, in the table's order
+                hits["_rec"] = np.arange(len(hits))
+            if (hits["_rec"] < 0).any():             # written together; a mismatch means a damaged pair
                 lib = None
         hits["_row"] = [row_of.get(int(g), -1) for g in hits["group_id"]]
-        hits["_hit"] = np.arange(len(hits))
         hits["_spec"] = hits["spectrum"].map(SPEC_CODE).fillna(1).astype(np.uint8)
         hits = hits[hits["_row"] >= 0].sort_values(["_row", "_spec", "rank"], kind="stable")
         num = lambda c, d=np.nan: hits[c].to_numpy(np.float64) if c in hits else np.full(len(hits), d)
@@ -343,10 +373,13 @@ def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
                       id_rank=np.clip(num("rank", 1), 0, 65535).astype(np.uint16),
                       id_score=num("score").astype(np.float32),
                       id_nmatch=np.clip(np.nan_to_num(num("n_matched", 0)), 0, 65535).astype(np.uint16),
-                      id_ppm=num("ppm_error").astype(np.float32), id_prec=num("library_precursor_mz"))
+                      id_ppm=num("ppm_error").astype(np.float32), id_prec=num("library_precursor_mz"),
+                      id_lib=np.nan_to_num(num("library_index", -1), nan=-1).astype(np.int32))
         if lib is not None:
-            off, (mz, inten) = _take(np.asarray(lib.off), (lib.mz, lib.inten), hits["_hit"].to_numpy())
-            arrays.update(id_off=off, id_mz=mz.astype(np.float32), id_int=inten.astype(np.float32))
+            used, lk = np.unique(hits["_rec"].to_numpy(np.int64), return_inverse=True)
+            off, (mz, inten) = _take(np.asarray(lib.off), (lib.mz, lib.inten), used)
+            arrays.update(id_lk=lk.astype(np.int32), id_off=off, id_mz=mz.astype(np.float32),
+                          id_int=inten.astype(np.float32))
         head["ids"] = {**meta, "n": int(len(hits)), "spectra": lib is not None,
                        **{c: hits[c].fillna("").astype(str).tolist() if c in hits else [""] * len(hits)
                           for c in ID_TEXT}}
@@ -473,6 +506,14 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
                                       max(ppm, 5.0), rt_win)
     arrays["g_isoq"] = k_iso
     arrays["g_isoq_of"] = of_iso
+    halogen_names = None
+    if "possible_halogen" in table:         # 0 not tested, 1 no, 2 maybe, 3 yes; the best hypothesis by name
+        from ..halogen import HYPOTHESES, VERDICTS
+        v = table["possible_halogen"].fillna("").astype(str).to_numpy()
+        arrays["g_hal"] = np.array([VERDICTS.index(x) if x in VERDICTS else 0 for x in v], np.uint8)
+        halogen_names = [""] + [n for n, _ in HYPOTHESES]
+        b = table["halogen_pattern"].fillna("").astype(str).to_numpy() if "halogen_pattern" in table else np.full(G, "")
+        arrays["g_halhint"] = np.array([halogen_names.index(x) if x in halogen_names else 0 for x in b], np.uint8)
 
     # per-file values and how each cell was obtained: 3 detected, 2 gap-filled with a confirmed peak,
     # 1 gap-filled (no confirmed peak), 0 nothing
@@ -540,5 +581,5 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
               "quant": options.get("quant", "height"), "n_groups": G, "stems": stems, "files": files_info,
               "params": _clean(params), "matrix": matrix, "matrix_note": matrix_note, "eic": eic,
               "eic_note": eic_note, "residuals": residuals, "compounds": compounds,
-              "iso_rt_win": rt_win}
+              "iso_rt_win": rt_win, "halogen_names": halogen_names}
     return pack(_clean(header), arrays)

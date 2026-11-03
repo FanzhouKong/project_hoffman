@@ -110,7 +110,7 @@ reuse the compiled code.
 
 | file | content |
 |---|---|
-| `aligned_feature_table.tsv` | one row per feature: `mz`, `rt` (min), RT range, detection counts, isotope label (`iso_offset`, 0 = monoisotopic), `charge`, its compound group (`compound_id`, `role`, `neutral_mass`, `is_base`, `n_members`; see below), and one **height** column per file |
+| `aligned_feature_table.tsv` | one row per feature: `mz`, `rt` (min), RT range, detection counts, isotope label (`iso_offset`, 0 = monoisotopic), `charge`, its compound group (`compound_id`, `role`, `neutral_mass`, `is_base`, `n_members`; see below),, the halogen check (`possible_halogen` yes / maybe / no, `halogen_pattern` the best hypothesis, e.g. Cl2; see the GUI section) and one **height** column per file |
 | `compounds.tsv` | one row per compound group: base ion, members (group ids, m/z, roles), neutral mass |
 | `compound_pairs.tsv` | every co-eluting pair that was tested: shape correlation, intensity correlation, mass relation, joined or not |
 | `aligned_feature_area.tsv` | the same table with peak areas |
@@ -122,7 +122,8 @@ reuse the compiled code.
 | `report.html` | interactive report (feature map, feature table with chromatograms, RT alignment, run details); one self-contained file that opens in any browser, offline, and can be emailed |
 | `ms2_map.tsv` | every MS2 spectrum mapped to a feature (file, scan, time, precursor intensity and purity, whether it went into the consensus) |
 | `ms2_consensus.msp`, `ms2_spectra.msp` | two MS2 spectra per feature: the consensus of all its spectra, and the single highest-TIC spectrum |
-| `identifications.tsv`, `feature_annotations.tsv` | with `--library`: every library hit above 0.1 for both spectra, and each feature's annotation (step 5) |
+| `ms2_consensus_denoised.msp`, `ms2_spectra_denoised.msp` | the same two spectra denoised: only the ions with a plausible neutral loss from the precursor |
+| `identifications.tsv`, `feature_annotations.tsv` | with `--library`: every library hit above 0.1 for the four spectra, and each feature's annotation (step 5) |
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
 
@@ -145,9 +146,17 @@ feature then gets two spectra:
   in the MS1 scan before each spectrum.
 - **highest TIC**: the single spectrum with the highest total ion current.
 
-With `--library` (an `.msp` file, or a MassCube `.pkl`), both are searched (`--similarity`, default weighted
-entropy). Every hit scoring above 0.1 is listed in `identifications.tsv`. A feature's best consensus hit at or
-above `--min-similarity` (default 0.7) is its annotation in `feature_annotations.tsv`. In the app you can confirm
+Both are also denoised (`specdenoise`, tier T0 top-5): the precursor's possible formulas are worked out from the
+feature m/z, ranked by how much fragment intensity their sub-formulas explain, and an ion is kept only when its
+neutral loss is a plausible formula under one of the five best. The denoised copies keep the measured m/z and
+intensities of the ions they keep.
+
+With `--library` (an `.msp` file, or a MassCube `.pkl`), all four are searched (`--similarity`, default weighted
+entropy). A library spectrum scoring above 0.1 on a spectrum or on its denoised copy is listed in
+`identifications.tsv` for both (the `spectrum` column: `consensus`, `single`, `consensus_denoised`,
+`single_denoised`), so every hit has a raw and a denoised score. A feature's best hit on the denoised consensus
+at or above `--min-similarity` (default 0.7) is its annotation in `feature_annotations.tsv`; the app shows both
+scores and switches the head-to-tail plot between the denoised and the raw spectrum. In the app you can confirm
 it, pick another candidate or mark the feature unknown (the table's `reviewed` column says whether you did), write
 a comment, and give features red, blue or yellow stars to filter by. All of it is saved in `user_annotations.json`,
 kept apart from the search results, and used in the report and the exported tables (`reviewed`, `stars`,
@@ -173,16 +182,22 @@ one compound, `compound_id` in the tables); the same button sits in the feature'
 
 The standalone app above is the same GUI without a Python installation.
 
+**Halogen check.** Every run tests the MS1 isotope pattern of each monoisotopic feature, in the file where it is
+strongest, for chlorine and bromine (`--no-halogen-test` skips it): the ratios M+1..M+4 / M, summed over the top
+half of the peak, are fitted under elemental hypotheses (no halogen, S, S2, Cl1-4, Br1-3, BrCl, Br2Cl, BrCl2; the
+carbon count from M+1, N, O, P and H then filling the ion's mass), and where the mass accuracy allows, the spacing
+of M+2 adds evidence (37Cl and 81Br sit 0.010 and 0.009 Da below 13C2). A halogen is called when its best
+hypothesis beats the best halogen-free one by 9 chi-square units, "possible" above 4. Windows that do not co-elute
+with M are left out, a saturated M and a weak signal are flagged. The table gets `possible_halogen` (yes / maybe /
+no, empty for isotopes and features without signal) and `halogen_pattern` (the best hypothesis, e.g. Cl2); the
+feature list shows them as a **Halogen** column with a **Possible halogen** filter, and a called feature carries a
+chip in its header. The compositions shown are pattern models, not identifications.
+
 **Show MS1** (beside a feature's chromatograms) reads the MS1 spectrum at the feature's apex from the point-cloud
-cache of the file where it is strongest (any file can be chosen) and tests its isotope pattern for chlorine and
-bromine: the ratios M+1..M+4 / M, summed over the top half of the peak, are fitted under elemental hypotheses (no
-halogen, S, S2, Cl1-4, Br1-3, BrCl, Br2Cl, BrCl2; the carbon count from M+1, the rest of the skeleton scaled like an
-average organic molecule), and where the mass accuracy allows, the spacing of M+2 adds evidence (37Cl and 81Br sit
-0.010 and 0.009 Da below 13C2). A halogen is called when its best hypothesis beats the best halogen-free one by 9
-chi-square units, "possible" above 4. Windows that do not co-elute with M are left out, a saturated M and a weak
-signal are flagged, and a co-eluting peak one or two units below warns that the feature may not be the monoisotopic
-peak. The measured spectrum is drawn head-to-tail against the best hypothesis's pattern; a halogen call also marks
-the feature's header. The report has no button: it needs the server and the cache (`--keep-cache`).
+cache (the strongest file by default, any file on request) and draws it head-to-tail against the best hypothesis's
+pattern, with the ratios, spacings, flags and the ranking of the hypotheses; a co-eluting peak one or two units
+below warns that the feature may not be the monoisotopic peak. The report has no button: it needs the server and
+the cache (`--keep-cache`).
 
 On a cluster, start the GUI inside a job with `--host 0.0.0.0` and reach it through an SSH tunnel to that
 node; the access token in the link keeps other users out.

@@ -4,10 +4,17 @@
   "use strict";
   const { h, icon, fixed, int, compact, sci, duration } = P3;
   const S1 = "--viz-series-1", S2 = "--viz-series-2";
+  const SUB = { 0: "₀", 1: "₁", 2: "₂", 3: "₃", 4: "₄", 5: "₅", 6: "₆", 7: "₇", 8: "₈", 9: "₉" };
+  const sub = (t) => String(t).replace(/\d/g, (d) => SUB[d]);
+  const hypName = (name) => (name === "none" ? "no halogen" : name ? sub(name) : "–");   // Cl2 -> Cl₂
   const STATUS = ["not found", "gap-filled", "gap-filled (peak confirmed)", "detected"];
   const STARS = ["red", "blue", "yellow"];          // the user's own marks for features (annotations.STARS)
   const MARK = { red: ["mark_circle", "circle"], blue: ["mark_diamond", "diamond"], yellow: ["star", "star"] };   // icon, shape name
   const markIcon = (c, on) => icon(on ? MARK[c][0] : MARK[c][0] + "_outline");
+  // the MS2 copies a search scores (bundle.SPEC_CODE): consensus / highest TIC, each raw and denoised
+  const SPEC = { consensus: 0, single: 1, consensus_denoised: 2, single_denoised: 3 };
+  const SPEC_NAME = ["consensus", "single", "consensus_denoised", "single_denoised"];
+  const specOf = (copy, dn) => (copy === "consensus" ? 0 : 1) + (dn ? 2 : 0);
   // params.json stage_times_s keys (peak3d process, then peak3d external for the other kernels) and their labels
   const STAGE_KEYS = [["pick_s", "Picking"], ["align_s", "Alignment"], ["group_s", "Grouping"], ["gapfill_s", "Gap filling"], ["qc_s", "QC figures"],
     ["kernel_s", "{k}"], ["read_s", "Reading files"], ["ms2_s", "MS2 mapping"], ["identify_s", "Identity search"]];
@@ -42,16 +49,17 @@
       this.kernelVersion = header.kernel_version || this.params.peak3d_version || "";
       this.setMs2({ header, a });
     }
-    // both MS2 copies of each group (the consensus of all its spectra, m2c; the highest-TIC spectrum, m2), where their
-    // spectra were taken (marks), the hits of the last identity search on both copies (every hit above 0.1) and the
-    // user's annotations, all by table row; a new search hands in a bundle with only these parts
+    // both MS2 copies of each group (the consensus of all its spectra, m2c; the highest-TIC spectrum, m2) with the
+    // peaks their denoising kept (ms2c_keep, ms2_keep), where their spectra were taken (marks), the hits of the last
+    // identity search on every copy, raw and denoised (every hit above 0.1 on either, so each hit has a partner on the
+    // other) and the user's annotations, all by table row; a new search hands in a bundle with only these parts
     setMs2({ header, a }) {
       this.m2 = header.ms2 ? { h: header.ms2, a } : null;
       this.m2c = header.ms2 && header.ms2c ? { h: header.ms2c, a } : null;
       this.id = header.ms2 && header.ids ? { h: header.ids, a } : null;
       this.ms2At = new Map();
       this.ms2cAt = new Map();
-      this.idsAt = [new Map(), new Map()];      // [consensus, single]: row -> hit indices, best first
+      this.idsAt = SPEC_NAME.map(() => new Map());   // by copy (SPEC): row -> hit indices, best first
       this.marks = new Map();                   // row -> [{t (aligned s), kind: 1 consensus, 2 highest TIC, 3 both}]
       this.nms2 = new Uint16Array(this.G);
       if (this.m2) a.ms2_row.forEach((row, k) => { this.ms2At.set(row, k); this.nms2[row] = a.ms2_n[k]; });
@@ -64,7 +72,11 @@
         const m = this.idsAt[a.id_spec ? a.id_spec[j] : 1], l = m.get(row);
         if (l) l.push(j); else m.set(row, [j]);
       });
-      this.defSpec = this.m2c ? 0 : 1;                    // the copy whose best hit is the default annotation
+      // which copies have a denoised version to show, and whether the search scored them
+      this.dn = { consensus: !!(this.m2c && a.ms2c_keep), single: !!(this.m2 && a.ms2_keep) };
+      this.dnHits = !!this.id && (this.idsAt[2].size > 0 || this.idsAt[3].size > 0);
+      const d = this.id && this.id.h.default_spectrum;   // the copy whose best hit is the default annotation
+      this.defSpec = d != null && SPEC[d] != null ? SPEC[d] : this.m2c ? 0 : 1;
       this.minScore = this.id && this.id.h.min_score != null ? this.id.h.min_score : 0.7;
       this.setAnnotations(header.ann || {});
     }
@@ -137,7 +149,8 @@
     annotation(g) {
       const e = this.notes.get(g), u = e && e.annotation;
       if (u) return u.status === "unknown" ? { source: "user", unknown: true } : { source: "user", confirmed: !!u.confirmed, name: u.name,
-        adduct: u.precursor_type, formula: u.formula, inchikey: u.inchikey, smiles: u.smiles, score: u.score, spectrum: u.spectrum, rank: u.rank };
+        adduct: u.precursor_type, formula: u.formula, inchikey: u.inchikey, smiles: u.smiles, score: u.score, spectrum: u.spectrum, rank: u.rank,
+        lib: u.library_index != null ? u.library_index : -1 };
       const l = this.hits(g, this.defSpec);
       if (!l.length) return null;
       const b = this.hit(l[0]);
@@ -151,17 +164,38 @@
       if (this.nms2[g] <= 1) return true;
       return this.m2c.a.ms2c_merged[kc] === 1 && this.m2c.h.file[kc] === this.m2.h.file[ks] && this.m2c.h.scan[kc] === this.m2.h.scan[ks];
     }
-    // one copy's spectrum: which = "consensus" (k into m2c) or "single" (k into m2)
-    spectrum(which, k) {
+    // one copy's spectrum: which = "consensus" (k into m2c) or "single" (k into m2); dn: only the peaks the denoising kept
+    spectrum(which, k, dn) {
       const c = which === "consensus", a = (c ? this.m2c : this.m2).a, p = c ? "ms2c_" : "ms2_";
       const o0 = a[p + "off"][k], o1 = a[p + "off"][k + 1];
-      return { mz: a[p + "mz"].subarray(o0, o1), inten: a[p + "int"].subarray(o0, o1) };
+      const mz = a[p + "mz"].subarray(o0, o1), inten = a[p + "int"].subarray(o0, o1), keep = a[p + "keep"];
+      if (!dn || !keep) return { mz, inten };
+      const m = [], v = [];
+      for (let i = o0; i < o1; i++) if (keep[i]) { m.push(a[p + "mz"][i]); v.push(a[p + "int"][i]); }
+      return { mz: Float32Array.from(m), inten: Float32Array.from(v) };
+    }
+    // [peaks kept by the denoising, peaks] of one copy's spectrum (null when it has no denoised version)
+    kept(which, k) {
+      const c = which === "consensus", a = (c ? this.m2c : this.m2).a, p = c ? "ms2c_" : "ms2_", keep = a[p + "keep"];
+      if (!keep) return null;
+      const o0 = a[p + "off"][k], o1 = a[p + "off"][k + 1];
+      let n = 0;
+      for (let i = o0; i < o1; i++) n += keep[i];
+      return [n, o1 - o0];
+    }
+    // the same library record among row g's hits on copy spec (the other score of a hit), or null
+    partner(g, j, spec) {
+      if (j == null || !this.id || !this.id.a.id_lib) return null;
+      const lib = this.id.a.id_lib[j];
+      if (lib < 0) return null;
+      for (const t of this.hits(g, spec)) if (this.id.a.id_lib[t] === lib) return t;
+      return null;
     }
     hit(j) {
-      const a = this.id.a, h = this.id.h;
-      const spec = h.spectra ? { mz: a.id_mz.subarray(a.id_off[j], a.id_off[j + 1]), inten: a.id_int.subarray(a.id_off[j], a.id_off[j + 1]) } : null;
+      const a = this.id.a, h = this.id.h, k = a.id_lk ? a.id_lk[j] : j;     // id_lk: each library spectrum is sent once
+      const spec = h.spectra ? { mz: a.id_mz.subarray(a.id_off[k], a.id_off[k + 1]), inten: a.id_int.subarray(a.id_off[k], a.id_off[k + 1]) } : null;
       return { j, rank: a.id_rank[j], score: a.id_score[j], nmatch: a.id_nmatch[j], ppm: a.id_ppm[j], prec: a.id_prec[j],
-        spectrum: a.id_spec && !a.id_spec[j] ? "consensus" : "single",
+        spectrum: SPEC_NAME[a.id_spec ? a.id_spec[j] : 1], lib: a.id_lib ? a.id_lib[j] : -1,
         name: h.name[j], adduct: h.precursor_type[j], formula: h.formula[j], inchikey: h.inchikey[j], smiles: h.smiles[j], spec };
     }
     value(g, f) {
@@ -171,6 +205,9 @@
       return Math.pow(10, m.log10_lo + (q - 1) / 65534 * (m.log10_hi - m.log10_lo));
     }
     status(g, f) { return this.a.m_status ? this.a.m_status[g * this.N + f] : null; }
+    // the run's halogen check: 0 not tested, 1 no, 2 possible, 3 halogen; and the best hypothesis's name
+    hal(g) { return this.a.g_hal ? this.a.g_hal[g] : 0; }
+    halHint(g) { return this.a.g_halhint && this.h.halogen_names ? this.h.halogen_names[this.a.g_halhint[g]] || "" : ""; }
     eic(g) {
       const k = this.eicAt.get(g);
       if (k == null) return null;
@@ -205,17 +242,20 @@
   const TABLE_COLS = ["group_id", "mz", "rt_s", "rt_min_s", "rt_max_s", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
     "rt_sd_s", "iso_offset", "charge"];
   const COMPOUND_COLS = ["compound_id", "role", "neutral_mass", "is_base", "n_members", "possible_isotope"];
+  const HAL_COLS = ["possible_halogen", "halogen_pattern"];
+  const HAL_TEXT = ["", "no", "maybe", "yes"];
   const MS2_COLS = ["n_ms2", "n_consensus", "annotation", "annotation_source", "reviewed", "annotation_score", "annotation_adduct",
     "annotation_formula", "annotation_inchikey", "best_hit", "best_score", "stars", "comment"];
   function bundleTable(R, rows) {
     const a = R.a, num = (v, d) => (isFinite(v) ? v.toFixed(d) : ""), clean = (t) => String(t || "").replace(/[\t\r\n]+/g, " ");
     const notes = !!(R.m2 || R.notes.size);
-    const parts = [TABLE_COLS.concat(R.cid ? COMPOUND_COLS : [], notes ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
+    const parts = [TABLE_COLS.concat(R.cid ? COMPOUND_COLS : [], a.g_hal ? HAL_COLS : [], notes ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
     let buf = [];
     for (const g of rows) {
       const row = [a.g_id[g], a.g_mz[g].toFixed(6), num(60 * a.g_rt[g], 2), num(60 * a.g_rt_min[g], 2), num(60 * a.g_rt_max[g], 2),
         a.g_ndet[g], a.g_nconf[g], a.g_nfill[g], num(a.g_ppm[g], 3), num(60 * a.g_rtsd[g], 3), a.g_iso[g], a.g_z[g]];
       if (R.cid) row.push(a.g_cid[g], R.role(g), num(a.g_nm[g], 6), a.g_base[g], a.g_nmem[g], R.isoq && R.isoq[g] ? `M+${R.isoq[g]}` : "");
+      if (a.g_hal) row.push(HAL_TEXT[R.hal(g)] || "", R.halHint(g));
       if (notes) {
         const x = R.m2 ? R.annotation(g) : null, kc = R.ms2cAt.get(g), l = R.hits(g, R.defSpec), b = l.length ? R.hit(l[0]) : null;
         const named = x && !x.unknown;
@@ -237,7 +277,7 @@
     const R = new Results(bundle);
     const charts = [];
     const state = { tab: "overview", sel: null, sortKey: "max", sortDir: -1, query: "", mono: false, all: false, withEic: false, ppm: 10,
-      mzLo: "", mzHi: "", rtLo: "", rtHi: "", withMs2: false, identified: false, hit: null, autoSearched: false, copy: null,
+      mzLo: "", mzHi: "", rtLo: "", rtHi: "", withMs2: false, identified: false, halogen: false, hit: null, autoSearched: false, copy: null,
       starF: { red: false, blue: false, yellow: false }, cidF: null };
     let detailRefs = null, repaintRows = null;    // the Features page's detail parts and table, while it is shown
     let showSiblingsOf = null, clearCidF = null;  // the Features page's compound filter (list one compound's features)
@@ -335,6 +375,7 @@
         if (state.withEic && !R.eicAt.has(g)) continue;
         if (state.withMs2 && !R.nms2[g]) continue;
         if (state.identified && !R.annotated[g]) continue;
+        if (state.halogen && R.hal(g) < 2) continue;
         if (starOn && !R.stars(g).some((c) => state.starF[c])) continue;
         if (idq != null && a.g_id[g] !== idq) continue;
         if (mzq != null && Math.abs(a.g_mz[g] - mzq) / mzq * 1e6 > state.ppm) continue;
@@ -342,7 +383,7 @@
       }
       const key = {
         id: a.g_id, mz: a.g_mz, rt: a.g_rt, ndet: a.g_ndet, nfill: a.g_nfill, max: a.g_max, cv: a.g_cv, iso: a.g_iso,
-        ms2: R.nms2, score: R.annScore, cmp: R.cid ? a.g_nmem : null,
+        ms2: R.nms2, score: R.annScore, cmp: R.cid ? a.g_nmem : null, hal: a.g_hal,
       }[state.sortKey];
       if (mzq != null) out.sort((p, r) => Math.abs(a.g_mz[p] - mzq) - Math.abs(a.g_mz[r] - mzq));
       else if (state.sortKey === "ident") {         // annotated first, by name; then the rest by best score
@@ -430,7 +471,8 @@
       // the search settings and the filters sit above the feature list, so the detail columns start at the top
       const filters = [idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
-          R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, dl)];
+          R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null,
+          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, dl)];
       const mini = track(P3.plot.scatter(mapEl, {
         height: 210, x: R.rtS, y: a.g_mz, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
         xLabel: "RT (s)", yLabel: "m/z", xFmt: (v, d) => fixed(v, Math.min(d, 0)), yFmt: (v, d) => fixed(v, Math.min(d, 0)),
@@ -442,14 +484,16 @@
       const COLS = [["id", "ID", true], ...(R.m2 ? [["score", "Score", true], ["ident", "Annotation", true]] : []),
         ["mz", "m/z", true], ["rt", "RT (s)", true], ["width", "Width (s)", true], ["ndet", "Detected", true],
         ["nfill", "Gap-filled", true], ["max", "Max " + R.quant.toLowerCase(), true], ["cv", "CV", true], ["ion", "Ion", false],
+        ...(a.g_hal ? [["hal", "Halogen", false]] : []),
         ...(R.cid ? [["cmp", "Feature group", true]] : []),
         ...(R.m2 ? [["ms2", "MS2", true]] : [])];
-      const DESC = new Set(["max", "ndet", "ms2", "score", "cmp"]);
+      const DESC = new Set(["max", "ndet", "ms2", "score", "cmp", "hal"]);
       const thead = h("thead", h("tr", COLS.map(([k, label]) => {
         const th = h("th.sortable.r", { "data-k": k }, label);
-        if (k === "ion" || k === "ident") th.classList.remove("r");
+        if (k === "ion" || k === "ident" || k === "hal") th.classList.remove("r");
         if (k === "ion") th.title = "What the feature is within its feature group (the ions of one compound): M+n an isotope (peak shape confirmed), M+n? a possible isotope (mass arithmetic only), a named ion, or Δ the m/z difference to the compound's base ion";
         if (k === "cmp") th.title = "Feature group (the ions of one compound) and its size; the button lists only that group's features";
+        if (k === "hal") th.title = "The run's MS1 isotope check of each monoisotopic feature in its strongest file: the best hypothesis, with ? when only possible";
         th.addEventListener("click", () => {
           if (state.sortKey === k) state.sortDir *= -1; else { state.sortKey = k; state.sortDir = DESC.has(k) ? -1 : 1; }
           features_refresh();
@@ -498,9 +542,15 @@
           h("td.r", fixed(a.g_mz[g], 4)), h("td.r", fixed(R.rtS[g], 1)),
           h("td.r", fixed((a.g_rt_max[g] - a.g_rt_min[g]) * 60, 1)), h("td.r", `${a.g_ndet[g]}/${R.N}`),
           h("td.r", int(a.g_nfill[g])), h("td.r", sci(a.g_max[g])), h("td.r", isFinite(a.g_cv[g]) ? fixed(a.g_cv[g], 0) + "%" : "–"),
-          ionCell(g), ...(R.cid ? [cmpCell(g)] : []), ...(R.m2 ? [h("td.r", R.nms2[g] ? int(R.nms2[g]) : "–")] : []));
+          ionCell(g), ...(a.g_hal ? [halCell(g)] : []), ...(R.cid ? [cmpCell(g)] : []), ...(R.m2 ? [h("td.r", R.nms2[g] ? int(R.nms2[g]) : "–")] : []));
         tr.addEventListener("click", () => select(g));
         return tr;
+      }
+      function halCell(g) {
+        const v = R.hal(g);
+        if (v === 3) return h("td.hal.yes", { title: `halogen isotope pattern (${hypName(R.halHint(g))})` }, icon("science"), hypName(R.halHint(g)));
+        if (v === 2) return h("td.hal.maybe", { title: `possibly halogenated (${hypName(R.halHint(g))})` }, hypName(R.halHint(g)) + "?");
+        return h("td.muted", v === 1 ? "no" : "–");
       }
       // the annotation's score; for a feature not annotated, its best hit's score, greyed
       function scoreCell(g) {
@@ -613,7 +663,7 @@
         if (!R.id) return st.library ? "Not searched yet with this library." : "Choose a spectral library (.msp or MassCube .pkl); the search then runs by itself whenever a setting changes.";
         const m = R.id.h;
         return `${int(R.nAnnotated)} of ${int(R.m2.h.n)} features with MS2 annotated${R.nByUser ? ` (${int(R.nByUser)} by you)` : ""} · ` +
-          `${m.method_label || m.method} ≥ ${fixed(m.min_score, 2)} on the consensus spectrum · ${int(m.n_hits != null ? m.n_hits : m.n)} hits above ${fixed(m.list_min != null ? m.list_min : 0.1, 1)} listed · ` +
+          `${m.method_label || m.method} ≥ ${fixed(m.min_score, 2)} on the ${m.default_label || "consensus spectrum"} · ${int(m.n_hits != null ? m.n_hits : m.n)} hits above ${fixed(m.list_min != null ? m.list_min : 0.1, 1)} listed · ` +
           `${base(m.library)}${m.library_n ? ` (${int(m.library_n)} spectra)` : ""}${m.seconds != null ? ` · ${fixed(m.seconds, 1)} s` : ""}`;
       };
       status.textContent = summary();
@@ -649,8 +699,8 @@
       go.addEventListener("click", run);
       if (R.m2 && !R.id && st.library && !state.autoSearched) { state.autoSearched = true; setTimeout(run, 0); }   // automatic on open
       return card(".elevated.id-card", "Identity search",
-        "Both MS2 spectra of each feature (the consensus and the highest-TIC spectrum) against a spectral library: candidates within the precursor tolerance of the feature m/z, scored on cleaned spectra (precursor region removed, peaks below 1 % dropped). " +
-        "Every hit above 0.1 is listed; the best consensus hit at or above the threshold becomes the feature's annotation, which you can change per feature.",
+        "Both MS2 spectra of each feature (the consensus and the highest-TIC spectrum), each as measured and denoised (only ions whose neutral loss from the precursor is a plausible formula), against a spectral library: candidates within the precursor tolerance of the feature m/z, scored on cleaned spectra (precursor region removed, peaks below 1 % dropped). " +
+        "Every hit above 0.1 on either version is listed with both scores; the best hit on the denoised consensus at or above the threshold becomes the feature's annotation, which you can change per feature.",
         h("div.id-form",
           field("Library (.msp, .pkl)", libIn, browseBtn ? h("span.trail", browseBtn) : null),
           field("Similarity", sel, h("span.select-arrow", icon("expand_more"))),
@@ -724,6 +774,8 @@
             h("span.chip.static" + (all ? ".ok" : ".info"), icon(all ? "check_circle" : "info"), `Detected in ${a.g_ndet[g]} of ${R.N} files`),
             ionChip, baseChip, cmpBtn, nmChip, a.g_z[g] > 0 ? h("span.chip.static", `z = ${a.g_z[g]}`) : null,
             a.g_nfill[g] ? h("span.chip.static", `${a.g_nfill[g]} gap-filled`) : null,
+            R.hal(g) === 3 ? h("span.chip.static.halogen", { title: "the run's MS1 isotope check; Show MS1 shows the pattern" }, icon("science"), `${hypName(R.halHint(g))} isotope pattern`) :
+              R.hal(g) === 2 ? h("span.chip.static.info.maybe-halogen", { title: "the run's MS1 isotope check; Show MS1 shows the pattern" }, icon("info"), `${hypName(R.halHint(g))} pattern?`) : null,
             R.reviewed(g) ? h("span.chip.static.ok", icon("check"), "Reviewed") : null)),
         stars));
     }
@@ -773,6 +825,10 @@
       return h("p.body-small.ms2-timing" + (ok ? ".ok" : ".off"), { title: "On the aligned RT axis, as the red marks on the chromatogram" }, icon(ok ? "check_circle" : "info"), text);
     }
 
+    // a hit's matching and score, for the line under the head-to-tail plot
+    const scoreLine = (method, b, other, otherLabel) => `${method} ${fixed(b.score, 3)}` +
+      (other ? ` (${otherLabel} ${fixed(other.score, 3)})` : "") + ` · ${int(b.nmatch)} peak${b.nmatch === 1 ? "" : "s"} matched`;
+
     function annoColumn(g) {
       if (!R.m2) return [h("p.body-medium.muted", "These results hold no MS2 spectra: nothing to search."), commentBlock(g)];
       const kc = R.ms2cAt.get(g), ks = R.ms2At.get(g), n = R.nms2[g];
@@ -780,11 +836,18 @@
       const one = R.oneSpectrum(g);
       if (one || state.copy == null || (state.copy === "consensus" && kc == null)) state.copy = kc != null ? "consensus" : "single";
       const copy = state.copy, k = copy === "consensus" ? kc : ks, M = copy === "consensus" ? R.m2c : R.m2;
+      // raw or denoised: the denoised spectrum by default, when the results have one; the search's hits follow
+      const canDn = R.dn[copy];
+      if (state.dn == null) state.dn = true;
+      const dn = canDn && state.dn, both = canDn && R.dnHits;
+      const spec = specOf(copy, both && dn), other = both ? specOf(copy, !dn) : null;
       const merged = kc != null ? R.m2c.a.ms2c_merged[kc] : 1, files = kc != null ? R.m2c.a.ms2c_files[kc] : 1;
       const where = `${M.h.file[k]}, scan ${M.h.scan[k]}, ${fixed(M.a[copy === "consensus" ? "ms2c_rt" : "ms2_rt"][k], 1)} s`;
-      const desc = one ? `${n <= 1 ? "The only MS2 spectrum" : `The one usable MS2 spectrum of the ${int(n)}`}: ${where}.` :
+      const kept = canDn ? R.kept(copy, k) : null;
+      const desc = (one ? `${n <= 1 ? "The only MS2 spectrum" : `The one usable MS2 spectrum of the ${int(n)}`}: ${where}.` :
         copy === "consensus" ? `${merged} of ${int(n)} spectra${files > 1 ? ` from ${files} files` : ""} merged (peaks in ≥ 2 spectra, weighted by precursor abundance); most abundant: ${where}.` :
-          `Highest TIC of the ${int(n)}: ${where}.`;
+          `Highest TIC of the ${int(n)}: ${where}.`) +
+        (kept ? ` Denoising (neutral losses from the feature m/z, ${(R.id && R.id.h.denoise) || "T0 top-5"}) kept ${int(kept[0])} of ${int(kept[1])} peaks.` : "");
       // 1. which spectrum, how it agrees with the other copy and with the chromatogram
       const top = [];
       if (!one) {
@@ -794,23 +857,57 @@
         sel.addEventListener("change", () => { state.copy = sel.value; state.hit = null; renderAnno(g); });
         top.push(field("Spectrum", sel, h("span.select-arrow", icon("expand_more")), "230px"));
         const vs = kc != null && R.m2c.a.ms2c_vs ? R.m2c.a.ms2c_vs[kc] : NaN;
-        if (isFinite(vs)) top.push(h("p.body-small.vs-note" + (vs >= 0.8 ? ".ok" : ".off"), { title: "Weighted entropy similarity of the consensus and the highest-TIC spectrum, cleaned as for the search" },
+        if (isFinite(vs)) top.push(h("p.body-small.vs-note" + (vs >= 0.8 ? ".ok" : ".off"), { title: "Weighted entropy similarity of the consensus and the highest-TIC spectrum (raw), cleaned as for the search" },
           icon(vs >= 0.8 ? "check_circle" : "info"), `Consensus vs highest TIC: ${fixed(vs, 2)}`));
       }
       const when = ms2Timing(g, one ? "single" : copy);
       if (when) top.push(when);
       const out = [h("div.copy-pick", ...top), h("p.body-small.muted.ms2-desc", desc)];
-      const hits = R.hits(g, copy === "consensus" ? 0 : 1);
+      const hits = R.hits(g, spec);
+      if (state.hit != null && !hits.includes(state.hit)) state.hit = R.partner(g, state.hit, spec);   // the same record, other copy
       if (state.hit == null || !hits.includes(state.hit)) state.hit = hits.length ? hits[0] : null;
+      const lib = R.id ? R.id.a.id_lib : null;
+      const otherOf = new Map(other != null && lib ? R.hits(g, other).map((j) => [lib[j], j]) : []);
+      const pair = (j) => (j != null && lib && lib[j] >= 0 && otherOf.has(lib[j]) ? R.hit(otherOf.get(lib[j])) : null);
       const method = R.id ? String(R.id.h.method_label || R.id.h.method || "score").replace(/ similarity$/i, "") : "";
-      const spec = () => {
+      const spectrum = () => {
         const b = state.hit != null ? R.hit(state.hit) : null;
-        return { top: R.spectrum(copy, k), bottom: b && b.spec ? b.spec : null, bottomLabel: b ? b.name : null, prec: R.a.g_mz[g],
-          score: b ? `${method} ${fixed(b.score, 3)} · ${int(b.nmatch)} peak${b.nmatch === 1 ? "" : "s"} matched` : null };
+        return { top: R.spectrum(copy, k, dn), bottom: b && b.spec ? b.spec : null, bottomLabel: b ? b.name : null, prec: R.a.g_mz[g],
+          score: b ? scoreLine(method, b, pair(state.hit), dn ? "raw" : "denoised") : null,
+          topLabel: (copy === "consensus" && !one ? "consensus" : "measured") + (dn ? ", denoised" : "") };
       };
-      // 2. head-to-tail with the score and the precursor; drag to zoom
+      // 2. head-to-tail with the score and the precursor; drag to zoom. Its tabs: the denoised or the raw spectrum, each
+      // with the selected candidate's score on it (the zoom is kept across the switch)
+      let tabs = null;
+      // each tab's note: the selected candidate's score on that spectrum, or its peak count when nothing is scored
+      const paintTabs = () => {
+        if (!tabs) return;
+        const b = state.hit != null ? R.hit(state.hit) : null, p = pair(state.hit);
+        tabs.querySelectorAll(".tab").forEach((t, i) => {
+          const on = i === 0;
+          t.querySelector(".tab-note").textContent = b && both ? fixed((on === dn ? b : p || { score: NaN }).score, 3) :
+            `${int(on ? kept[0] : kept[1])} peaks`;
+        });
+      };
+      if (canDn) {
+        tabs = h("div.tabs.spec-tabs", { role: "tablist", "aria-label": "MS2 spectrum shown" }, [[true, "Denoised"], [false, "Raw"]].map(([v, label]) => {
+          const t = h("button.tab.state", { type: "button", role: "tab", "aria-selected": String(v === dn),
+            title: v ? "Only the ions whose neutral loss from the precursor is a plausible formula (specdenoise)" : "The spectrum as measured (or merged)" },
+            label, h("span.tab-note"));
+          t.addEventListener("click", () => {
+            if (v === dn) return;
+            state.dn = v;
+            state.view = chart.view;
+            renderAnno(g);
+          });
+          return t;
+        }));
+        paintTabs();
+        out.push(h("div.spec-head", tabs, R.dnHits || !R.id ? null : h("span.body-small.muted", "Search again to score the denoised spectra")));
+      }
       const specEl = h("div");
-      const chart = track(P3.plot.mirror(specEl, Object.assign({ height: 250, topLabel: copy === "consensus" && !one ? "consensus" : "measured", tol: (R.id && R.id.h.fragment_tol) || 0.02 }, spec())));
+      const chart = track(P3.plot.mirror(specEl, Object.assign({ height: 250, tol: (R.id && R.id.h.fragment_tol) || 0.02 }, spectrum())));
+      if (state.view) { chart.view = state.view; state.view = null; chart.draw(); }
       annoCharts.push(chart);
       out.push(specEl);
       if (R.id) out.push(P3.plot.legend([{ color: S1, label: "measured, matched" }, { color: S2, label: "library, matched" }, { color: "--viz-neutral", label: "unmatched" },
@@ -818,10 +915,11 @@
       // 3. the selected candidate: structure beside its name, facts and the user's annotation
       const picEl = h("div.cmp-pic"), infoEl = h("div"), annBox = h("div"), recEl = h("div");
       const drawCand = () => {
-        const b = state.hit != null ? R.hit(state.hit) : null;
+        const b = state.hit != null ? R.hit(state.hit) : null, p = pair(state.hit);
         picEl.replaceChildren(structure(b));
         infoEl.replaceChildren(...(b ? [h("div.cmp-name", b.name),
-          h("div.cmp-score.num", `${fixed(b.score, 3)}`, h("span.body-small.muted", ` ${method} · ${int(b.nmatch)} peaks · candidate ${b.rank}`)),
+          h("div.cmp-score.num", `${fixed(b.score, 3)}`, h("span.body-small.muted", ` ${method}${both ? (dn ? " · denoised" : " · raw") : ""} · ${int(b.nmatch)} peaks · candidate ${b.rank}`)),
+          p ? h("div.body-small.muted.num", `${dn ? "Raw" : "Denoised"}: ${fixed(p.score, 3)} · ${int(p.nmatch)} peaks · candidate ${p.rank}`) : null,
           h("div.cmp-facts.body-small", [b.formula, b.adduct, isFinite(b.ppm) ? `${fixed(b.ppm, 1)} ppm` : null].filter(Boolean).join(" · "))] : []));
         recEl.replaceChildren(b ? kv([["InChIKey", b.inchikey ? h("code.mono.wrap", b.inchikey) : null], ["SMILES", b.smiles ? h("code.mono.wrap", b.smiles) : null],
           ["Library precursor", isFinite(b.prec) ? `m/z ${fixed(b.prec, 4)} (${fixed(b.ppm, 1)} ppm)` : null]]) : h("span"));
@@ -832,25 +930,31 @@
       else if (!hits.length) tableParts.push(banner(`No library spectrum scoring above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)} (${R.id.h.method_label || R.id.h.method}) within the precursor tolerance.`));
       else {
         const x = R.annotation(g);
+        // both scores of every candidate when the search scored the denoised copy: the shown copy's first (it orders the list)
+        const cols = both ? ["#", "Library match", dn ? "Denoised" : "Raw", dn ? "Raw" : "Denoised", "Adduct", "Formula", "Δ ppm", "Peaks"] :
+          ["#", "Library match", "Score", "Adduct", "Formula", "Δ ppm", "Peaks"];
+        const right = both ? [0, 2, 3, 6, 7] : [0, 2, 5, 6];
         const tb = h("tbody", hits.map((j) => {
-          const b = R.hit(j);
-          const chosen = x && !x.unknown && x.name === b.name && x.spectrum === b.spectrum && x.rank === b.rank;
+          const b = R.hit(j), p = both ? pair(j) : null;
+          const chosen = x && !x.unknown && x.name === b.name && (x.lib == null || x.lib < 0 || x.lib === b.lib);
           const tr = h("tr" + (b.score < R.minScore ? ".below" : ""), { "aria-selected": String(j === state.hit) }, h("td.r", b.rank),
             h("td.ident", { title: b.name }, h("span.id-name", b.name), chosen ? h("span.id-user", "annotation") : null),
-            h("td.r", fixed(b.score, 3)), h("td", b.adduct || "–"), h("td", b.formula || "–"), h("td.r", fixed(b.ppm, 1)), h("td.r", int(b.nmatch)));
+            h("td.r", fixed(b.score, 3)), both ? h("td.r.muted", p ? fixed(p.score, 3) : "–") : null,
+            h("td", b.adduct || "–"), h("td", b.formula || "–"), h("td.r", fixed(b.ppm, 1)), h("td.r", int(b.nmatch)));
           tr.addEventListener("click", () => {
             state.hit = j;
             tb.querySelectorAll("tr").forEach((r) => r.setAttribute("aria-selected", String(r === tr)));
-            chart.update(spec());
+            chart.update(spectrum());
+            paintTabs();
             drawCand();
             drawAnn();
           });
           return tr;
         }));
         const nBelow = hits.filter((j) => R.id.a.id_score[j] < R.minScore).length;
-        tableParts.push(h("div.table-wrap.hits.scroll", h("table.data", h("thead", h("tr", ["#", "Library match", "Score", "Adduct", "Formula", "Δ ppm", "Peaks"]
-          .map((t, i) => h("th" + ([0, 2, 5, 6].includes(i) ? ".r" : ""), t)))), tb)),
-          h("p.body-small.muted", { style: { margin: "6px 0 0" } }, `${int(hits.length)} above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)}` +
+        tableParts.push(h("div.table-wrap.hits.scroll", h("table.data", h("thead", h("tr", cols
+          .map((t, i) => h("th" + (right.includes(i) ? ".r" : ""), { title: both && (i === 2 || i === 3) ? `${method} on the ${t.toLowerCase()} spectrum` : null }, t)))), tb)),
+          h("p.body-small.muted", { style: { margin: "6px 0 0" } }, `${int(hits.length)} listed (above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)}${both ? " on the raw or the denoised spectrum" : ""}), ordered by the ${both ? (dn ? "denoised" : "raw") + " " : ""}score` +
             (nBelow ? `; ${int(nBelow)} below the annotation threshold ${fixed(R.minScore, 2)} (grey)` : "") + ". Click one to compare."));
         drawCand();
       }
@@ -868,7 +972,7 @@
     // replaced by the user, or "unknown"; set in the app (opts.annotate), shown read-only in a report
     function userAnnotation(g) {
       const x = R.annotation(g), e = R.notes.get(g), user = !!(e && e.annotation);
-      const out = [h("div.ann-label.label-medium.muted", { title: `Default: the best consensus candidate scoring ≥ ${fixed(R.minScore, 2)}. Used in the report and the export.` }, "Annotation")];
+      const out = [h("div.ann-label.label-medium.muted", { title: `Default: the best candidate on the ${(R.id && R.id.h.default_label) || "consensus spectrum"} scoring ≥ ${fixed(R.minScore, 2)}. Used in the report and the export.` }, "Annotation")];
       if (!x) {
         const bs = R.bestScore(g);
         out.push(h("p.body-small.muted", { style: { margin: "2px 0 0" } }, !R.id ? "Not annotated: no identity search yet." : isFinite(bs) ?
@@ -882,12 +986,12 @@
       }
       if (opts.annotate && R.id) {
         const pick = state.hit != null ? R.hit(state.hit) : null;
-        const same = pick && x && !x.unknown && x.name === pick.name && x.spectrum === pick.spectrum && x.rank === pick.rank;
+        const same = pick && x && !x.unknown && x.name === pick.name && (x.lib == null || x.lib < 0 ? x.spectrum === pick.spectrum && x.rank === pick.rank : x.lib === pick.lib);
         const short = (t) => (t.length > 28 ? t.slice(0, 26) + "…" : t);
         const btns = [];
         if (x && x.source === "library") {
           const ok = h("button.btn.filled.state", { type: "button" }, icon("check"), "Confirm");
-          ok.addEventListener("click", () => setAnnotation(g, { spectrum: R.defSpec ? "single" : "consensus", rank: 1 }));
+          ok.addEventListener("click", () => setAnnotation(g, { spectrum: SPEC_NAME[R.defSpec], rank: 1 }));
           btns.push(ok);
         }
         if (pick && !same) {
@@ -1056,9 +1160,6 @@
     // on request (the Show MS1 button beside the chromatograms): the MS1 spectrum at the feature's apex in one file, its
     // isotope pattern against the best elemental hypothesis, and the halogen test (peak3d.halogen). Needs the app's
     // server and the point-cloud cache, so a report shows no button.
-    const SUB = { 0: "₀", 1: "₁", 2: "₂", 3: "₃", 4: "₄", 5: "₅", 6: "₆", 7: "₇", 8: "₈", 9: "₉" };
-    const sub = (t) => String(t).replace(/\d/g, (d) => SUB[d]);
-    const hypName = (name) => (name === "none" ? "no halogen" : sub(name));
     function ms1Control(g) {
       if (!opts.ms1) return { button: null, box: null };
       const box = h("div.ms1-box");
@@ -1113,7 +1214,7 @@
         height: 240, tol, prec: mono,
         top: { mz: r.apex_mz, inten: r.apex_inten },
         bottom: { mz: best.shift.map((d) => mono + d / z), inten: best.rel },
-        topLabel: `measured · ${r.file}`, bottomLabel: `predicted · ${best.formula} (${hypName(best.name)})`,
+        topLabel: `measured · ${r.file}`, bottomLabel: `predicted · ${hypName(best.name)}, pattern model [${best.formula}]${t.ion}`,
         score: t.verdict === "halogen" ? `${hypName(t.best)} pattern` : t.verdict === "possible" ? `${hypName(t.best)}?` : "",
       })));
       out.push(specEl, P3.plot.legend([{ color: S1, label: "measured, at a predicted peak" }, { color: S2, label: "predicted pattern" },
@@ -1141,8 +1242,9 @@
         h("thead", h("tr", h("th", "Peak"), h("th.num", "Observed / M"), h("th.num", `${hypName(best.name)} (best)`), h("th.num", "No halogen"),
           h("th.num", "Spacing (Da·z)"), h("th.num", "Best"), h("th.num", "No halogen"))),
         h("tbody", rows))));
-      const alt = t.hypotheses.slice(0, 4).map((d) => `${hypName(d.name)} ${d.formula} χ² ${fixed(d.chi2, 1)}`).join(" · ");
-      out.push(h("p.body-small.muted", `Carbon count fitted to M+1 (${int(best.n_c)} C in the best hypothesis); the rest of the skeleton scaled like an average organic molecule. ` +
+      const alt = t.hypotheses.slice(0, 4).map((d) => `${hypName(d.name)} [${d.formula}]${t.ion}${Math.abs(d.mass_error_mda) > 20 ? ` (${fixed(d.mass_error_mda, 0)} mDa off)` : ""} χ² ${fixed(d.chi2, 1)}`).join(" · ");
+      out.push(h("p.body-small.muted", `The compositions are pattern models, not identifications: the carbon count comes from M+1 (${int(best.n_c)} C in the best hypothesis), ` +
+        `N, O and H then fill the ion's mass (${fixed(best.mass_error_mda, 1)} mDa off). ` +
         `Spacing: 37Cl and 81Br sit ${fixed(0.0097, 4)} and ${fixed(0.0088, 4)} Da below 13C2 (σ ${fixed(t.sigma_da, 4)} Da at ${r.ppm} ppm). Ranking: ${alt}.`));
       for (const f of t.flags) out.push(h("p.body-small.ms2-timing.off", icon("info"), f));
       return out;
