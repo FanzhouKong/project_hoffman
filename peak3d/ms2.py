@@ -12,10 +12,14 @@ measured tolerance when that is larger. When several features qualify, the
 one strongest in that file wins, then the one with the closest apex. Each feature keeps all its spectra in
 ms2_map.tsv and two spectra for the search: the consensus of all of them, from every file (consensus.build:
 precursor-weighted, a peak needs two spectra), in ms2_consensus.msp, and the single spectrum with the highest total
-ion current (MassCube's choice) in ms2_spectra.msp."""
+ion current (MassCube's choice) in ms2_spectra.msp. Both are also written denoised (denoise_copies: specdenoise's
+neutral-loss rule, tier T0 top-5, judged from the feature m/z alone) to ms2_consensus_denoised.msp and
+ms2_spectra_denoised.msp: the same records holding only the ions the rule keeps; the search scores all four."""
 from __future__ import annotations
 
+import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,7 +31,17 @@ from .io import precursor_error
 
 MAP_COLUMNS = ["group_id", "file", "scan", "rt_s", "rt_aligned_s", "precursor_mz", "precursor_intensity",
                "precursor_purity", "tic", "n_peaks", "representative", "in_consensus", "consensus_status"]
-SPECTRA = {"consensus": "ms2_consensus.msp", "single": "ms2_spectra.msp"}      # the two copies of each feature
+SPECTRA = {"consensus": "ms2_consensus.msp", "single": "ms2_spectra.msp",      # the two copies of each feature,
+           "consensus_denoised": "ms2_consensus_denoised.msp",                  # and each with the noise removed
+           "single_denoised": "ms2_spectra_denoised.msp"}
+RAW = ("consensus", "single")
+DENOISED = {c: f"{c}_denoised" for c in RAW}
+DENOISE = dict(tier="t0", top_k=5)       # specdenoise.Params: precursor m/z only; losses of the 5 best candidate formulas
+DENOISE_LABEL = "T0 top-5"
+LABEL = {"consensus": "consensus spectrum", "single": "highest-TIC spectrum",
+         "consensus_denoised": "denoised consensus spectrum", "single_denoised": "denoised highest-TIC spectrum"}
+DEFAULT_ORDER = ("consensus_denoised", "consensus", "single_denoised", "single")   # whose best hit annotates a feature
+POOL_MIN = 200                           # fewer spectra than this are denoised in-process (a pool costs seconds to start)
 
 
 class Collector(list):
@@ -182,10 +196,12 @@ def _stale(output: Path):
         (output / name).unlink(missing_ok=True)
 
 
-def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_tol: float = 0.02) -> pd.DataFrame:
+def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_tol: float = 0.02, workers: int = 1,
+                  denoise: bool = True) -> pd.DataFrame:
     """assign every stored MS2 spectrum to an aligned feature; writes ms2_map.tsv (all assigned spectra),
-    ms2_spectra.msp (each feature's highest-TIC spectrum) and ms2_consensus.msp (each feature's consensus spectrum).
-    Returns the map (empty when the files had no MS2)."""
+    ms2_spectra.msp (each feature's highest-TIC spectrum) and ms2_consensus.msp (each feature's consensus spectrum),
+    and, with denoise, their denoised copies (denoise_copies, on workers processes). Returns the map (empty when the
+    files had no MS2)."""
     from .consensus import build
     from .library import write_msp_record
     from .similarity import METHOD_CODE, clean, score
@@ -214,7 +230,8 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_t
         sets[s] = ms
         val = np.nan_to_num(table[s].to_numpy(np.float64), nan=0.0)
         t_al = _aligned_time(output, s, ms.rt)
-        prec = ms.precursor_on_ms1() * (1.0 - _mz_offset_curve(output, s, ms.rt, mz_off.get(s, 0.0)) * 1e-6)
+        moff = _mz_offset_curve(output, s, ms.rt, mz_off.get(s, 0.0))
+        prec = ms.precursor_on_ms1() * (1.0 - moff * 1e-6)
         tol = max(float(ppm), ms.tol_ppm)
         g = _assign(g_sorted, order, g_lo, g_hi, g_rt, val, prec, t_al, tol, float(da_floor))
         k = np.flatnonzero(g >= 0)
@@ -227,7 +244,7 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_t
                                    "rt_s": np.round(ms.rt[k] * 60.0, 3), "rt_aligned_s": np.round(t_al[k] * 60.0, 3),
                                    "precursor_mz": ms.prec_mz[k], "precursor_intensity": ms.prec_int[k],
                                    "precursor_purity": ms.purity[k], "tic": ms.tic[k],
-                                   "n_peaks": np.diff(ms.off)[k]}))
+                                   "n_peaks": np.diff(ms.off)[k], "mz_off": moff[k]}))
     n_all = sum(len(m) for m in sets.values())
     if qc:
         (output / "qc").mkdir(exist_ok=True)
@@ -271,7 +288,7 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_t
                 ("Comment", f"group_id={int(t['group_id'])} n_ms2={len(d)} n_merged={len(c.used)} "
                             f"n_files={d['file'].iloc[c.used].nunique()} file=\"{t['file']}\" scan=\"{t['scan']}\" "
                             f"rt_s={t['rt_s']:.3f} precursor={t['precursor_mz']:.6f} n_dropped={c.n_dropped} "
-                            f"vs_single={vs:.4f}")],
+                            f"vs_single={vs:.4f} mz_offset_ppm={np.median(d['mz_off'].to_numpy()[c.used]):.3f}")],
                 c.mz, np.round(c.inten / c.inten.max() * 1000.0, 3))
     m["in_consensus"] = in_cons
     m["consensus_status"] = status
@@ -285,10 +302,172 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_t
                 ("RETENTIONTIME", f"{g_rt[r.g]:.4f}"),
                 ("IONMODE", {"pos": "Positive", "neg": "Negative"}.get(ms.polarity, "")),
                 ("Comment", f'group_id={int(r.group_id)} file="{r.file}" scan="{r.scan}" rt_s={r.rt_s:.3f} '
-                            f"precursor={r.precursor_mz:.6f} tic={r.tic:.6g} n_ms2={int(n_per[r.g])}")],
+                            f"precursor={r.precursor_mz:.6f} tic={r.tic:.6g} n_ms2={int(n_per[r.g])} "
+                            f"mz_offset_ppm={r.mz_off:.3f}")],
                 ms.mz[a:b], ms.inten[a:b])
     log(f"ms2: {len(m)} of {n_all} spectra mapped to {m['g'].nunique()} features")
+    for c in RAW:                   # never an earlier run's denoised copies next to these
+        (output / SPECTRA[DENOISED[c]]).unlink(missing_ok=True)
+    if denoise:
+        try:
+            denoise_copies(output, workers)
+        except Exception as e:      # the raw copies stand on their own
+            for c in RAW:
+                (output / SPECTRA[DENOISED[c]]).unlink(missing_ok=True)
+            log(f"ms2 denoising skipped: {e!r}")
     return m[MAP_COLUMNS]
+
+
+# ------------------------------------------------------------------ denoising ----
+def _msp_blocks(path) -> list[tuple[list[str], list[str]]]:
+    """the records of an MSP file we wrote (library.write_msp_record): (field lines, peak lines) each"""
+    out = []
+    for block in Path(path).read_text(encoding="utf-8").split("\n\n"):
+        lines = [x for x in block.split("\n") if x.strip()]
+        k = next((i for i, x in enumerate(lines) if x.lower().startswith("num peaks:")), None)
+        if k is not None:
+            out.append((lines[:k], lines[k + 1:]))
+    return out
+
+
+def _field(head: list[str], key: str) -> str:
+    key = key.lower() + ":"
+    return next((x.split(":", 1)[1].strip() for x in head if x.lower().startswith(key)), "")
+
+
+def _denoise_many(items) -> tuple[list, int]:
+    """keep masks of [(mz, intensity, precursor m/z, charge), ...] by specdenoise (DENOISE), and how many spectra it
+    could not judge (an error leaves the spectrum whole)"""
+    from specdenoise import Params, denoise
+    p = Params(**DENOISE)
+    out, failed = [], 0
+    for mz, it, pmz, z in items:
+        keep = np.ones(len(mz), bool)
+        if len(mz) and np.isfinite(pmz) and pmz > 0:
+            try:
+                keep = np.asarray(denoise(mz, it, pmz, charge=z, params=p).keep, bool)
+            except Exception:
+                failed += 1
+        out.append(keep)
+    return out, failed
+
+
+def _denoise_chunk(job):
+    idx, items = job
+    masks, failed = _denoise_many(items)
+    return idx, masks, failed
+
+
+def _keep_masks(items, workers: int) -> tuple[list, int]:
+    """_denoise_many over items, on up to workers processes: the heaviest precursors (the slowest to judge) spread
+    across the chunks. The kernels and the loss table are made ready here first, so the workers only load them."""
+    if not items:
+        return [], 0
+    first, f0 = _denoise_many(items[:1])
+    n = len(items)
+    if workers <= 1 or n < POOL_MIN:
+        rest, f1 = _denoise_many(items[1:])
+        return first + rest, f0 + f1
+    from multiprocessing import get_context
+    order = np.argsort([-(x[2] if np.isfinite(x[2]) else 0.0) for x in items[1:]], kind="stable") + 1
+    n_chunks = min(len(order), 8 * workers)
+    jobs = [(order[c::n_chunks], [items[i] for i in order[c::n_chunks]]) for c in range(n_chunks)]
+    masks, failed = [None] * n, f0
+    masks[0] = first[0]
+    with get_context("spawn").Pool(min(workers, n_chunks)) as pool:
+        for idx, ms, f in pool.imap_unordered(_denoise_chunk, jobs):
+            failed += f
+            for i, m in zip(idx, ms):
+                masks[i] = m
+    return masks, failed
+
+
+def denoise_copies(output, workers: int = 1) -> dict:
+    """write ms2_consensus_denoised.msp and ms2_spectra_denoised.msp: every record of the raw copy with only the ions
+    specdenoise keeps (DENOISE: tier T0, the precursor's formula inferred from the feature m/z). A spectrum is judged
+    on the feature's charge (the table's, 1 when unknown) and on its file's scale moved to the table's by the m/z
+    offset in its Comment (mz_offset_ppm, 0 when absent); the written m/z values are the raw ones. A record left
+    without peaks is not written. Returns {copy: (spectra, peaks before, peaks kept)}."""
+    from .pipeline import log
+    output = Path(output)
+    tic = time.perf_counter()
+    t = pd.read_csv(output / "aligned_feature_table.tsv", sep="\t", usecols=lambda c: c in ("group_id", "charge"))
+    z_of = dict(zip(t["group_id"].astype(int), t["charge"].fillna(0).astype(int))) if "charge" in t else {}
+    todo = []
+    for raw in RAW:
+        (output / SPECTRA[DENOISED[raw]]).unlink(missing_ok=True)
+        src = output / SPECTRA[raw]
+        if not src.exists():
+            continue
+        blocks = _msp_blocks(src)
+        items = []
+        for head, peaks in blocks:
+            info = _comment(_field(head, "comment"))
+            v = np.array("\t".join(x.strip() for x in peaks).split(), np.float64).reshape(-1, 2)
+            sign = -1 if _field(head, "ionmode").lower().startswith("n") else 1
+            z = sign * max(1, abs(int(z_of.get(int(info.get("group_id", -1)), 0))))
+            off = float(info.get("mz_offset_ppm", 0.0))
+            pmz = float(_field(head, "precursormz") or "nan")
+            items.append((v[:, 0] * (1.0 - off * 1e-6), v[:, 1], pmz, z))
+        todo.append((raw, blocks, items))
+    masks, failed = _keep_masks([x for _, _, items in todo for x in items], max(1, int(workers)))
+    counts, at = {}, 0
+    for raw, blocks, items in todo:
+        mk = masks[at:at + len(items)]
+        at += len(items)
+        tmp = output / (SPECTRA[DENOISED[raw]] + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for (head, peaks), keep in zip(blocks, mk):
+                kept = [peaks[j] for j in np.flatnonzero(keep)]
+                if not kept:
+                    continue
+                fh.write("".join((x + f" denoised={DENOISE_LABEL.replace(' ', '_')} n_raw={len(peaks)}"
+                                  if x.lower().startswith("comment:") else x) + "\n" for x in head))
+                fh.write(f"Num Peaks: {len(kept)}\n" + "".join(x + "\n" for x in kept) + "\n")
+        tmp.replace(output / SPECTRA[DENOISED[raw]])
+        counts[raw] = (len(items), int(sum(len(k) for k in mk)), int(sum(int(k.sum()) for k in mk)))
+    if counts:
+        part = ", ".join(f"{'consensus' if c == 'consensus' else 'highest TIC'} {k / max(n, 1):.0%} of {n} peaks"
+                         for c, (_, n, k) in counts.items())
+        log(f"ms2 denoised ({DENOISE_LABEL}): {sum(v[0] for v in counts.values())} spectra, kept {part}"
+            f"{f'; {failed} could not be judged and were left whole' if failed else ''} "
+            f"({time.perf_counter() - tic:.1f} s, {max(1, int(workers))} worker{'s' if workers > 1 else ''})")
+    return counts
+
+
+def default_workers() -> int:
+    """processes for denoising outside a run (a search in the app): the CPUs this process may use, at most 8"""
+    try:
+        n = len(os.sched_getaffinity(0))
+    except AttributeError:
+        n = os.cpu_count() or 1
+    return max(1, min(8, n))
+
+
+def default_copy(output) -> str:
+    """the copy whose best hit is a feature's default annotation: the first of DEFAULT_ORDER the output holds"""
+    output = Path(output)
+    for c in DEFAULT_ORDER:
+        p = output / SPECTRA[c]
+        if p.exists() and p.stat().st_size:
+            return c
+    return "single"
+
+
+def ensure_denoised(output, workers: int = 1) -> bool:
+    """denoise_copies when a raw copy has no denoised one yet, or a newer one (outputs made before the denoising);
+    True when the denoised copies are there afterwards"""
+    output = Path(output)
+    for c in RAW:                   # a denoised copy never outlives its raw one
+        if not (output / SPECTRA[c]).exists():
+            (output / SPECTRA[DENOISED[c]]).unlink(missing_ok=True)
+    raw = [output / SPECTRA[c] for c in RAW if (output / SPECTRA[c]).exists()]
+    if not raw:
+        return False
+    den = [output / SPECTRA[DENOISED[c]] for c in RAW if (output / SPECTRA[c]).exists()]
+    if not all(d.exists() and d.stat().st_mtime >= r.stat().st_mtime for r, d in zip(raw, den)):
+        denoise_copies(output, workers)
+    return any(d.exists() for d in den)
 
 
 # key=value pairs of our Comment lines; file and scan are quoted (Thermo spectrum ids hold spaces and "=")
@@ -301,7 +480,8 @@ def _comment(text: str) -> dict:
 
 def read_representatives(output, which: str = "single") -> dict | None:
     """one copy of every feature's MS2 spectrum (which: "single" = ms2_spectra.msp, the highest-TIC spectrum;
-    "consensus" = ms2_consensus.msp), as arrays in file order: group_id, n_ms2, n_merged (spectra in the consensus,
+    "consensus" = ms2_consensus.msp; "single_denoised", "consensus_denoised": their denoised copies), as arrays in
+    file order: group_id, n_ms2, n_merged (spectra in the consensus,
     1 for single), vs_single (consensus only: its weighted entropy similarity to the highest-TIC spectrum; nan
     otherwise), prec_mz (the feature's m/z), rt_s (the native time of that, or the consensus's most abundant,
     spectrum), file, scan, ion_mode, off, mz, inten. None when the output has no such file or it is empty."""

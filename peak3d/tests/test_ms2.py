@@ -242,14 +242,18 @@ def test_process_maps_ms2_and_identifies(tmp_path):
     assert (out / "ms2" / "S0.npz").exists() and pd.read_csv(out / "features" / "manifest.tsv", sep="\t")["n_ms2"].tolist() == [12, 12]
     t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
     hits = pd.read_csv(out / "identifications.tsv", sep="\t")
-    assert set(hits["spectrum"]) == {"consensus", "single"}
+    assert set(hits["spectrum"]) == set(ms2.SPECTRA)          # consensus and highest TIC, raw and denoised
     top = hits[(hits["rank"] == 1) & (hits["spectrum"] == "consensus")].merge(t[["group_id", "mz"]], on="group_id")
     names = {j: f"compound {j}" for j in range(len(base))}
     right = sum(any(abs(row.mz - base[j][0]) < 0.005 and row.name == names[j] for j in range(12)) for row in top.itertuples())
     assert len(top) >= 10 and right == len(top)
+    # the annotation: the best hit on the denoised consensus (these random fragments lose ions to the denoising)
+    assert json.loads((out / "identifications.json").read_text())["default_spectrum"] == "consensus_denoised"
+    dtop = hits[(hits["rank"] == 1) & (hits["spectrum"] == "consensus_denoised")].set_index("group_id")
     ann = pd.read_csv(out / "feature_annotations.tsv", sep="\t").set_index("group_id")
-    assert (ann.loc[top["group_id"], "annotation"] == top["name"].to_numpy()).all()
-    assert set(ann.loc[top["group_id"], "source"]) == {"library"}
+    lib_ann = ann[ann["source"] == "library"]
+    assert set(lib_ann.index) == set(dtop.index[dtop["score"] >= 0.7])
+    assert (lib_ann["annotation"] == dtop.loc[lib_ann.index, "name"]).all() and (lib_ann["spectrum"] == "consensus_denoised").all()
     info = json.loads((out / "params.json").read_text())
     assert "ms2_s" in info["stage_times_s"] and info["options"]["similarity"] == "entropy"
     # re-search with another score through the identify command
@@ -259,3 +263,167 @@ def test_process_maps_ms2_and_identifies(tmp_path):
     assert json.loads((out / "identifications.json").read_text())["method"] == "dot"
     r = subprocess.run([sys.executable, "-m", "peak3d", "identify", str(out)], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode != 0 and "--library" in r.stderr
+
+
+# ------------------------------------------------------------------ denoising ----
+LOSSES = ["H2O", "NH3", "CO2", "C2H4O2", "CH3", "H2O2", "CH5N3"]   # plausible losses from creatine [M+H]+
+NOISE = [0.5, 3.37, 7.77, 11.11, 25.3]                              # no formula has these masses
+
+
+def _creatine(shift_ppm=0.0):
+    """[M+H]+ of creatine: fragments at plausible losses (true) and ions at impossible ones, m/z ascending, the m/z
+    read shift_ppm high"""
+    from specdenoise import formula as fm
+    p, z = fm.precursor_formula(fm.parse("C4H9N3O2"), "[M+H]+")
+    pmz = fm.ion_mz(p, z)
+    mz = [fm.ion_mz(p - fm.parse(x), z) for x in LOSSES] + [pmz - d for d in NOISE]
+    it = [100.0 - 5 * i for i in range(len(LOSSES))] + [20.0, 17.0, 13.0, 9.0, 6.0]
+    true = [True] * len(LOSSES) + [False] * len(NOISE)
+    o = np.argsort(mz)
+    return pmz, np.array(mz)[o] * (1 + shift_ppm * 1e-6), np.array(it)[o], np.array(true)[o]
+
+
+def _denoise_output(tmp_path, consensus=True):
+    """an output with feature 1 (creatine + noise), feature 2 (the same, its file 60 ppm high, which its Comment
+    says) and feature 3 (only ions no loss explains)"""
+    out = tmp_path / "dn"
+    out.mkdir()
+    pmz, mz, it, _ = _creatine()
+    pd.DataFrame({"group_id": [1, 2, 3], "mz": [pmz, pmz, 400.0], "rt": [1.0, 2.0, 3.0], "rt_min": [0.9, 1.9, 2.9],
+                  "rt_max": [1.1, 2.1, 3.1], "charge": [1, 1, 0], "A": [1e5, 1e5, 1e5]}).to_csv(
+        out / "aligned_feature_table.tsv", sep="\t", index=False)
+    pd.DataFrame({"group_id": [1, 2, 3], "file": ["A"] * 3, "scan": ["s1", "s2", "s3"], "rt_s": [60.0, 120.0, 180.0],
+                  "representative": [1, 1, 1],
+                  "in_consensus": [1, 1, 1]}).to_csv(out / "ms2_map.tsv", sep="\t", index=False)
+    _, far, _, _ = _creatine(60.0)
+    for name in ("ms2_spectra.msp",) + (("ms2_consensus.msp",) if consensus else ()):
+        with open(out / name, "w", encoding="utf-8") as fh:
+            for g, m, off in ((1, mz, 0.0), (2, far, 60.0)):
+                write_msp_record(fh, [("NAME", f"feature_{g}"), ("PRECURSORMZ", f"{pmz:.6f}"), ("IONMODE", "Positive"),
+                                      ("Comment", f'group_id={g} file="A" scan="s{g}" rt_s=60.0 n_ms2=2 '
+                                                  f"mz_offset_ppm={off:.3f}")], m, it)
+            write_msp_record(fh, [("NAME", "feature_3"), ("PRECURSORMZ", "400.000000"), ("IONMODE", "Positive"),
+                                  ("Comment", "group_id=3 n_ms2=1")], np.array([120.5, 180.5]), np.array([10.0, 20.0]))
+    return out, pmz, mz, it
+
+
+def test_denoise_keeps_plausible_losses_and_raw_values(tmp_path):
+    from specdenoise import Params, denoise
+    out, pmz, mz, it = _denoise_output(tmp_path)
+    _, _, _, true = _creatine()
+    counts = ms2.denoise_copies(out)
+    assert counts["single"] == (3, 26, 14) and counts["consensus"] == (3, 26, 14)
+    for raw in ms2.RAW:
+        d = ms2.read_representatives(out, ms2.DENOISED[raw])
+        assert d["group_id"].tolist() == [1, 2]                       # feature 3 lost every ion: not written
+        r = ms2.read_representatives(out, raw)
+        a, b = d["off"][0], d["off"][1]
+        assert np.array_equal(d["mz"][a:b], r["mz"][r["off"][0]:r["off"][1]][true])     # the raw values, a subset
+        assert d["n_ms2"].tolist() == [2, 2] and d["file"] == ["A", "A"]
+        k = r["off"][1]
+        assert np.array_equal(d["mz"][b:d["off"][2]], r["mz"][k:r["off"][2]][true])     # judged on the table's scale
+    # without the offset the file's 60 ppm would cost fragments
+    _, far, _, _ = _creatine(60.0)
+    assert denoise(far, it, pmz, params=Params(**ms2.DENOISE)).keep.sum() < true.sum()
+    text = (out / "ms2_spectra_denoised.msp").read_text()
+    assert "denoised=T0_top-5 n_raw=12" in text and "Num Peaks: 7" in text
+    assert ms2.default_copy(out) == "consensus_denoised"
+
+
+def test_ensure_denoised_follows_the_raw_copies(tmp_path):
+    out, *_ = _denoise_output(tmp_path, consensus=False)
+    assert ms2.ensure_denoised(out) and (out / "ms2_spectra_denoised.msp").exists()
+    assert not (out / "ms2_consensus_denoised.msp").exists() and ms2.default_copy(out) == "single_denoised"
+    t = (out / "ms2_spectra_denoised.msp").stat().st_mtime_ns
+    assert ms2.ensure_denoised(out) and (out / "ms2_spectra_denoised.msp").stat().st_mtime_ns == t   # current: kept
+    (out / "ms2_spectra_denoised.msp").write_text("")                  # damaged or from an older raw copy: redone
+    import os
+    os.utime(out / "ms2_spectra_denoised.msp", ns=(0, 0))
+    assert ms2.ensure_denoised(out) and "feature_2" in (out / "ms2_spectra_denoised.msp").read_text()
+
+
+def test_denoise_on_worker_processes_matches_in_process(tmp_path, monkeypatch):
+    out, *_ = _denoise_output(tmp_path)
+    ms2.denoise_copies(out)
+    one = (out / "ms2_consensus_denoised.msp").read_text()
+    monkeypatch.setattr(ms2, "POOL_MIN", 0)
+    ms2.denoise_copies(out, workers=2)
+    assert (out / "ms2_consensus_denoised.msp").read_text() == one
+
+
+def test_map_to_groups_writes_denoised_copies(tmp_path):
+    out, m, i = _fake_output(tmp_path)
+    ms2.map_to_groups(out)
+    for raw in ms2.RAW:
+        assert (out / ms2.SPECTRA[ms2.DENOISED[raw]]).exists()
+        r = ms2.read_representatives(out, raw)
+        d = ms2.read_representatives(out, ms2.DENOISED[raw])
+        if d is None:
+            continue
+        for k, g in enumerate(d["group_id"]):                        # every denoised record is a subset of its raw one
+            j = r["group_id"].tolist().index(g)
+            assert np.isin(d["mz"][d["off"][k]:d["off"][k + 1]], r["mz"][r["off"][j]:r["off"][j + 1]]).all()
+    single = read_msp(out / "ms2_spectra.msp")
+    assert all("mz_offset_ppm=" in c for c in single.comments)
+    ms2.map_to_groups(out, denoise=False)
+    assert not (out / "ms2_spectra_denoised.msp").exists()
+
+
+def test_identify_scores_raw_and_denoised(tmp_path):
+    from peak3d.library import identify
+    out, pmz, mz, it = _denoise_output(tmp_path)
+    _, _, _, true = _creatine()
+    lib = tmp_path / "lib.msp"
+    with open(lib, "w") as fh:
+        write_msp_record(fh, [("NAME", "creatine"), ("PRECURSORMZ", pmz), ("IONMODE", "Positive")], mz[true], it[true])
+        write_msp_record(fh, [("NAME", "decoy"), ("PRECURSORMZ", pmz + 0.0005), ("IONMODE", "Positive")],
+                         mz[~true], it[~true])
+    rows = identify(out, lib, min_score=0.9)
+    assert set(rows["spectrum"]) == set(ms2.SPECTRA)
+    # every listed record has its partner on the other version of the copy
+    key = lambda s: set(zip(rows.loc[rows["spectrum"] == s, "group_id"], rows.loc[rows["spectrum"] == s, "library_index"]))
+    for raw in ms2.RAW:
+        assert key(raw) == key(ms2.DENOISED[raw])
+    best = rows[rows["rank"] == 1].set_index(["spectrum", "group_id"])
+    assert best.loc[("consensus_denoised", 1), "name"] == "creatine"
+    assert best.loc[("consensus_denoised", 1), "score"] > best.loc[("consensus", 1), "score"]      # noise gone
+    assert best.loc[("consensus_denoised", 1), "score"] == pytest.approx(1.0, abs=1e-3)
+    info = json.loads((out / "identifications.json").read_text())
+    assert info["default_spectrum"] == "consensus_denoised" and info["denoise"] == ms2.DENOISE_LABEL
+    ann = pd.read_csv(out / "feature_annotations.tsv", sep="\t").set_index("group_id")
+    assert ann.loc[1, "annotation"] == "creatine" and ann.loc[1, "spectrum"] == "consensus_denoised"
+    assert ann.loc[1, "score"] == pytest.approx(best.loc[("consensus_denoised", 1), "score"], abs=1e-4)
+    # each library spectrum once in identifications.msp
+    hits_msp = read_msp(out / "identifications.msp")
+    assert len(hits_msp) == rows["library_index"].nunique() and all("library_index=" in c for c in hits_msp.comments)
+
+
+def test_bundle_carries_denoised_masks_and_hit_pairs(tmp_path):
+    from peak3d.library import identify
+    from peak3d.web import bundle
+    out, pmz, mz, it = _denoise_output(tmp_path)
+    _, _, _, true = _creatine()
+    lib = tmp_path / "lib.msp"
+    with open(lib, "w") as fh:
+        write_msp_record(fh, [("NAME", "creatine"), ("PRECURSORMZ", pmz), ("IONMODE", "Positive")], mz[true], it[true])
+    rows = identify(out, lib, min_score=0.9)
+    head, a = bundle.ms2_ids(out, [1, 2, 3], stems=["A"])
+    assert head["ms2"]["denoised"] and head["ms2c"]["denoised"]
+    o, rows_c = a["ms2c_off"], a["ms2c_row"].tolist()
+    k0, k2 = rows_c.index(0), rows_c.index(2)
+    assert a["ms2c_keep"][o[k0]:o[k0 + 1]].astype(bool).tolist() == true.tolist()     # the creatine ions
+    assert a["ms2c_keep"][o[k2]:o[k2 + 1]].sum() == 0                                  # feature 3: none kept
+    assert len(a["ms2_keep"]) == len(a["ms2_mz"])
+    # the hits: four copies, partners share the library record, its spectrum sent once
+    assert set(a["id_spec"].tolist()) == {0, 1, 2, 3} and len(a["id_row"]) == len(rows)
+    assert set(a["id_lib"].tolist()) == {0} and len(a["id_off"]) == 2 and (a["id_lk"] == 0).all()
+    assert np.allclose(a["id_mz"], mz[true], atol=1e-5)
+    assert head["ids"]["default_spectrum"] == "consensus_denoised" and head["ids"]["denoise"] == ms2.DENOISE_LABEL
+    # identifications.msp of an older search (one record per hit, no library_index) still reaches the viewer
+    with open(out / "identifications.msp", "w") as fh:
+        for r in rows.itertuples():
+            write_msp_record(fh, [("NAME", r.name), ("PRECURSORMZ", pmz),
+                                  ("Comment", f"group_id={r.group_id} spectrum={r.spectrum} rank={r.rank}")],
+                             mz[true], it[true])
+    head, a = bundle.ms2_ids(out, [1, 2, 3], stems=["A"])
+    assert head["ids"]["spectra"] and len(a["id_off"]) - 1 == len(rows) and sorted(a["id_lk"].tolist()) == list(range(len(rows)))

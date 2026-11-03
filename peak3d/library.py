@@ -242,32 +242,54 @@ def _cleaned_library(lib: Library, tol: float, idx: np.ndarray):
 LIST_MIN = 0.1        # every hit scoring above this is listed; min_score only decides the default annotation
 
 
+def _in_order(gid, other):
+    """the spectra of other (a read_representatives dict) in the order of the group ids gid, as CSR (off, mz,
+    intensity); empty where other has no record of that group"""
+    at = {int(g): i for i, g in enumerate(other["group_id"])}
+    src = np.array([at.get(int(g), -1) for g in gid], np.int64)
+    o = np.asarray(other["off"], np.int64)
+    lens = np.where(src >= 0, (o[1:] - o[:-1])[np.maximum(src, 0)], 0)
+    off = np.zeros(len(gid) + 1, np.int64)
+    np.cumsum(lens, out=off[1:])
+    sel = np.repeat(o[np.maximum(src, 0)] - off[:-1], lens) + np.arange(off[-1])
+    return off, np.asarray(other["mz"])[sel], np.asarray(other["inten"])[sel]
+
+
 def identify(output, library_path, method: str = "weighted_entropy", precursor_ppm: float = 10.0,
              fragment_tol: float = 0.02, min_score: float = 0.7, top_k: int | None = None,
-             precursor_da: float | None = None) -> pd.DataFrame:
-    """search both MS2 copies of every feature (ms2.SPECTRA: the consensus of all its spectra and the single
-    highest-TIC spectrum) in the library and list every hit scoring above LIST_MIN (or at least min_score, when that is
-    lower), top_k per feature and copy when given. min_score is the annotation threshold: a feature's best consensus
-    hit at or above it is its default annotation (annotations.py). precursor_da (Da) replaces precursor_ppm as the
-    precursor window when given. Writes identifications.tsv (one row per hit, spectrum = consensus or single),
-    identifications.msp (the library spectrum of every hit), identifications.json (settings and counts) and
-    feature_annotations.tsv, replacing earlier ones."""
+             precursor_da: float | None = None, workers: int = 1) -> pd.DataFrame:
+    """search the MS2 copies of every feature (ms2.SPECTRA: the consensus of all its spectra and the single
+    highest-TIC spectrum, each raw and denoised; an output made before the denoising is denoised first, on workers
+    processes) in the library. A library record is listed on a raw copy and on its denoised copy alike when it scores
+    above LIST_MIN (or at least min_score, when that is lower) on either, so every listed hit has both scores; ranks
+    are per copy, and top_k (when given) keeps the records within the top_k of either. min_score is the annotation
+    threshold: a feature's best hit on the default copy (the denoised consensus; the consensus or the single
+    spectrum for outputs without it) at or above it is its default annotation (annotations.py). precursor_da (Da)
+    replaces precursor_ppm as the precursor window when given. Writes identifications.tsv (one row per hit, spectrum
+    = the copy), identifications.msp (the library spectrum of every listed record once, Comment library_index=...),
+    identifications.json (settings, default copy and counts) and feature_annotations.tsv, replacing earlier ones."""
     from . import ms2
-    from .annotations import default_copy, write_table
+    from .annotations import write_table
     from .pipeline import log
     from .similarity import METHOD_CODE, clean_batch, score_pairs
     if method not in METHODS:
         raise ValueError(f"unknown similarity {method!r}; one of {', '.join(METHODS)}")
     output = Path(output)
     tic = time.perf_counter()
+    try:
+        denoised = ms2.ensure_denoised(output, workers)
+    except Exception as e:        # the raw copies are searched regardless
+        denoised = False
+        log(f"ms2 denoising skipped: {e!r}")
+    t_dn = time.perf_counter() - tic
     lib = load(library_path)
-    t_load = time.perf_counter() - tic
+    t_load = time.perf_counter() - tic - t_dn
     parts, nq = [], 0
-    for which in ms2.SPECTRA:
-        q = ms2.read_representatives(output, which)
+    for raw in ms2.RAW:
+        q = ms2.read_representatives(output, raw)
         if q is None:
             continue
-        if which == "single":
+        if raw == "single":
             nq = len(q["group_id"])
         if not len(lib):
             continue
@@ -276,52 +298,71 @@ def identify(output, library_path, method: str = "weighted_entropy", precursor_p
                                  lib.precursor_index())
         if not len(pq):
             continue
-        qo, qm, qi = clean_batch(q["off"], q["mz"], q["inten"].astype(np.float64), q["prec_mz"], fragment_tol)
         uniq, inv = np.unique(pl, return_inverse=True)
         lo, lm, li = _cleaned_library(lib, fragment_tol, uniq)
-        sc, nm = score_pairs(qo, qm, qi, lo, lm, li, pq, inv.astype(np.int64), METHOD_CODE[method],
-                             float(fragment_tol))
-        hits = pd.DataFrame({"q": pq, "lib": pl, "score": sc, "n_matched": nm})
-        hits = hits[((hits["score"] > LIST_MIN) | (hits["score"] >= min_score)) & (hits["n_matched"] > 0)]
-        hits = hits.sort_values(["q", "score", "n_matched"], ascending=[True, False, False], kind="stable")
+        copies = [(raw, q["off"], q["mz"], q["inten"])]
+        qd = ms2.read_representatives(output, ms2.DENOISED[raw]) if denoised else None
+        if qd is not None:
+            copies.append((ms2.DENOISED[raw], *_in_order(q["group_id"], qd)))
+        scored = []
+        for name, off, mz, inten in copies:
+            qo, qm, qi = clean_batch(np.asarray(off, np.int64), np.asarray(mz, np.float64),
+                                     np.asarray(inten, np.float64), q["prec_mz"], fragment_tol)
+            sc, nm = score_pairs(qo, qm, qi, lo, lm, li, pq, inv.astype(np.int64), METHOD_CODE[method],
+                                 float(fragment_tol))
+            scored.append((name, sc, nm))
+        listed = np.zeros(len(pq), bool)
+        for _, sc, nm in scored:
+            listed |= ((sc > LIST_MIN) | (sc >= min_score)) & (nm > 0)
         if top_k:
-            hits = hits.groupby("q", sort=False).head(top_k)
-        hits = hits.copy()
-        hits["rank"] = hits.groupby("q", sort=False).cumcount() + 1
-        L = hits["lib"].to_numpy()
-        lp = lib.precursor_mz[L]
-        parts.append(pd.DataFrame({
-            "group_id": q["group_id"][hits["q"].to_numpy()], "spectrum": which, "rank": hits["rank"].to_numpy(),
-            "score": hits["score"].round(4).to_numpy(), "n_matched": hits["n_matched"].to_numpy(),
-            "name": [lib.names[i] for i in L], "precursor_type": [lib.precursor_type[i] for i in L],
-            "formula": [lib.formula[i] for i in L], "inchikey": [lib.inchikey[i] for i in L],
-            "smiles": [lib.smiles[i] for i in L], "library_precursor_mz": lp,
-            "ppm_error": np.round((q["prec_mz"][hits["q"].to_numpy()] - lp) / lp * 1e6, 2), "library_index": L}))
+            near = np.zeros(len(pq), bool)
+            for _, sc, nm in scored:
+                i = np.flatnonzero(listed)
+                h = pd.DataFrame({"q": pq[i], "score": sc[i], "n": nm[i], "i": i})
+                h = h.sort_values(["q", "score", "n"], ascending=[True, False, False], kind="stable")
+                near[h.groupby("q", sort=False).head(top_k)["i"].to_numpy()] = True
+            listed &= near
+        sel = np.flatnonzero(listed)
+        for name, sc, nm in scored:
+            hits = pd.DataFrame({"q": pq[sel], "lib": pl[sel], "score": sc[sel], "n_matched": nm[sel]})
+            hits = hits.sort_values(["q", "score", "n_matched"], ascending=[True, False, False], kind="stable")
+            hits["rank"] = hits.groupby("q", sort=False).cumcount() + 1
+            L = hits["lib"].to_numpy()
+            lp = lib.precursor_mz[L]
+            parts.append(pd.DataFrame({
+                "group_id": q["group_id"][hits["q"].to_numpy()], "spectrum": name, "rank": hits["rank"].to_numpy(),
+                "score": hits["score"].round(4).to_numpy(), "n_matched": hits["n_matched"].to_numpy(),
+                "name": [lib.names[i] for i in L], "precursor_type": [lib.precursor_type[i] for i in L],
+                "formula": [lib.formula[i] for i in L], "inchikey": [lib.inchikey[i] for i in L],
+                "smiles": [lib.smiles[i] for i in L], "library_precursor_mz": lp,
+                "ppm_error": np.round((q["prec_mz"][hits["q"].to_numpy()] - lp) / lp * 1e6, 2), "library_index": L}))
     rows = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=ID_COLUMNS)
     rows = rows[ID_COLUMNS]
     rows.to_csv(output / "identifications.tsv", sep="\t", index=False, float_format="%.6g")
     with open(output / "identifications.msp", "w", encoding="utf-8") as fh:
-        for r in rows.itertuples(index=False):
-            i = int(r.library_index)
+        for i in pd.unique(rows["library_index"].to_numpy(np.int64)):
             write_msp_record(fh, [("NAME", lib.names[i]), ("PRECURSORMZ", lib.precursor_mz[i]),
                                   ("PRECURSORTYPE", lib.precursor_type[i]), ("FORMULA", lib.formula[i]),
                                   ("INCHIKEY", lib.inchikey[i]), ("SMILES", lib.smiles[i]),
                                   ("IONMODE", {1: "Positive", 2: "Negative"}.get(int(lib.mode[i]), "")),
-                                  ("Comment", f"group_id={int(r.group_id)} spectrum={r.spectrum} rank={int(r.rank)} "
-                                              f"score={r.score:.4f}")],
+                                  ("Comment", f"library_index={int(i)}")],
                              lib.mz[lib.off[i]:lib.off[i + 1]], lib.inten[lib.off[i]:lib.off[i + 1]])
+    default = ms2.default_copy(output)
     best = rows[rows["rank"] == 1]
-    copy = best[best["spectrum"] == default_copy(output)].set_index("group_id")["score"]
+    copy = best[best["spectrum"] == default].set_index("group_id")["score"]
     n_id = int((copy >= min_score).sum())
     secs = time.perf_counter() - tic
     info = dict(method=method, method_label=METHODS[method], library=str(Path(library_path).expanduser().resolve()),
                 library_n=len(lib), precursor_ppm=float(precursor_ppm),
                 precursor_da=None if precursor_da is None else float(precursor_da), fragment_tol=float(fragment_tol),
                 min_score=float(min_score), list_min=LIST_MIN, top_k=top_k, n_queries=int(nq), n_identified=n_id,
-                n_hits=int(len(rows)), seconds=round(secs, 3), created=time.strftime("%Y-%m-%d %H:%M:%S"))
+                n_hits=int(len(rows)), default_spectrum=default, default_label=ms2.LABEL[default],
+                denoise=ms2.DENOISE_LABEL if denoised else None, seconds=round(secs, 3),
+                created=time.strftime("%Y-%m-%d %H:%M:%S"))
     (output / "identifications.json").write_text(json.dumps(info, indent=1))
     write_table(output)
     log(f"identify: {n_id} of {nq} features with MS2 annotated from {Path(library_path).name} ({len(lib)} spectra, "
-        f"{METHODS[method].lower()} >= {min_score:g} on the consensus spectrum; {len(rows)} hits above {LIST_MIN:g} "
-        f"listed; {secs:.1f} s, library read {t_load:.1f} s)")
+        f"{METHODS[method].lower()} >= {min_score:g} on the {ms2.LABEL[default]}; {len(rows)} hits above "
+        f"{LIST_MIN:g} listed; {secs:.1f} s, library read {t_load:.1f} s"
+        f"{f', denoising {t_dn:.1f} s' if t_dn >= 0.05 else ''})")
     return rows

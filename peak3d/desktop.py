@@ -49,6 +49,7 @@ def prepare_env() -> None:
     """before numba or matplotlib are imported; inherited by runs and their workers"""
     cache = user_cache()
     os.environ.setdefault("NUMBA_CACHE_DIR", str(cache / "numba"))
+    os.environ.setdefault("SPECDENOISE_CACHE", str(cache / "specdenoise"))     # its loss-mass table, made once
     os.environ.setdefault("MPLCONFIGDIR", str(cache / "matplotlib"))
 
 

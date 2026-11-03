@@ -13,7 +13,8 @@ MAC, WIN = sys.platform == "darwin", os.name == "nt"
 datas = [(os.path.join(ROOT, "peak3d", "web", "static"), os.path.join("peak3d", "web", "static")),
          (os.path.join(SPECPATH, "THIRD_PARTY_NOTICES.md"), ".")]
 datas += collect_data_files("psims") + collect_data_files("pyteomics")
-hiddenimports = collect_submodules("peak3d", filter=lambda m: ".tests" not in m) + collect_submodules("psims")
+hiddenimports = (collect_submodules("peak3d", filter=lambda m: ".tests" not in m) + collect_submodules("psims")
+                 + collect_submodules("specdenoise", filter=lambda m: ".tests" not in m))
 binaries = []
 # asari (pip install .[asari]) rides along: the app runs it as `peak3d _asari ...`. Its packages bring data files
 # (asari/db, the pymzml OBO files); the metadata (with each licence) reports the version and keeps the notices
@@ -38,10 +39,10 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["peak3d.tests", "pytest", "IPython", "jupyter", "notebook", "PyQt5", "PyQt6", "PySide2", "PySide6"],
+    excludes=["peak3d.tests", "specdenoise.tests", "pytest", "IPython", "jupyter", "notebook", "PyQt5", "PyQt6", "PySide2", "PySide6"],
     runtime_hooks=[os.path.join(SPECPATH, "rthook_pymzml_obo.py")],      # pymzml's OBO files, inside the app
-    # peak3d as .py source files: numba's on-disk cache needs the source of every cached function
-    module_collection_mode={"peak3d": "py"},
+    # peak3d and specdenoise as .py source files: numba's on-disk cache needs the source of every cached function
+    module_collection_mode={"peak3d": "py", "specdenoise": "py"},
     noarchive=False,
 )
 pyz = PYZ(a.pure)

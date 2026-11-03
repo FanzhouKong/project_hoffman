@@ -204,7 +204,8 @@ def test_fragment_tolerance():
 
 
 # ------------------------------------------------------------------ identify ----
-FRAG = np.array([60.04, 72.08, 86.10, 104.11])
+FRAG = np.array([60.0444, 72.0808, 86.0964, 104.1070])   # leucine [M+H]+ fragments: C2H6NO, C4H10N, C5H12N, C5H14NO
+                                                     # (plausible losses: the denoising keeps them all)
 FRAG_I = np.array([30.0, 100.0, 45.0, 10.0])
 
 
@@ -242,23 +243,27 @@ def test_identify_end_to_end(tmp_path):
     hits = identify(out, lib, "weighted_entropy", min_score=0.0, top_k=3)
     t = pd.read_csv(out / "identifications.tsv", sep="\t")
     assert len(t) == len(hits) and set(t["group_id"]) == {1}             # feature 2 has no candidate
-    assert t["name"].tolist()[0] == "Leucine" and t["rank"].tolist() == list(range(1, len(t) + 1))
+    assert set(t["spectrum"]) == {"single", "single_denoised"}          # no consensus file in this output
+    s, d = t[t["spectrum"] == "single"], t[t["spectrum"] == "single_denoised"]
+    assert s["name"].tolist()[0] == "Leucine" and s["rank"].tolist() == list(range(1, len(s) + 1))
     assert "Wrong mode" not in set(t["name"]) and "Too far" not in set(t["name"])
-    assert t["score"].iloc[0] == pytest.approx(1.0) and t["n_matched"].iloc[0] == 4
-    assert t["ppm_error"].iloc[0] == pytest.approx(0.0, abs=0.01) and t["formula"].iloc[0] == "C6H13NO2"
-    assert (t["score"].diff().dropna() <= 0).all()
-    assert set(t["spectrum"]) == {"single"}                             # no consensus file in this output
-    back = read_msp(out / "identifications.msp")
-    assert back.names == t["name"].tolist() and "group_id=1 spectrum=single rank=1" in back.comments[0]
+    assert s["score"].iloc[0] == pytest.approx(1.0) and s["n_matched"].iloc[0] == 4
+    assert s["ppm_error"].iloc[0] == pytest.approx(0.0, abs=0.01) and s["formula"].iloc[0] == "C6H13NO2"
+    assert (s["score"].diff().dropna() <= 0).all() and (d["score"].diff().dropna() <= 0).all()
+    assert sorted(d["library_index"]) == sorted(s["library_index"])      # every hit has its denoised partner
+    back = read_msp(out / "identifications.msp")                         # each library spectrum once
+    assert back.names == t.drop_duplicates("library_index")["name"].tolist()
+    assert f"library_index={s['library_index'].iloc[0]}" in back.comments[0]
     info = json.loads((out / "identifications.json").read_text())
     assert info["method"] == "weighted_entropy" and info["n_queries"] == 2 and info["n_identified"] == 1
     assert info["library_n"] == 5 and info["method_label"] == METHODS["weighted_entropy"]
     # every hit above 0.1 is listed whatever min_score; min_score only decides what counts as identified
     t = identify(out, lib, "dot", min_score=0.99)
-    assert len(t) >= 2 and (t["score"] > 0.1).all() and t["name"].iloc[0] == "Leucine"
+    assert len(t) >= 2 and (t.groupby(["group_id", "library_index"])["score"].max() > 0.1).all()
+    assert t["name"].iloc[0] == "Leucine"
     assert json.loads((out / "identifications.json").read_text())["n_identified"] == 1
-    t = identify(out, lib, "dot", min_score=0.9, top_k=1)                # top_k caps the list
-    assert t["name"].tolist() == ["Leucine"]
+    t = identify(out, lib, "dot", min_score=0.9, top_k=1)                # top_k caps the list (per copy)
+    assert t["name"].tolist() == ["Leucine", "Leucine"] and t["spectrum"].tolist() == ["single", "single_denoised"]
 
 
 def test_identify_rewrites_stale_results(tmp_path):
@@ -266,6 +271,7 @@ def test_identify_rewrites_stale_results(tmp_path):
     identify(out, lib, min_score=0.0)
     (out / "ms2_spectra.msp").unlink()
     identify(out, lib, min_score=0.0)
+    assert not (out / "ms2_spectra_denoised.msp").exists()               # it went with its raw copy
     assert len(pd.read_csv(out / "identifications.tsv", sep="\t")) == 0
     assert (out / "identifications.msp").read_text() == ""
     assert json.loads((out / "identifications.json").read_text())["n_queries"] == 0

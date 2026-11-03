@@ -46,8 +46,8 @@ KERNELS = ("peak3d", "asari", "masscube")      # peak3d runs `process`; the othe
 VARIANT_NOTE = " ".join(f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in VARIANT_SETS.items())
 # output files the viewer may download (by name, from a peak3d output folder)
 RESULT_FILES = ("aligned_feature_table.tsv", "aligned_feature_area.tsv", "aligned_feature_height.tsv", "filled_mask.tsv",
-                "presence_mask.tsv", "params.json", "ms2_spectra.msp", "ms2_consensus.msp", "ms2_map.tsv",
-                "identifications.tsv", "feature_annotations.tsv")
+                "presence_mask.tsv", "params.json", "ms2_spectra.msp", "ms2_consensus.msp", "ms2_spectra_denoised.msp",
+                "ms2_consensus_denoised.msp", "ms2_map.tsv", "identifications.tsv", "feature_annotations.tsv")
 CACHED_OUTPUTS = 3      # results folders whose bundles the server keeps in memory
 REFRESH_DELAY = 3.0     # s after the last annotation before report.html is rewritten (clicks come in bursts)
 RT_COLS = ("rt", "rt_min", "rt_max", "rt_sd")    # minutes in the tables; the GUI shows and exports seconds
@@ -357,7 +357,8 @@ class App:
     def ms2_blob(self, output: Path) -> bytes:
         """gzip'd MS2 + identification parts of the bundle, rebuilt when those files change"""
         key = tuple((output / n).stat().st_mtime_ns if (output / n).exists() else 0
-                    for n in ("ms2_spectra.msp", "ms2_consensus.msp", "ms2_map.tsv", "identifications.tsv",
+                    for n in ("ms2_spectra.msp", "ms2_consensus.msp", "ms2_spectra_denoised.msp",
+                              "ms2_consensus_denoised.msp", "ms2_map.tsv", "identifications.tsv",
                               "identifications.msp", "identifications.json", "user_annotations.json"))
         hit = self._ms2.get(str(output))
         if hit and hit[0] == key:
@@ -719,9 +720,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(res)
 
     def _identify(self, body):
-        """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify); rewrites
-        identifications.* and refreshes report.html, then answers with the search summary"""
+        """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify; an
+        output made before the denoising is denoised first); rewrites identifications.* and refreshes report.html,
+        then answers with the search summary"""
         from ..library import METHODS, identify
+        from ..ms2 import default_workers
         out = self._output({"path": [body.get("path") or ""]})
         lib = self.app.resolve(body.get("library") or "")
         if lib.suffix.lower() not in LIBRARY_SUFFIXES or not lib.is_file():
@@ -741,7 +744,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(409, "a search is already running for these results")
         try:
             try:
-                identify(out, lib, method=method, precursor_ppm=ppm, fragment_tol=tol, min_score=min_score)
+                identify(out, lib, method=method, precursor_ppm=ppm, fragment_tol=tol, min_score=min_score,
+                         workers=default_workers())
             except (pickle.UnpicklingError, ValueError, EOFError) as e:     # a .pkl that is not a library we can read
                 return self._error(400, f"could not read the library {lib.name}: {e}")
         finally:

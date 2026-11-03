@@ -8,7 +8,8 @@ import pytest
 from peak3d import annotations as A
 from peak3d.library import identify, write_msp_record
 
-FRAG = np.array([60.04, 72.08, 86.10, 104.11])
+FRAG = np.array([60.0444, 72.0808, 86.0964, 104.1070])   # leucine [M+H]+ fragments: C2H6NO, C4H10N, C5H12N, C5H14NO
+                                                     # (plausible losses: the denoising keeps them all)
 FRAG_I = np.array([30.0, 100.0, 45.0, 10.0])
 
 
@@ -41,9 +42,12 @@ def _output(tmp_path):
 def test_default_is_the_best_consensus_hit_above_min_score(tmp_path):
     out, lib = _output(tmp_path)
     hits = identify(out, lib, "entropy", min_score=0.7)
-    assert set(hits["spectrum"]) == {"consensus", "single"} and (hits["score"] > 0.1).all()
+    assert set(hits["spectrum"]) == {"consensus", "single", "consensus_denoised", "single_denoised"}
+    assert (hits.groupby(["group_id", "spectrum"]).size() > 0).all()
+    assert (hits.groupby(["group_id", "library_index"])["score"].max() > 0.1).all()   # above 0.1 on raw or denoised
+    assert A.default_copy(out) == "consensus_denoised"
     e = pd.read_csv(out / A.TABLE_FILE, sep="\t").set_index("group_id")
-    assert e.loc[1, "annotation"] == "Leucine" and e.loc[1, "source"] == "library" and e.loc[1, "spectrum"] == "consensus"
+    assert e.loc[1, "annotation"] == "Leucine" and e.loc[1, "source"] == "library" and e.loc[1, "spectrum"] == "consensus_denoised"
     w = hits[(hits["group_id"] == 2) & (hits["spectrum"] == "consensus")]
     assert len(w) == 1 and w["score"].iloc[0] < 0.7                      # listed, but too weak to annotate
     assert pd.isna(e.loc[2, "annotation"]) and e.loc[2, "best_hit"] == "Weak"
@@ -88,7 +92,9 @@ def test_confirm_comment_stars_and_review_flag(tmp_path):
     identify(out, lib, "entropy", min_score=0.7)
     e = A.effective(out).set_index("group_id")
     assert e.loc[1, "reviewed"] == "no" and e.loc[1, "source"] == "library"
-    entry = A.set_user(out, 1, {"spectrum": "consensus", "rank": 1})            # the default hit: confirmed
+    entry = A.set_user(out, 1, {"spectrum": "consensus", "rank": 1})            # the raw consensus: a choice
+    assert not entry["annotation"]["confirmed"] and entry["annotation"]["name"] == "Leucine"
+    entry = A.set_user(out, 1, {"spectrum": "consensus_denoised", "rank": 1})   # the default hit: confirmed
     assert entry["annotation"]["confirmed"] and entry["annotation"]["name"] == "Leucine"
     A.set_note(out, 1, comment="looks right\tcheck the\nadduct", stars=["yellow", "red"])
     A.set_note(out, 2, stars=["blue"])                                          # notes on a feature with no annotation

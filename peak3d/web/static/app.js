@@ -49,7 +49,7 @@
     keep_cache: "Keeps .cache/ (large) so `peak3d align` can re-run alignment without re-picking.",
     set: "One NAME=VALUE per line; advanced picker parameters.",
     no_report: "A single HTML file with these views and chromatograms; opens in any browser, easy to share.",
-    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with a library, both are searched after the run and the best consensus hit becomes each feature's annotation.",
+    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one) and denoised (ions without a plausible neutral loss removed); with a library, both are searched after the run, as measured and denoised, and the best hit on the denoised consensus becomes each feature's annotation.",
   };
   const INVERTED = new Set(["no_rt_correction", "no_gap_fill", "no_report"]);
   const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];
@@ -477,7 +477,9 @@
           ...(!hd.kernel || hd.kernel === "peak3d" ? [{ icon: "table_rows", label: `Feature table (${other}s)`, href: fileUrl(`aligned_feature_${other}.tsv`) }] : []),
           ...(hd.ms2c ? [{ icon: "bar_chart", label: "Consensus MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_consensus.msp") }] : []),
           ...(hd.ms2 ? [{ icon: "bar_chart", label: "Highest-TIC MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_spectra.msp") }] : []),
-          ...(hd.ids ? [{ icon: "table_rows", label: "Library hits, both spectra (identifications.tsv)", href: fileUrl("identifications.tsv") }] : []),
+          ...(hd.ms2c && hd.ms2c.denoised ? [{ icon: "bar_chart", label: "Denoised consensus MS2 spectra (.msp)", href: fileUrl("ms2_consensus_denoised.msp") }] : []),
+          ...(hd.ms2 && hd.ms2.denoised ? [{ icon: "bar_chart", label: "Denoised highest-TIC MS2 spectra (.msp)", href: fileUrl("ms2_spectra_denoised.msp") }] : []),
+          ...(hd.ids ? [{ icon: "table_rows", label: "Library hits, all spectra (identifications.tsv)", href: fileUrl("identifications.tsv") }] : []),
           ...(hd.ids || hd.ann ? [{ icon: "table_rows", label: "Annotations (feature_annotations.tsv)", href: fileUrl("feature_annotations.tsv") }] : []),
           { icon: "description", label: "Report (one HTML file to share)", href: `/api/results/report?path=${enc(path)}&download=1` },
           "-",

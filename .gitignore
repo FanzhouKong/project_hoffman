@@ -24,3 +24,6 @@ bench/diag/hzv029_missed_page.py
 *.egg-info/
 /build/
 /dist/
+
+# specdenoise: its loss-mass table, made on first use
+specdenoise/.cache/

@@ -1,8 +1,10 @@
 """Feature annotations: the library search's result and the user's own choice, kept apart.
 
-identifications.tsv lists every library hit of both MS2 copies of each feature (library.identify). A feature's
-default annotation is its best hit on the consensus spectrum (on the single spectrum for outputs made before there
-was a consensus) when that scores at least the search's min_score. A user can replace it with any other listed hit
+identifications.tsv lists every library hit of the MS2 copies of each feature (library.identify: the consensus and
+the highest-TIC spectrum, each raw and denoised). A feature's default annotation is its best hit on the search's
+default copy (identifications.json default_spectrum: the denoised consensus; for searches made before the denoising,
+the consensus, or the single spectrum for outputs made before there was a consensus) when that scores at least the
+search's min_score. A user can replace it with any other listed hit
 or mark the feature unknown (or confirm the library's hit), and add a comment and stars (red, blue, yellow) to any
 feature; all of it lives in user_annotations.json, keyed by group id, with a chosen hit's library fields copied
 in, so it outlasts a new search. feature_annotations.tsv holds, for every feature with MS2 or notes, the
@@ -85,6 +87,11 @@ def _search_info(output) -> dict:
 
 
 def default_copy(output) -> str:
+    """the copy whose best hit is the default annotation: the one the last search used, else (older searches) the
+    consensus when the output has one"""
+    d = _search_info(output).get("default_spectrum")
+    if d:
+        return str(d)
     return "consensus" if (Path(output) / "ms2_consensus.msp").exists() else "single"
 
 
