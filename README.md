@@ -184,11 +184,13 @@ The standalone app above is the same GUI without a Python installation.
 
 **Halogen check.** Every run tests the MS1 isotope pattern of each monoisotopic feature, in the file where it is
 strongest, for chlorine and bromine (`--no-halogen-test` skips it): the ratios M+1..M+4 / M, summed over the top
-half of the peak, are fitted under elemental hypotheses (no halogen, S, S2, Cl1-4, Br1-3, BrCl, Br2Cl, BrCl2; the
-carbon count from M+1, N, O, P and H then filling the ion's mass), and where the mass accuracy allows, the spacing
-of M+2 adds evidence (37Cl and 81Br sit 0.010 and 0.009 Da below 13C2). A halogen is called when its best
-hypothesis beats the best halogen-free one by 9 chi-square units, "possible" above 4. Windows that do not co-elute
-with M are left out, a saturated M and a weak signal are flagged. The table gets `possible_halogen` (yes / maybe /
+half of the peak, are fitted under elemental hypotheses (no halogen, S, S2, Si4-12 for siloxanes, Cl1-4, Br1-3,
+BrCl, Br2Cl, BrCl2; the carbon count from M+1, N, O, P and H then filling the ion's mass), and where the mass
+accuracy allows, the spacing of M+2 adds evidence (37Cl and 81Br sit 0.010 and 0.009 Da below 13C2). A halogen is
+called when its best hypothesis beats the best halogen-free one by 9 chi-square units and fits the pattern itself,
+with its M+2 where its isotope puts it; "possible" above 4 or when one of those fails. A window that does not
+co-elute with M, or whose position is outside any isotopologue (the +2.016 Da homologue of a co-eluting lipid is
+the common case), is left out; a saturated M and a weak signal are flagged. The table gets `possible_halogen` (yes / maybe /
 no, empty for isotopes and features without signal) and `halogen_pattern` (the best hypothesis, e.g. Cl2); the
 feature list shows them as a **Halogen** column with a **Possible halogen** filter, and a called feature carries a
 chip in its header. The compositions shown are pattern models, not identifications.

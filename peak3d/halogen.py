@@ -40,12 +40,15 @@ _ISOTOPES = {
     "Cl": [(0.0, 0.7576), (0.0, 0.0), (1.9970499, 0.2424)],
     "Br": [(0.0, 0.5069), (0.0, 0.0), (1.9979535, 0.4931)],
     "P": [(0.0, 1.0)],
+    "Si": [(0.0, 0.92223), (0.9995681, 0.04685), (1.9968424, 0.03092)],   # 30Si sits where 37Cl does
 }
 MONO_MASS = {"C": 12.0, "H": 1.0078250, "N": 14.0030740, "O": 15.9949146, "S": 31.9720711, "Cl": 34.9688527,
-             "Br": 78.9183376, "P": 30.9737620}
+             "Br": 78.9183376, "P": 30.9737620, "Si": 27.9769265}
 # the average organic molecule (Senko's averagine), atoms per Da; sulfur is a hypothesis of its own here
 AVERAGINE = {"C": 4.9384 / 111.1254, "H": 7.7583 / 111.1254, "N": 1.3577 / 111.1254, "O": 1.4773 / 111.1254}
 HYPOTHESES = [("none", {}), ("S", {"S": 1}), ("S2", {"S": 2}),
+              ("Si4", {"Si": 4}), ("Si6", {"Si": 6}), ("Si8", {"Si": 8}), ("Si10", {"Si": 10}), ("Si12", {"Si": 12}),
+              # siloxanes (PDMS): 4.7 % 29Si and 3.1 % 30Si per atom mimic chlorine
               ("Cl", {"Cl": 1}), ("Cl2", {"Cl": 2}), ("Cl3", {"Cl": 3}), ("Cl4", {"Cl": 4}),
               ("Br", {"Br": 1}), ("Br2", {"Br": 2}), ("Br3", {"Br": 3}),
               ("BrCl", {"Br": 1, "Cl": 1}), ("Br2Cl", {"Br": 2, "Cl": 1}), ("BrCl2", {"Br": 1, "Cl": 2})]
@@ -57,6 +60,9 @@ MASS_SLACK = 0.03     # Da; a composition further off the ion mass (the carbons 
 MIN_M2 = 0.12         # a halogen call needs at least this much M+2 (one Cl gives 0.32)
 R_MIN = 0.6           # an isotope window must co-elute with M this well to enter the fit
 STRONG, POSSIBLE = 9.0, 4.0
+SHIFT_LO, SHIFT_HI = 0.9979, 1.00336   # Da per offset unit: 34S / 2 (the lightest M+2 defect) to 13C; outside = another ion
+FIT_MAX = 4.0         # mean chi-square per fitted term above which even the best hypothesis explains the pattern poorly
+SPACING_MAX = 8.0     # sigma; a halogen call needs its own M+2 to sit where its 37Cl / 81Br would put it
 
 
 @njit(cache=True)
@@ -167,7 +173,7 @@ def _skeleton(mass: float, extra: dict, rel1: float):
 
 
 def formula(comp: dict) -> str:
-    order = ["C", "H", "N", "O", "P", "S", "Cl", "Br"]
+    order = ["C", "H", "N", "O", "P", "S", "Si", "Cl", "Br"]
     return "".join(f"{e}{comp[e] if comp[e] != 1 else ''}" for e in order if comp.get(e, 0) > 0)
 
 
@@ -195,8 +201,17 @@ def halogen_test(rel, shift, mz: float, z: int = 1, ppm: float = 5.0, noise_rel:
     sign = 1 if polarity == "pos" else -1 if polarity == "neg" else 0
     mass = mz * z + sign * z * ELECTRON      # the ion's atoms (the composition is the ion's: [M+H]+ carries that H)
     sig_da = max(ppm * mz * 1e-6 * z * 0.71, 0.0005)   # one centroid difference, ppm read as ~2 sigma per centroid
-    rel1 = rel[1] if K > 1 and use[1] else np.nan
     flags = []
+    # a window whose intensity-weighted position is outside what any isotopologue can give holds another ion: a
+    # +2.0157 Da homologue (one double bond fewer) of a co-eluting lipid is the common case; such a window is evidence
+    # of nothing and is left out
+    for k in range(1, K):
+        if use[k] and np.isfinite(shift[k]) and rel[k] >= 0.02 and not \
+                (k * SHIFT_LO - 3 * sig_da - 0.001 <= shift[k] <= k * SHIFT_HI + 3 * sig_da + 0.001):
+            use[k] = False
+            flags.append(f"M+{k} sits {shift[k]:+.4f} Da from M, outside any isotopologue ({k * SHIFT_LO:.4f} to "
+                         f"{k * SHIFT_HI:.4f}): a co-eluting ion (a 2H-heavier homologue?); left out")
+    rel1 = rel[1] if K > 1 and use[1] else np.nan
     out = []
     no_call = K <= 2 or not use[2] or not (rel[2] >= MIN_M2)
     for name, extra in HYPOTHESES:
@@ -211,17 +226,23 @@ def halogen_test(rel, shift, mz: float, z: int = 1, ppm: float = 5.0, noise_rel:
         # no sane composition near the ion mass under this hypothesis: its halogens plus the carbons M+1 demands
         # overshoot the mass, or leave too little for anything else
         chi2 = min(((abs(err) - MASS_SLACK) / 0.02) ** 2, CLIP ** 2) if abs(err) > MASS_SLACK else 0.0
+        n_terms = 0
+        sp2 = None
         for k in range(1, min(K_FIT, K - 1) + 1):
             if not use[k]:
                 continue
             sd = math.sqrt((REL_TOL * max(pred[k], rel[k])) ** 2 + ABS_TOL ** 2 + noise_rel ** 2)
             chi2 += ((rel[k] - pred[k]) / sd) ** 2
+            n_terms += 1
             if k >= 2 and np.isfinite(shift[k]) and rel[k] >= 0.03 and p[k] > 0:   # where the observed M+k sits
                 r = min(abs(shift[k] - m[k]) / sig_da, CLIP)
                 chi2 += r * r
+                n_terms += 1
+                if k == 2:
+                    sp2 = float(abs(shift[k] - m[k]) / sig_da)
         out.append({"name": name, "halogen": any(e in extra for e in ("Cl", "Br")), "chi2": float(chi2),
                     "n_c": int(comp["C"]), "capped": bool(capped), "formula": formula(comp),
-                    "mass_error_mda": float(1e3 * err),
+                    "mass_error_mda": float(1e3 * err), "n_terms": int(n_terms), "sp2_sigma": sp2,
                     "rel": [float(v) for v in pred], "shift": [float(v) for v in m]})
     out.sort(key=lambda d: d["chi2"])
     best = out[0] if out else None
@@ -233,6 +254,14 @@ def halogen_test(rel, shift, mz: float, z: int = 1, ppm: float = 5.0, noise_rel:
     verdict = "none"
     if hal and best is not None and best["halogen"] and not no_call:
         verdict = "halogen" if delta >= STRONG else "possible" if delta >= POSSIBLE else "none"
+    if verdict == "halogen" and best["sp2_sigma"] is not None and best["sp2_sigma"] > SPACING_MAX:
+        verdict = "possible"
+        flags.append(f"M+2 sits {shift[2]:+.4f} Da from M, {best['sp2_sigma']:.0f} sigma from where {best['name']} would put it "
+                     f"({best['shift'][2]:+.4f}): the ratio fits, the position does not")
+    if verdict == "halogen" and best["chi2"] > FIT_MAX * max(best["n_terms"], 1):
+        verdict = "possible"
+        flags.append(f"even the best hypothesis fits poorly (chi-square {best['chi2']:.0f} over {best['n_terms']} terms): "
+                     "an interference in some window, or a composition outside the hypotheses")
     if K > 1 and use[1] and best is not None and best["capped"]:
         flags.append("M+1 is higher than the mass allows: a saturated M or an interference; the carbon count is capped")
     if noise_rel > 0.1:
@@ -240,7 +269,7 @@ def halogen_test(rel, shift, mz: float, z: int = 1, ppm: float = 5.0, noise_rel:
         if verdict == "halogen":
             verdict = "possible"
     for k in range(1, K):
-        if not use[k] and np.isfinite(rel[k]):
+        if not use[k] and np.isfinite(rel[k]) and not any(f.startswith(f"M+{k} sits") for f in flags):
             flags.append(f"M+{k} does not co-elute with M (an interference); left out of the fit")
     if use[2] and K > 2 and rel[2] > 0.08 and verdict == "none" and best is not None and best["name"].startswith("S"):
         flags.append(f"M+2 is explained by sulfur ({best['name']})")
