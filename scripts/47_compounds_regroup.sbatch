@@ -6,6 +6,8 @@
 #   VARIANT=noveto EXTRA="--compound-veto off" regroups into results/compounds_<DATE>_<VARIANT>/<study>/ (features
 #   copied, cache shared read-only), leaving the base run untouched:
 #   sbatch --export=ALL,DATE=2026-10-31,VARIANT=noveto,EXTRA="--compound-veto off" --array=1-3 scripts/47_compounds_regroup.sbatch
+#   STEMS_FILE=path (stems, one per line) regroups only those files (a small-study test); EVAL_EXTRA passes
+#   options to the truth check
 #SBATCH --job-name=cmp-regroup
 #SBATCH --account=metabolomicsgrp
 #SBATCH --partition=high
@@ -31,7 +33,15 @@ cache="$base/peak3d_out/.cache"
 if [ -n "${VARIANT:-}" ]; then
     out="results/compounds_${DATE}_$VARIANT/$study"
     mkdir -p "$out/peak3d_out"
-    [ -d "$out/peak3d_out/features" ] || cp -r "$base/peak3d_out/features" "$out/peak3d_out/features"
+    if [ ! -d "$out/peak3d_out/features" ]; then
+        if [ -n "${STEMS_FILE:-}" ]; then   # a file subset: STEMS_FILE lists stems one per line (small-study tests)
+            mkdir -p "$out/peak3d_out/features"
+            while read -r st; do [ -n "$st" ] && cp "$base/peak3d_out/features/$st.tsv" "$base/peak3d_out/features/$st.params.json" "$out/peak3d_out/features/"; done < "$STEMS_FILE"
+            echo "subset: $(ls "$out/peak3d_out/features"/*.tsv | wc -l) feature tables"
+        else
+            cp -r "$base/peak3d_out/features" "$out/peak3d_out/features"
+        fi
+    fi
     [ -f "$out/peak3d_out/params.json" ] || cp "$base/peak3d_out/params.json" "$out/peak3d_out/params.json"
 fi
 export NUMBA_CACHE_DIR="$TMPDIR/numba_$study" MPLCONFIGDIR="$TMPDIR/mpl_$study"
@@ -39,5 +49,5 @@ echo "$study regroup on $(hostname), $SLURM_CPUS_PER_TASK CPUs"
 env PYTHONPATH="$ROOT" "$PEAK3D_ENV/bin/python" -m peak3d align --output "$out/peak3d_out" --cache-dir "$cache" \
     --cores "$SLURM_CPUS_PER_TASK" ${EXTRA:-} 2>&1 | tee "$out/regroup.log"
 env PYTHONPATH="$ROOT" "$PEAK3D_ENV/bin/python" bench/diag/compound_truth.py --out "$out/peak3d_out" --study "$study" \
-    --report "$out/compound_truth" 2>&1 | tee "$out/compound_truth.log"
+    --report "$out/compound_truth" ${EVAL_EXTRA:-} 2>&1 | tee "$out/compound_truth.log"
 echo REGROUP_DONE

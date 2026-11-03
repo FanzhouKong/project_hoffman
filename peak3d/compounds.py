@@ -30,7 +30,7 @@ from numba import njit
 from .io import C13, Cloud, eic_kernel
 
 PROTON = 1.00727646688
-SHAPE_FILES = 5            # files per pair in which the shape correlation is measured (strongest shared ones)
+SHAPE_FILES = 0            # files per pair for the shape score: the strongest N, 0 = every shared file
 MIN_INT_FILES = 6          # shared present files needed for an intensity correlation
 NULL_SEP = 3.0             # unrelated pairs: apexes >= this many study FWHM apart
 N_NULL_SHAPE = 400         # shifted unrelated pairs per file (shape null)
@@ -40,6 +40,11 @@ SHAPE_REL_FLOOR = 0.5
 ISO_KEEP = 0.95            # the shape cut keeps this share of the isotope (known same-compound) pairs
 RELATED_RELAX = 0.1        # pairs with a known mass relation pass shape this much lower
 PAIRS_MIN_R = 0.4          # compound_pairs.tsv keeps pairs with r_shape >= this, a relation or an edge
+RATIO_TOL = 0.30103        # small studies: a file agrees with the pair's median log10 height ratio within a factor of 2
+RATIO_MIN_FILES = 3        # ... over at least this many shared files
+RATIO_KEEP = 0.5           # ... and the pair stays when at least this fraction of its files agree
+CONSIST_ITER = 4           # group-consistency passes
+CONSIST_MARGIN = 0.05      # a member moves only to a group it agrees with by this much more than its own
 MIN_NEUTRAL = 40.0
 MAX_HYP = 20               # strongest members of a cluster that propose neutral-mass hypotheses
 
@@ -162,6 +167,58 @@ def _pick_files_kernel(I, J, H, det, K):
 
 
 @njit(cache=True)
+def _tasks_for_file(I, J, det, f):
+    """the pairs (as indices into I, J) with both ions detected in file f"""
+    m = 0
+    for p in range(len(I)):
+        if det[I[p], f] and det[J[p], f]:
+            m += 1
+    out = np.empty(m, np.int64)
+    m = 0
+    for p in range(len(I)):
+        if det[I[p], f] and det[J[p], f]:
+            out[m] = p; m += 1
+    return out
+
+
+@njit(cache=True)
+def _pair_sums_kernel(E, eoff, ws0, lo, hi, pa, pb):
+    """for the pooled shape score: the sums n, Sx, Sy, Sxx, Syy, Sxy of the two traces over the union of their
+    bounds, each trace scaled by its own maximum there (all zero when either trace is flat or the overlap is short)"""
+    K = len(pa)
+    out = np.zeros((K, 6))
+    for k in range(K):
+        a = pa[k]; b = pb[k]
+        s0 = max(min(lo[a], lo[b]), ws0[a], ws0[b])
+        s1 = min(max(hi[a], hi[b]) + 1, ws0[a] + (eoff[a + 1] - eoff[a]), ws0[b] + (eoff[b + 1] - eoff[b]))
+        if s1 - s0 < 3:
+            continue
+        x = E[eoff[a] + (s0 - ws0[a]):eoff[a] + (s1 - ws0[a])]
+        y = E[eoff[b] + (s0 - ws0[b]):eoff[b] + (s1 - ws0[b])]
+        mx = x.max(); my = y.max()
+        if mx <= 0 or my <= 0:
+            continue
+        n = s1 - s0
+        sx = sy = sxx = syy = sxy = 0.0
+        for t in range(n):
+            u = x[t] / mx; v = y[t] / my
+            sx += u; sy += v; sxx += u * u; syy += v * v; sxy += u * v
+        out[k, 0] = n; out[k, 1] = sx; out[k, 2] = sy; out[k, 3] = sxx; out[k, 4] = syy; out[k, 5] = sxy
+    return out
+
+
+def _pooled_r(acc):
+    """pooled Pearson r per pair from accumulated sums (every scan of every shared file in one correlation)"""
+    n = acc[:, 0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        vx = acc[:, 3] - acc[:, 1] ** 2 / n
+        vy = acc[:, 4] - acc[:, 2] ** 2 / n
+        r = (acc[:, 5] - acc[:, 1] * acc[:, 2] / n) / np.sqrt(vx * vy)
+    r[(n < 3) | ~(vx > 0) | ~(vy > 0)] = np.nan
+    return r
+
+
+@njit(cache=True)
 def _extract_eics(off, mz, inten, targets, tols, s0, s1):
     """dense EICs of many windows, flattened; eoff[k]..eoff[k+1] holds window k (scans s0[k]..s1[k]-1)"""
     n = len(targets)
@@ -236,6 +293,31 @@ def _int_corr_kernel(L, present, I, J, min_n):
 
 
 @njit(cache=True)
+def _int_ratio_kernel(L, present, I, J, min_n, tol):
+    """small studies: the fraction of shared present files whose log10 height ratio lies within tol of the pair's
+    median ratio (NaN below min_n files)"""
+    out = np.empty(len(I))
+    N = L.shape[1]
+    buf = np.empty(N)
+    for p in range(len(I)):
+        i = I[p]; j = J[p]
+        n = 0
+        for f in range(N):
+            if present[i, f] and present[j, f]:
+                buf[n] = L[i, f] - L[j, f]; n += 1
+        if n < min_n:
+            out[p] = np.nan
+            continue
+        med = np.median(buf[:n])
+        good = 0
+        for t in range(n):
+            if abs(buf[t] - med) <= tol:
+                good += 1
+        out[p] = good / n
+    return out
+
+
+@njit(cache=True)
 def _star_kernel(order, indptr, indices, eligible):
     """strongest-first stars: a seed claims every unassigned eligible neighbour; non-transitive"""
     n = len(order)
@@ -256,7 +338,7 @@ def _star_kernel(order, indptr, indices, eligible):
 # -------------------------------------------------------------- per file ----
 def _shape_one(job):
     """one file: EICs of the rows involved, shape r of its pair tasks, and shifted-null r values"""
-    (stem, cache_dir, rows, mz_native, sig, lo, hi, apex, pa, pb, task_idx, pad, n_null, rt_win_scans, seed) = job
+    (stem, cache_dir, rows, mz_native, sig, lo, hi, apex, pa, pb, task_idx, pad, n_null, rt_win_scans, seed, pooled) = job
     import numba
     numba.set_num_threads(1)
     cloud = Cloud.load_npz(Path(cache_dir) / f"{stem}.npz")
@@ -266,6 +348,7 @@ def _shape_one(job):
     tols = (mz_native * (3.0 * sig + 1.0) * 1e-6).astype(np.float64)
     E, eoff = _extract_eics(cloud.off, cloud.mz, cloud.inten, mz_native.astype(np.float64), tols, ws0, ws1)
     r = _pair_corr_kernel(E, eoff, ws0, lo.astype(np.int64), hi.astype(np.int64), pa, pb)
+    sums = _pair_sums_kernel(E, eoff, ws0, lo.astype(np.int64), hi.astype(np.int64), pa, pb) if pooled else np.zeros((0, 6))
     null = np.zeros(0)
     if n_null > 0 and len(rows) >= 4:
         rng = np.random.default_rng(seed)
@@ -279,7 +362,7 @@ def _shape_one(job):
                                  hi.astype(np.int64), apex.astype(np.int64), mz_native.astype(np.float64), tols,
                                  na, nb, shifts, S)
         null = null[np.isfinite(null)]
-    return task_idx, r, null
+    return task_idx, r, null, sums, seed
 
 
 def _polarity(cache_dir, stems):
@@ -314,17 +397,80 @@ def _nanmedian_by_pair(values, pair_idx, P):
     return out, cnt
 
 
+def _consistent_clusters(cid, C, I, J, r, t_shape, eligible, g_h, max_iter=CONSIST_ITER, margin=CONSIST_MARGIN,
+                         allow_leave=True):
+    """every member must agree with the rest of its group, the strong members counting most: a member's agreement
+    with a group is the height-weighted mean of its pair scores with that group's other members, a pair that was
+    not evaluated or failed the intensity veto counting as 0. A member whose agreement with its own group is below
+    the cut leaves (a group of its own); a member that agrees with another group at least at the cut and by
+    `margin` more than with its own moves there. r: per-pair score (NaN = unusable). Returns (cid, C, n_moved,
+    n_left, iterations); unassigned members (-1) stay unassigned"""
+    cid = cid.copy()
+    h = np.where(eligible, np.maximum(g_h, 1e-12), 0.0)
+    use = np.isfinite(r) & eligible[I] & eligible[J]
+    a = np.concatenate([I[use], J[use]]); b = np.concatenate([J[use], I[use]]); v = np.concatenate([r[use], r[use]])
+    wv = v * h[b]                      # weighted pair score, credited to member a for b's group
+    n_moved = n_left = it = 0
+    for it in range(1, max_iter + 1):
+        if len(a) == 0:
+            break
+        pos = cid >= 0
+        tot = np.zeros(C); np.add.at(tot, cid[pos], h[pos])          # total weight per group
+        cb = cid[b]
+        key = a * np.int64(C) + cb
+        uniq, inv = np.unique(key, return_inverse=True)
+        S = np.zeros(len(uniq)); np.add.at(S, inv, wv)
+        km, kc = uniq // C, uniq % C
+        denom = tot[kc] - np.where(cid[km] == kc, h[km], 0.0)        # the group's other members
+        score = np.where(denom > 0, S / np.maximum(denom, 1e-300), np.nan)
+        own = np.full(len(cid), np.nan)
+        is_own = kc == cid[km]
+        own[km[is_own]] = score[is_own]
+        # a member with no pair into its own group agrees at 0 with it (unless it is alone there)
+        alone = pos & (tot[np.maximum(cid, 0)] - h <= 1e-9)
+        own = np.where(np.isnan(own) & pos & ~alone, 0.0, own)
+        other = ~is_own & np.isfinite(score)
+        best = np.full(len(cid), -1, np.int64); best_v = np.full(len(cid), -np.inf)
+        if other.any():
+            o = np.lexsort((-score[other], km[other]))
+            mo, co, vo = km[other][o], kc[other][o], score[other][o]
+            first = np.r_[True, mo[1:] != mo[:-1]]
+            best[mo[first]] = co[first]; best_v[mo[first]] = vo[first]
+        leave = eligible & np.isfinite(own) & (own < t_shape) if allow_leave else np.zeros(len(cid), bool)
+        move = eligible & (best >= 0) & (best_v >= t_shape) & (np.isnan(own) | (best_v > own + margin))
+        if not (leave | move).any():
+            break
+        mv = np.flatnonzero(move)
+        cid[mv] = best[mv]
+        lv = np.flatnonzero(leave & ~move)
+        cid[lv] = C + np.arange(len(lv)); C += len(lv)
+        n_moved += len(mv); n_left += len(lv)
+    pos = cid >= 0
+    uniq, inv = np.unique(cid[pos], return_inverse=True)
+    out = np.full(len(cid), -1, np.int64)
+    out[pos] = inv
+    return out, int(len(uniq)), n_moved, n_left, it
+
+
 # --------------------------------------------------------------------- main --
 def cluster_compounds(cons, H, present, detected, A, stems, cache_dir, fwhm_scans: dict, fwhm_study: float,
                       dt_med: float, rt_tol: float, ppm_tol: float, g_iso, g_z, g_iso_parent, cores: int = 1,
-                      log=print, int_veto: str = "auto"):
+                      log=print, int_veto: str = "auto", shape_mode: str = "weighted", shape_files: int = SHAPE_FILES,
+                      cluster_mode: str = "star"):
     """Returns (table: DataFrame with one row per aligned group, pairs: DataFrame of evaluated pairs, info: dict).
 
     cons: consensus dict (mz, rt, rt_min, rt_max); H (G x N) heights incl. filled cells; present/detected (G x N)
     bool; A: per-file member frame with columns gid, file, row, height, mz_native, sig, scan_lo, scan_hi,
     scan_apex; g_iso_parent: group index of the monoisotopic parent (-1 none); int_veto: "auto" rejects pairs
     whose intensity correlation across files is below the null's q90 when the study makes that informative,
-    "off" never rejects on intensity (every co-eluting pair goes to the shape test)."""
+    "off" never rejects on intensity (every co-eluting pair goes to the shape test), "ratio" uses the small-study
+    rule (log height ratio stable within a factor of 2 over the shared files) for any study size; shape_mode:
+    "weighted" (default) = Fisher-z mean of the per-file EIC correlations weighted by the weaker ion's log height,
+    "median" = median of the per-file correlations, "pooled" = one correlation over every scan of every shared
+    file; shape_files = 0 (default) uses every shared file, else the shape_files strongest ones;
+    cluster_mode: "star" (strongest-first, a member joins through its pair with the seed), "consistent" (stars,
+    then every member must agree with the rest of its group and may move to the group it agrees with best) or
+    "move" (the moves only: nobody is evicted)."""
     tic = time.perf_counter()
     t_last = [tic]
 
@@ -366,7 +512,11 @@ def cluster_compounds(cons, H, present, detected, A, stems, cache_dir, fwhm_scan
     n_int = (present[I] & present[J]).sum(axis=1) if P else np.zeros(0, np.int64)
     int_active = False; t_int = np.nan; int_iso_median = np.nan; q_int = (np.nan, np.nan, np.nan)
     lap("intensity")
-    if N >= 2 * MIN_INT_FILES and P:
+    int_mode = "off"
+    if int_veto == "ratio" or (int_veto == "auto" and N < 2 * MIN_INT_FILES and N >= RATIO_MIN_FILES and P):
+        r_int = _int_ratio_kernel(L, present, I, J, RATIO_MIN_FILES, RATIO_TOL) if P else np.zeros(0)
+        int_active = True; t_int = RATIO_KEEP; int_mode = "ratio"
+    elif int_veto != "off" and N >= 2 * MIN_INT_FILES and P:
         rng = np.random.default_rng(0)
         na = rng.integers(0, G, N_NULL_INT); nb = rng.integers(0, G, N_NULL_INT)
         far = np.abs(rt[na] - rt[nb]) >= NULL_SEP * max(fwhm_study, rt_tol)
@@ -377,29 +527,46 @@ def cluster_compounds(cons, H, present, detected, A, stems, cache_dir, fwhm_scan
             ri = r_int[iso_pair]; ri = ri[np.isfinite(ri)]
             if len(ri) >= 20:
                 int_iso_median = float(np.median(ri))
-                int_active = int_veto != "off" and int_iso_median >= q_int[2]
+                int_active = int_iso_median >= q_int[2]
                 t_int = float(q_int[0])
-    info.update(int_veto=int_veto, int_active=bool(int_active), int_null_q90=float(q_int[0]), int_null_q95=float(q_int[1]),
+                int_mode = "corr" if int_active else "off"
+    info.update(int_veto=int_veto, int_mode=int_mode, shape_mode=shape_mode, shape_files=int(shape_files),
+                cluster_mode=cluster_mode, int_active=bool(int_active), int_null_q90=float(q_int[0]), int_null_q95=float(q_int[1]),
                 int_null_q99=float(q_int[2]), int_iso_median=float(int_iso_median), int_cut=float(t_int))
 
     # 3. shape correlation in the strongest shared files, for the pairs the veto has not already rejected
     sel = np.flatnonzero(~(int_active & np.isfinite(r_int) & (r_int < t_int))) if P else np.zeros(0, np.int64)
     info["n_shape_tested"] = int(len(sel))
-    tp, tf = _pick_files_kernel(I[sel], J[sel], H.astype(np.float64), detected, SHAPE_FILES)
-    tp = sel[tp]
+    pooled = shape_mode == "pooled"
+    weighted = shape_mode == "weighted"
+    all_files = not (shape_files and shape_files > 0)
     r_shape = np.full(P, np.nan); n_shape = np.zeros(P, np.int64)
     null_shape = []
-    if len(tp):
-        # (group, file) -> position in A (-1 where the file has no detected member)
-        posmat = np.full((G, N), -1, np.int64)
-        posmat[A["gid"].values, A["file"].values] = np.arange(len(A))
+    acc = np.zeros((P, 6)) if pooled else None
+    wz = np.zeros(P); wsum = np.zeros(P)
+    med_idx, med_r = [], []
+    if all_files:
+        per_file = None
+        files_todo = list(range(N))
+    else:
+        tp, tf = _pick_files_kernel(I[sel], J[sel], H.astype(np.float64), detected, int(shape_files))
+        tp = sel[tp]
         order_t = np.argsort(tf, kind="stable")
         tp_s, tf_s = tp[order_t], tf[order_t]
         bounds = np.r_[0, np.flatnonzero(np.diff(tf_s)) + 1, len(tf_s)]
-        jobs = []
+        per_file = {int(tf_s[a]): tp_s[a:b] for a, b in zip(bounds[:-1], bounds[1:])}
+        files_todo = sorted(per_file)
+    if len(sel) and files_todo:
+        # (group, file) -> position in A (-1 where the file has no detected member)
+        posmat = np.full((G, N), -1, np.int64)
+        posmat[A["gid"].values, A["file"].values] = np.arange(len(A))
         scans_win = max(1, int(round(rt_win / max(dt_med, 1e-9))))
-        for a, b in zip(bounds[:-1], bounds[1:]):
-            f = int(tf_s[a]); tasks = tp_s[a:b]
+        I_sel, J_sel = I[sel], J[sel]
+
+        def job_for(f):
+            tasks = sel[_tasks_for_file(I_sel, J_sel, detected, f)] if all_files else per_file[f]
+            if len(tasks) == 0:
+                return None
             gi, gj = I[tasks], J[tasks]
             uniq = np.unique(np.concatenate([gi, gj]))
             rows = posmat[uniq, f]
@@ -407,18 +574,51 @@ def cluster_compounds(cons, H, present, detected, A, stems, cache_dir, fwhm_scan
             pb = np.searchsorted(uniq, gj)
             fs = fwhm_scans.get(stems[f], 0.0)
             pad = int(max(2, round(fs if fs > 0 else 4.0)))
-            jobs.append((stems[f], str(cache_dir), rows, A["mz_native"].values[rows], A["sig"].values[rows],
-                         A["scan_lo"].values[rows].astype(np.int64), A["scan_hi"].values[rows].astype(np.int64),
-                         A["scan_apex"].values[rows].astype(np.int64), pa, pb, tasks, pad, N_NULL_SHAPE, scans_win, f))
-        n_workers = max(1, min(len(jobs), cores))
-        if n_workers == 1:
-            out = [_shape_one(j) for j in jobs]
-        else:
-            with get_context("spawn").Pool(n_workers) as pool:
-                out = pool.map(_shape_one, jobs, chunksize=1)
-        all_idx = np.concatenate([o[0] for o in out]); all_r = np.concatenate([o[1] for o in out])
-        null_shape = [o[2] for o in out if len(o[2])]
-        r_shape, n_shape = _nanmedian_by_pair(all_r, all_idx, P)
+            return (stems[f], str(cache_dir), rows, A["mz_native"].values[rows], A["sig"].values[rows],
+                    A["scan_lo"].values[rows].astype(np.int64), A["scan_hi"].values[rows].astype(np.int64),
+                    A["scan_apex"].values[rows].astype(np.int64), pa, pb, tasks, pad, N_NULL_SHAPE, scans_win, f, pooled)
+
+        def take(o):
+            idx, r, null, sums, f = o
+            if len(null):
+                null_shape.append(null)
+            if pooled:
+                np.add.at(acc, idx, sums)
+                np.add.at(n_shape, idx[sums[:, 0] > 0], 1)
+            elif weighted:
+                ok = np.isfinite(r)
+                w = np.log10(np.maximum(np.minimum(H[I[idx[ok]], f], H[J[idx[ok]], f]), 10.0))
+                np.add.at(wz, idx[ok], w * np.arctanh(np.clip(r[ok], -0.999999, 0.999999)))
+                np.add.at(wsum, idx[ok], w)
+                np.add.at(n_shape, idx[ok], 1)
+            else:
+                med_idx.append(idx); med_r.append(r)
+
+        # files in batches: the all-files mode holds only a batch's task arrays at a time
+        n_workers = max(1, min(len(files_todo), cores))
+        batch = max(n_workers * 2, 4)
+        pool = get_context("spawn").Pool(n_workers) if n_workers > 1 else None
+        try:
+            for a in range(0, len(files_todo), batch):
+                jobs = [j for j in (job_for(f) for f in files_todo[a:a + batch]) if j is not None]
+                if not jobs:
+                    continue
+                if pool is None:
+                    for j in jobs:
+                        take(_shape_one(j))
+                else:
+                    for o in pool.imap_unordered(_shape_one, jobs, chunksize=1):
+                        take(o)
+        finally:
+            if pool is not None:
+                pool.close(); pool.join()
+        if pooled:
+            r_shape = _pooled_r(acc)
+        elif weighted:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                r_shape = np.where(wsum > 0, np.tanh(wz / np.maximum(wsum, 1e-300)), np.nan)
+        elif med_idx:
+            r_shape, n_shape = _nanmedian_by_pair(np.concatenate(med_r), np.concatenate(med_idx), P)
     lap("shape")
     null_shape = np.concatenate(null_shape) if null_shape else np.zeros(0)
     if len(null_shape) >= 50:
@@ -469,6 +669,13 @@ def cluster_compounds(cons, H, present, detected, A, stems, cache_dir, fwhm_scan
     indptr = np.zeros(G + 1, np.int64)
     np.cumsum(np.bincount(src, minlength=G), out=indptr[1:])
     cid, C = _star_kernel(np.argsort(-g_h, kind="stable"), indptr, dst[o], eligible)
+    if cluster_mode in ("consistent", "move") and P:
+        # pairs the intensity veto rejected give no support; related pairs are judged at their relaxed cut
+        r_eff = np.where(int_ok, r_shape, np.nan)
+        r_eff = np.where(relation, r_eff + (t_shape - t_rel), r_eff)
+        cid, C, n_moved, n_left, n_iter = _consistent_clusters(cid, C, I, J, r_eff, t_shape, eligible, g_h,
+                                                               allow_leave=cluster_mode == "consistent")
+        info.update(consist_moved=int(n_moved), consist_left=int(n_left), consist_iter=int(n_iter))
     # children: parent's cluster (parents are eligible, so assigned); a child whose parent is itself a child
     # (should not happen) falls back to its own cluster
     for _ in range(2):

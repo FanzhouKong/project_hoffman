@@ -140,7 +140,7 @@ Options: `--ppm 5`, `--rt-tol-max 0.25`, `--min-score 0.5`, `--min-presence 2`, 
 |---|---|
 | `aligned_feature_table.tsv` | groups passing the presence rule: group_id, mz, rt (min, consensus axis), rt_min, rt_max, n_detected, n_confirmed, n_filled, mz_ppm_spread, rt_sd, iso_offset (majority isotopologue label of the members, 0 = monoisotopic), charge, compound_id (compound group: adducts, in-source fragments, multimers and isotopes of one compound), role (adduct name, `<adduct> M+k` for isotopes, else the m/z difference to the base ion, `base` for an unexplained base), neutral_mass (NaN unless >= 2 members agree), is_base, n_members, one height column per file stem |
 | `compounds.tsv` | one row per compound group: compound_id, base_group_id, mz_base, rt, n_members, n_kept, neutral_mass, members, roles, mz_members |
-| `compound_pairs.tsv` | every co-eluting pair tested: gid_a, gid_b, r_shape (median EIC Pearson r over <= 5 strongest shared files), n_files_shape, r_int (log-height Pearson r across present files), n_files_int, relation (known adduct/13C difference), edge, mz_a, mz_b |
+| `compound_pairs.tsv` | every co-eluting pair tested: gid_a, gid_b, r_shape (EIC Pearson r over the shared files, height-weighted mean; median or pooled with `--compound-shape`), n_files_shape, r_int (log-height Pearson r across present files), n_files_int, relation (known adduct/13C difference), edge, mz_a, mz_b |
 | `presence_mask.tsv` | every group before the presence rule: 2 detected, 1 confirmed peak in the gap-filled chromatogram, 0 absent, per file |
 | `aligned_feature_area.tsv` | same layout with areas |
 | `filled_mask.tsv` | 1 where a value was gap-filled rather than detected |

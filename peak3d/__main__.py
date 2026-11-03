@@ -74,9 +74,23 @@ def build_parser():
         p.add_argument("--no-compounds", action="store_true",
                        help="skip compound grouping (adducts, in-source fragments, multimers and their isotopes of "
                             "one compound, joined on peak-shape and intensity correlation)")
-        p.add_argument("--compound-veto", choices=["auto", "off"], default="auto",
+        p.add_argument("--compound-veto", choices=["auto", "off", "ratio"], default="auto",
                        help="intensity veto in compound grouping: auto (default) rejects co-eluting pairs whose "
-                            "heights do not correlate across files, off tests every co-eluting pair on peak shape")
+                            "heights do not correlate across files (12+ files; fewer: whose height ratio is unstable "
+                            "across files), off tests every co-eluting pair on peak shape, ratio uses the ratio rule "
+                            "for any study size")
+        p.add_argument("--compound-shape", choices=["median", "pooled", "weighted"], default="weighted",
+                       help="peak-shape score of a pair: weighted (default) averages the per-file chromatogram "
+                            "correlations with the weaker ion's log height as weight, median takes the median of "
+                            "the per-file correlations, pooled computes one correlation over every scan of every "
+                            "shared file")
+        p.add_argument("--compound-shape-files", type=int, default=0,
+                       help="shared files per pair for the shape score: the strongest N, 0 = all (default)")
+        p.add_argument("--compound-cluster", choices=["star", "consistent", "move"], default="star",
+                       help="how feature groups form: star (default; a member joins through its pair with the "
+                            "group's strongest ion), consistent (every member must agree with the rest of its "
+                            "group and may move to the group it agrees with best) or move (a member may move to "
+                            "the group it agrees with best, nobody is evicted)")
         p.add_argument("--quant", choices=["height", "area"], default="height",
                        help="value in the main aligned table (default height; the other is written too)")
 
