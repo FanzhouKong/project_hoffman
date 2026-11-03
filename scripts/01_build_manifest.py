@@ -134,7 +134,8 @@ def list_github(ds):
 
 
 LISTERS = dict(metabolights=list_metabolights, mwb=list_mwb, gnps=list_gnps,
-               zenodo=list_zenodo, github=list_github)
+               zenodo=list_zenodo, github=list_github,
+               manual=lambda ds: [])   # fetched by its own script (PR002464: 05_download_pr002464.sbatch)
 
 
 def main():

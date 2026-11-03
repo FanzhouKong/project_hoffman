@@ -22,7 +22,9 @@ import pandas as pd  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from bench.credtruth import cred_files  # noqa: E402
 from bench.msdata import C13, load_run  # noqa: E402
+from bench.spiketruth import STUDIES  # noqa: E402
 
 PPM = 5.0
 MONO = {"C": 12.0, "H": 1.00782503207, "N": 14.0030740048, "O": 15.99491461956,
@@ -59,11 +61,19 @@ def n_carbon(formula):
     return int(m.group(1) or 1) if m else 0
 
 
-def known_check(truth):
+def md(df, **kw):
+    """markdown table, or a fenced plain-text table when tabulate is not installed (the peak3d env)"""
+    try:
+        return df.to_markdown(**kw)
+    except ImportError:
+        return "```\n" + df.to_string(**kw) + "\n```"
+
+
+def known_check(truth, sign=1):
     rows = []
     mz = truth["mz"].values
     for name, f in KNOWN.items():
-        target = mass(f) + PROTON
+        target = mass(f) + sign * PROTON   # [M+H]+, or [M-H]- for a negative-mode dataset
         hit = np.abs(mz - target) <= target * PPM * 1e-6
         for _, t in truth[hit].iterrows():
             rows.append(dict(metabolite=name, formula=f, mz_expected=round(target, 5),
@@ -90,7 +100,7 @@ def plot(row, R12, R13, off12, off13, fwhm_s, path):
     t0, t1 = row.rt - half, row.rt + half
     m, n = row.mz, int(row.n)
     fig, ax = plt.subplots(1, 3, figsize=(13, 3.4), constrained_layout=True)
-    cols = ["#1f77b4", "#2ca02c", "#9467bd"]
+    cols = ["#1f77b4", "#2ca02c", "#9467bd", "#8c564b"]   # one per replicate (PR002464 has 4)
     mean12, mean13, mean_m1 = [], [], []
     grid = np.linspace(t0, t1, 300)
     for i, (r, o) in enumerate(zip(R12, off12)):
@@ -130,11 +140,12 @@ def main():
     ap.add_argument("dataset")
     ap.add_argument("--n", type=int, default=100, help="images per tier")
     a = ap.parse_args()
-    out = ROOT / "data/truth" / a.dataset
+    out = cred_files(a.dataset)[2]
+    neg = a.dataset.startswith("PR2464_") and STUDIES[a.dataset.split("_", 1)[1]][0] == "neg"
     p = json.loads((out / "params.json").read_text())
     truth = pd.read_csv(out / "credentialed.tsv", sep="\t")
 
-    kc = known_check(truth)
+    kc = known_check(truth, -1 if neg else 1)
     kc.to_csv(out / "known_metabolite_check.tsv", sep="\t", index=False)
 
     R12 = [load_run(f) for f in p["files_12C"]]
@@ -169,11 +180,11 @@ def main():
              f"- seeds tested: {p['n_seeds']}; truth features: {len(truth)} "
              f"(tier A {int((truth['tier'] == 'A').sum())}, tier B {int((truth['tier'] == 'B').sum())})",
              f"- tolerances: {p['PPM']} ppm, apex +/-{p['apex_tol_s']:.2f} s, shape r >= {p['R_MIN']}, "
-             f">= {p['MIN_REPS']}/3 replicates per side", "",
-             "## Decoy searches (same pipeline, impossible partners)", "", qc.to_markdown(index=False), "",
-             "## Feature classes", "", by.to_markdown(), "",
-             "## Known-metabolite carbon check ([M+H]+, 5 ppm)", "",
-             (agree.rename(columns={"sum": "n agrees", "count": "matches"}).to_markdown()
+             f">= {p['MIN_REPS']}/{len(p['files_12C'])} replicates per side", "",
+             "## Decoy searches (same pipeline, impossible partners)", "", md(qc, index=False), "",
+             "## Feature classes", "", md(by), "",
+             f"## Known-metabolite carbon check ({'[M-H]-' if neg else '[M+H]+'}, 5 ppm)", "",
+             (md(agree.rename(columns={"sum": "n agrees", "count": "matches"}))
               if agree is not None else "no matches"), "",
              "Mismatches can be isomers/other compounds at the same mass; see known_metabolite_check.tsv.", "",
              f"## Gallery: {len(sheet)} images in gallery/ ; fill verdict in gallery/review_sheet.csv"]

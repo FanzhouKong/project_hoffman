@@ -257,6 +257,20 @@ h1, h2, h3, h4, p { margin: 0; }
 .chip.warn { background: #fdf1e3; color: #9a4f08; }
 .chip.warn { background: var(--danger-soft); color: var(--danger); }
 .chip.info { background: var(--accent-soft); color: var(--accent-deep); }
+/* what a feature is within its compound (Ion column, detail head) */
+.ion-tag { display: inline-block; padding: 1px 7px; border-radius: 8px; font-size: 11.5px; line-height: 17px; background: var(--surface-3); color: var(--ink-2); white-space: nowrap; }
+.ion-tag.iso, .chip.ion-chip.iso { background: var(--accent-soft); color: var(--accent-deep); }
+.ion-tag.maybe, .chip.ion-chip.maybe { background: transparent; border: 1px dashed var(--accent-line); color: var(--accent-deep); font-style: italic; }
+.chip.ion-chip.maybe { height: 20px; }
+.ion-tag.adduct, .chip.ion-chip.adduct { background: var(--success-soft); color: var(--success); }
+.ion-tag.delta, .chip.ion-chip.delta { font-family: var(--mono); font-size: 11px; }
+td.ion { white-space: nowrap; }
+/* the compound buttons: list one compound's features */
+.cmp-btn { display: inline-flex; align-items: center; gap: 3px; height: 22px; padding: 0 8px 0 6px; border-radius: 11px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); font: inherit; font-size: 11.5px; font-variant-numeric: tabular-nums; cursor: pointer; white-space: nowrap; }
+.cmp-btn:hover { border-color: var(--line-strong); color: var(--ink); }
+.cmp-btn[aria-pressed="true"], .chip.cmp-chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-deep); }
+.cmp-btn .icon { width: 13px; height: 13px; }
+.cid-filter:empty { display: none; }
 
 /* ---------------------------------------------------------------- fields: label above, quiet box */
 .field { position: relative; display: flex; flex-direction: column; min-width: 0; }

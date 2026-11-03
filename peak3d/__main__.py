@@ -71,6 +71,12 @@ def build_parser():
         for old in ("--mz-dynamic", "--mz-relaxed-second-mode", "--mz-step-curve", "--mz-fallback-reference",
                     "--mz-probe-features"):     # on by default since 2026-10-31; accepted so earlier command lines run
             p.add_argument(old, action="store_true", help=argparse.SUPPRESS)
+        p.add_argument("--no-compounds", action="store_true",
+                       help="skip compound grouping (adducts, in-source fragments, multimers and their isotopes of "
+                            "one compound, joined on peak-shape and intensity correlation)")
+        p.add_argument("--compound-veto", choices=["auto", "off"], default="auto",
+                       help="intensity veto in compound grouping: auto (default) rejects co-eluting pairs whose "
+                            "heights do not correlate across files, off tests every co-eluting pair on peak shape")
         p.add_argument("--quant", choices=["height", "area"], default="height",
                        help="value in the main aligned table (default height; the other is written too)")
 
@@ -162,7 +168,10 @@ def build_parser():
 
 
 def write_demo(out: Path) -> Path:
-    """Three synthetic centroid runs: 60 compounds with an M+1 isotope, noise, and RT drift between runs."""
+    """Three synthetic centroid runs: 60 compounds with an M+1 isotope, noise, and RT drift between runs. The twelve
+    strongest compounds also carry a sodium adduct and a water-loss fragment, six of them a fragment with no
+    table relation (shown by its m/z difference), and three a broad co-eluting ion two 13C steps up (a possible
+    isotope: the m/z fits, the peak shape does not), so the compound groups have something to show."""
     import numpy as np
 
     from .synth import Peak, make_cloud, write_mzml
@@ -170,8 +179,20 @@ def write_demo(out: Path) -> Path:
     data.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(0)
     base = list(zip(rng.uniform(150, 900, 60), rng.uniform(0.6, 3.4, 60), 10 ** rng.uniform(4.5, 6.5, 60)))
+    strongest = sorted(range(60), key=lambda i: -base[i][2])[:12]
+    partners = []                                  # (compound, m/z offset, relative height, FWHM in minutes; 0 = the compound's)
+    for j, i in enumerate(strongest):
+        m, r, hgt = base[i]
+        partners += [(i, 22.9892207 - 1.00727646, 0.35, 0.0), (i, -18.0105647, 0.25, 0.0)]      # [M+Na]+, [M+H-H2O]+
+        if j < 6:
+            partners.append((i, -57.0214637, 0.18, 0.0))                                       # a fragment, unnamed
+        if j < 3:
+            partners.append((i, 2 * 1.0033548, 0.12, 0.25))                                    # M+2 m/z, broad peak
     for k, shift in enumerate((0.0, 0.05, -0.04)):
         peaks = [Peak(float(m), float(r + shift + 0.01 * r * k), float(h), 0.05, iso=(0.15,)) for m, r, h in base]
+        for i, dm, rel, w in partners:
+            m, r, hgt = base[i]
+            peaks.append(Peak(float(m + dm), float(r + shift + 0.01 * r * k), float(hgt * rel), w or 0.05, iso=(0.15,) if not w else ()))
         cloud, _ = make_cloud(peaks, n_scans=800, dt=0.005, thresh=200.0, floor=100.0, n_noise=20000, seed=k,
                               name=f"demo{k + 1}")
         write_mzml(cloud, data / f"demo{k + 1}.mzML")

@@ -20,10 +20,11 @@ import pandas as pd
 
 from . import __version__
 from .align import AlignParams, AlignResult, FileAlignment, align_run, anchors_table, summary_table
-from .features import COLUMNS, MZ_TEXT, build_features, write_features
+from .features import COLUMNS, MZ_TEXT, build_features, precise_mz, write_features
 from .estimate import apply_scan_gains, estimate, parse_overrides, refit_after_gains, scan_gains, variant_label
 from .gapfill import fill_file
 from .grouping import consensus, group_features, merge_complementary
+from .compounds import cluster_compounds, group_iso_parent as _group_iso_parent, write_compounds
 from .io import Cloud, load_cloud
 from .ms2 import Collector, from_collected, save as save_ms2
 from .pick import pick_cloud
@@ -31,7 +32,7 @@ from .tsv import write_tsv
 from .warp import FitDiag, TableWarp
 
 RESERVED = {"group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_filled", "mz_ppm_spread", "rt_sd",
-            "iso_offset", "charge"}
+            "iso_offset", "charge", "compound_id", "role", "neutral_mass", "is_base", "n_members"}
 
 
 def log(msg):
@@ -90,6 +91,18 @@ def _pick_one(job):
     stem = cloud.name
     if spectra:
         save_ms2(from_collected(spectra, cloud.polarity), Path(ms2_dir) / f"{stem}.npz")
+    tic = time.perf_counter()
+    P = estimate(cloud, overrides=overrides)
+    t["estimate"] = time.perf_counter() - tic
+    if P.scan_gain:
+        # correct the scan-wide gain before anything else, then refit what it changes (floor, noise law) on the
+        # corrected cloud; the cache holds the corrected cloud, so gap filling and alignment see the same intensities
+        tic = time.perf_counter()
+        g, g_sd, g_n = scan_gains(cloud, P)
+        apply_scan_gains(cloud, g)
+        P = refit_after_gains(cloud, P)
+        P.gain_sd, P.n_gain_scans = g_sd, g_n
+        t["scan_gain"] = time.perf_counter() - tic
     tic = time.perf_counter()
     P = estimate(cloud, overrides=overrides)
     t["estimate"] = time.perf_counter() - tic
@@ -312,6 +325,10 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
                                    "area": df["area"].values, "noise": df["noise"].values, "file": k, "row": np.arange(len(df)),
                                    "iso_offset": df["iso_offset"].values.astype(np.int64),
                                    "charge": df["charge"].values.astype(np.int64),
+                                   "iso_parent": df["iso_parent"].values.astype(np.int64),
+                                   "mz_native": df["mz"].values, "scan_lo": df["scan_min"].values.astype(np.int64),
+                                   "scan_hi": df["scan_max"].values.astype(np.int64),
+                                   "scan_apex": df["scan_apex"].values.astype(np.int64),
                                    "sig": np.sqrt(a_ ** 2 + b_ ** 2 / np.maximum(df["height"].values, 1e-9))}))
     A = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     N = len(stems)
@@ -400,16 +417,39 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     keep_g = present >= need
     log(f"presence rule (>= {need} of {N} files, detected or confirmed): {int(keep_g.sum())} of {G} groups kept, "
         f"{int((~keep_g).sum())} dropped")
-    for k, s in enumerate(stems):
-        feats[s]["group_kept"] = keep_g[feats[s]["group_id"].values]
-        write_features(feats[s], features_dir / f"{s}.tsv")
-
     # group-level isotope labels: the members' majority iso_offset (0 = monoisotopic or unknown) and charge
     def _mode(values, n_levels):
         counts = np.bincount(gid * n_levels + np.clip(values, 0, n_levels - 1), minlength=G * n_levels).reshape(G, n_levels)
         return counts.argmax(axis=1)
     g_iso = _mode(A["iso_offset"].values, 4)
     g_z = _mode(A["charge"].values, 4)
+    g_iso_parent = _group_iso_parent(A, gid, G, g_iso)
+
+    # compound groups: adducts, in-source fragments, multimers and their isotopes of one compound
+    comp = None
+    if not getattr(args, "no_compounds", False):
+        tic = time.perf_counter()
+        comp, comp_pairs, comp_info = cluster_compounds(
+            cons, H, detected | confirmed, detected, A, stems, cache_dir, fwhm_scans, fwhm_study, dt_med, rt_tol,
+            res.ppm_tol, g_iso, g_z, g_iso_parent, cores=args.cores, log=log,
+            int_veto=getattr(args, "compound_veto", "auto"))
+        stage_times["compounds_s"] = round(time.perf_counter() - tic, 3)
+        stage_times["compounds"] = {k: (v.item() if hasattr(v, "item") else v) for k, v in comp_info.items()}
+        log(f"compounds: {comp_info['n_candidates']} co-eluting pairs, {comp_info['n_edges']} joined "
+            f"(shape cut {comp_info['shape_cut']:.2f}, related {comp_info['shape_cut_related']:.2f}, "
+            f"isotope pairs passing {comp_info.get('iso_pass_shape', float('nan')):.2f}; intensity veto "
+            f"{'on' if comp_info['int_active'] else 'off'}) -> {comp_info['n_compounds']} compounds, "
+            f"{comp_info['n_multi']} with several ions ({stage_times['compounds_s']} s)")
+        precise_mz(comp_pairs.assign(mz_a=cons["mz"][comp_pairs["gid_a"].values], mz_b=cons["mz"][comp_pairs["gid_b"].values])) \
+            .to_csv(output / "compound_pairs.tsv", sep="\t", index=False, float_format="%.4g")
+        write_compounds(output / "compounds.tsv", comp, cons, keep_g)
+    for k, s in enumerate(stems):
+        feats[s]["group_kept"] = keep_g[feats[s]["group_id"].values]
+        if comp is not None:
+            feats[s]["compound_id"] = comp["compound_id"].values[feats[s]["group_id"].values]
+            feats[s]["role"] = comp["role"].values[feats[s]["group_id"].values]
+        write_features(feats[s], features_dir / f"{s}.tsv")
+
     # halogen check: the MS1 isotope pattern of every kept monoisotopic group, in its strongest file
     hal = np.array([""] * G, dtype=object)
     hal_best = np.array([""] * G, dtype=object)
@@ -430,6 +470,9 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
                          "n_filled": n_filled.astype(int), "mz_ppm_spread": cons["mz_ppm_spread"],
                          "rt_sd": cons["rt_sd"], "iso_offset": g_iso.astype(int), "charge": g_z.astype(int),
                          "possible_halogen": hal, "halogen_pattern": hal_best})
+    if comp is not None:
+        for c in ("compound_id", "role", "neutral_mass", "is_base", "n_members"):
+            base[c] = comp[c].values
     # presence of every group (before the rule) in every file: 2 detected, 1 confirmed peak, 0 absent
     pres = np.where(detected, 2, np.where(confirmed, 1, 0)).astype(np.int8)
     write_tsv(pd.concat([base[["group_id", "mz", "rt", "n_detected", "n_confirmed"]], pd.DataFrame(pres, columns=stems)],

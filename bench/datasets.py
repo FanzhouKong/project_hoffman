@@ -78,6 +78,17 @@ DATASETS = [
         note="Same design as MTBLS733. Listing shows only small .wiff files; "
              "check whether .wiff.scan files are present before relying on it.",
     ),
+    dict(
+        id="PR002464", priority=1, source="manual", accession="PR002464",
+        instrument="Orbitrap ID-X (WashU) and Waters Q-ToF (CSU), RP / HILIC, pos / neg",
+        truth=["spike_ratio", "credentialing", "mixing_ratio", "blanks"],
+        note="Broeckling/Du/Patti benchmark (DOI 10.21228/M84R7C). "
+             "One sample set: NIST SRM 1950/8231 plasma, CIL 12C/13C yeast extract, 96 "
+             "standards in spike mixes A/B (log2 A/B = +-1..4), labelled internal standards, "
+             "dilution and mixing series. Orbitrap studies ST004500/01/02/04 downloaded by "
+             "scripts/05_download_pr002464.sbatch (centroid mzML only); spiked-standard truth by "
+             "bench/spiketruth.py. GC-MS ST003934 and the Q-ToF studies are not used yet.",
+    ),
     # --- lower priority -----------------------------------------------------
     dict(
         id="MASSCUBE_SI", priority=3, source="zenodo", accession="14159704",

@@ -1,0 +1,78 @@
+{
+  "3d_explanation": {
+    "surviving_basins": 3,
+    "split_membership_verified": true,
+    "separate_mass_verified": true,
+    "points": 129
+  },
+  "comparison": {
+    "trace_lane": "Conceptual architecture; no competitor executed",
+    "peak3d_lane": "Computed local graph and merged basins",
+    "sources": [
+      "https://doi.org/10.1186/1471-2105-9-504",
+      "https://doi.org/10.1038/s41467-023-39889-1",
+      "https://doi.org/10.1038/s41467-025-60640-5"
+    ]
+  },
+  "cloud": {
+    "initial_basins": 4,
+    "surviving_basins": 3,
+    "points": 2190,
+    "visible_points": 1235,
+    "display_height": "effective intensity",
+    "synthetic_split_pieces_per_mass_per_scan": 15,
+    "footprints": "Convex hulls of visible-point projections, not fitted peak bounds"
+  },
+  "link_example": {
+    "initial_basins": 2,
+    "split_effective_height": 110
+  },
+  "persistence_examples": [
+    {
+      "saddle": 60,
+      "persistence": 10,
+      "threshold": 35,
+      "basins_after": 1
+    },
+    {
+      "saddle": 15,
+      "persistence": 55,
+      "threshold": 35,
+      "basins_after": 2
+    }
+  ],
+  "eic_check": [
+    {
+      "es_top": 89.99037516819538,
+      "es_scan": 80,
+      "es_prom": 86.99037516819538,
+      "es_noise": 2.3736031195925334e-05,
+      "eic_snr": 28.996791722731796,
+      "eic_class": "ok"
+    },
+    {
+      "es_top": 45.80000019069487,
+      "es_scan": 90,
+      "es_prom": 0.0,
+      "es_noise": 1.4030987085703826e-06,
+      "eic_snr": 0.0,
+      "eic_class": "noapex"
+    },
+    {
+      "es_top": 21.076050084666313,
+      "es_scan": 80,
+      "es_prom": 2.1514321978571758,
+      "es_noise": 0.12620192723540383,
+      "eic_snr": 0.7171440659523919,
+      "eic_class": "lowsnr"
+    }
+  ],
+  "source_sha256": {
+    "peak3d/kernels.py": "7d83b558d5230a2a248d9ee91c264f6e734afec479eb341b1641d60402855b7a",
+    "peak3d/pick.py": "54ae352a2272990f16d425ed411821ae167ba4f66f6a682d6edb1b65809e635b",
+    "peak3d/estimate.py": "1ff20d901de7efb3a225d8901c309a618f1e8c8e6ba2acf53d3faf52920e244d",
+    "peak3d/features.py": "95495e23f2cb5ae89408202332c66a41a83eb8205e285f7acef830f9043d767f",
+    "presentation/peak3d/render_figures.py": "410ebb64a03e0dfa10598e182f1d81ad440d8b5416434d6b71e7a21de699ec0a"
+  },
+  "scope": "Synthetic kernel demonstrations; not benchmark results or a full end-to-end run."
+}

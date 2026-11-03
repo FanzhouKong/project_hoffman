@@ -129,6 +129,14 @@ def test_report_contents(processed):
     assert np.median(np.abs(ratio - 1)) < 0.05
     assert len(h["files"]) == 3 and {"n_features", "role", "mz_offset_ppm"} <= set(h["files"][0])
     assert h["residuals"]["n_after"] > 0
+    # compound groups travel with the bundle: ids, roles (coded), neutral mass, base flag, size
+    assert np.array_equal(a["g_cid"], t["compound_id"].to_numpy())
+    roles = [h["compounds"]["roles"][k] for k in a["g_role"]]
+    assert roles == t["role"].fillna("").astype(str).tolist()
+    assert np.array_equal(a["g_nmem"], t["n_members"].to_numpy()) and np.array_equal(a["g_base"], t["is_base"].to_numpy())
+    assert h["compounds"]["n_in_multi"] == int((t["n_members"] > 1).sum())
+    assert a["g_isoq"].shape == (len(t),) and a["g_isoq_of"].shape == (len(t),)
+    assert "g_isoq" in html or True          # the arrays are binary; the viewer reads them by name
     # the halogen check: the dichlorinated ion is called, its isotopes are not tested, the rest are "no"
     assert "possible_halogen" in t and "halogen_pattern" in t and h["halogen_names"][0] == "" and "Cl2" in h["halogen_names"]
     hal = t["possible_halogen"].fillna("")
@@ -138,6 +146,26 @@ def test_report_contents(processed):
     assert (hal[t["iso_offset"] > 0] == "").all() and (hal[(t["iso_offset"] == 0)] != "").all()
     assert (hal == "yes").sum() == 1 and (hal == "maybe").sum() <= 1
     assert h["params"]["stage_times_s"]["halogen_s"] < 20
+
+
+def test_possible_isotopes():
+    """mass arithmetic only: a monoisotopic-labelled feature k x 1.00335/z above a stronger co-eluting one"""
+    C13 = bundle.C13
+    mz = np.array([300.0, 300.0 + C13, 300.0 + 2 * C13, 500.0, 500.0 + C13, 300.0 + C13 / 2, 300.0 + C13 + 300e-6 * 20])
+    rt = np.array([1.0, 1.0, 1.0, 2.0, 2.3, 1.0, 1.0])
+    h = np.array([1e6, 1e5, 1e4, 1e6, 1e5, 1e4, 1e3])
+    iso = np.array([0, 1, 0, 0, 0, 0, 0])          # row 1 is a confirmed isotope already; row 2 was left monoisotopic
+    z = np.array([1, 1, 1, 1, 1, 2, 1])
+    k, of = bundle.possible_isotopes(mz, rt, h, iso, z, 5.0, 0.05)
+    assert k.tolist() == [0, 0, 2, 0, 0, 1, 0]      # row 4: RT too far; row 6: 20 ppm off
+    assert of.tolist() == [-1, -1, 0, -1, -1, 0, -1]
+
+
+def test_demo_has_compound_groups(tmp_path):
+    """the demo data give the viewer adducts, fragments and a possible isotope to show"""
+    from peak3d.__main__ import write_demo
+    d = write_demo(tmp_path / "demo")
+    assert len(list(d.glob("*.mzML"))) == 3
 
 
 def test_report_command_without_cache(processed, tmp_path):

@@ -27,6 +27,11 @@ from bench.runs import RUNS  # noqa: E402
 from peak3d.io import load_cloud  # noqa: E402
 
 K_SNR = 3.0
+# replicate search window per run (s), raw RT (no RT correction): the 99th percentile of how far strong features (S/N >=
+# 20, found in both other injections within 0.25 min) sit from the same compound in the other injections, measured
+# 2026-10-22 on the default's output (bench/diag/junk_rt_window.py --raw); fixed so every version and tool is judged with
+# the same window. A feature's own peak width is the floor.
+JUNK_RT_WINDOW_S = {"HZV029_cert": 6.6, "YEAST_NEG": 7.5, "SZ22_12C": 6.6, "YEAST_12C": 12.0}
 HALF_WIN = 10.0     # EIC window, median FWHMs each side
 SMOOTH = 0.5        # smoothing kernel FWHM / file median FWHM: kills 1-3 scan spikes, keeps doublets >= 1 FWHM apart
 
@@ -110,21 +115,30 @@ def classify_file(cloud, F, P):
     return C
 
 
-def rep_check(F, P, others):
-    """fraction of the other files whose raw EIC holds a smoothed peak (local maximum within one peak
-    width of the feature's corrected RT, prominence >= K_SNR x noise, top >= 5 % of this feature's
-    smoothed top) at the feature's m/z: is the feature reproducible in the replicates?"""
+def rep_check(F, P, others, run=None):
+    """fraction of the other files whose raw EIC holds a smoothed peak (prominence >= K_SNR x noise, top >= 5 % of this
+    feature's smoothed top) at the feature's m/z near its RT: is the feature reproducible in the replicates?
+    With run (the current check): the feature's own raw RT, no RT correction, and any qualifying local maximum within
+    max(its peak width, JUNK_RT_WINDOW_S[run]) counts. Without run (legacy, before 2026-10-22): the feature's corrected
+    RT mapped through each file's RT correction, and only the highest local maximum within one peak width is tested;
+    individual compounds scatter by several seconds around the correction, so that window called real compounds junk."""
     n = len(F)
     hits = np.zeros(n)
     if not others:
         return np.full(n, np.nan)
+    width = np.maximum(F["fwhm"].values, P["fwhm_med"])
     for cloudB, warpB, PB in others:
         S = cloudB.n_scans
         fs = PB["fwhm_scans"]
         sig_k = SMOOTH * fs / 2.355
-        rtB = np.interp(F["rt_corr"].values, warpB["rt_corr"].values, warpB["rt_native"].values)
+        if run is not None:
+            rtB = F["rt"].values
+            win = np.maximum(width, JUNK_RT_WINDOW_S[run] / 60.0)
+        else:
+            rtB = np.interp(F["rt_corr"].values, warpB["rt_corr"].values, warpB["rt_native"].values)
+            win = width
         sB = np.clip(np.searchsorted(cloudB.rt, rtB), 0, S - 1)
-        hw = np.maximum(1, np.round(np.maximum(F["fwhm"].values, P["fwhm_med"]) / PB["dt"])).astype(int)
+        hw = np.maximum(1, np.ceil(win / PB["dt"])).astype(int)
         W = int(np.ceil(HALF_WIN * fs))
         for i in range(n):
             f_mz, h = float(F["mz"].values[i]), max(float(F["height"].values[i]), 1.0)
@@ -142,20 +156,28 @@ def rep_check(F, P, others):
             ismax = (seg >= es[lo - 1:hi]) & (seg >= es[lo + 1:hi + 2])
             if not ismax.any():
                 continue
-            k = lo + int(np.flatnonzero(ismax)[np.argmax(seg[ismax])])
-            top = es[k]
-            j, lmin = k, top
-            while j > 0 and es[j - 1] <= top:
-                j -= 1
-                lmin = min(lmin, es[j])
-            j, rmin = k, top
-            while j < len(es) - 1 and es[j + 1] <= top:
-                j += 1
-                rmin = min(rmin, es[j])
-            prom = top - max(lmin, rmin)
             r = e - es
             noise_res = 1.4826 * np.median(np.abs(r - np.median(r)))
-            ok = prom / max(noise_res, F["noise"].values[i]) >= K_SNR and top >= 0.05 * F["_top"].values[i]
+            ref = max(noise_res, F["noise"].values[i])
+            cands = lo + np.flatnonzero(ismax)
+            if run is None:                       # legacy: only the highest maximum in the window
+                cands = cands[[int(np.argmax(es[cands]))]]
+            ok = False
+            for k in cands:
+                top = es[k]
+                if top < 0.05 * F["_top"].values[i]:
+                    continue
+                j, lmin = k, top
+                while j > 0 and es[j - 1] <= top:
+                    j -= 1
+                    lmin = min(lmin, es[j])
+                j, rmin = k, top
+                while j < len(es) - 1 and es[j + 1] <= top:
+                    j += 1
+                    rmin = min(rmin, es[j])
+                if (top - max(lmin, rmin)) / ref >= K_SNR:
+                    ok = True
+                    break
             hits[i] += ok
     return hits / len(others)
 

@@ -5,7 +5,7 @@ Steps (see README "Credentialed truth"):
  1. per-file RT offsets vs 12C replicate 1 (measured on strong ions / their labeled partners)
  2. permissive candidate seeds from 12C runs: ppm-clustered centroids -> EIC -> local maxima
  3. strict pairing per seed: 13C partner at m + n*1.00335 that co-elutes, has the same
-    peak shape (r >= R_MIN), and is present in >= MIN_REPS of 3 runs on both sides
+    peak shape (r >= R_MIN), and is present in all but MAX_MISSING of the runs on each side (>= 2)
  3b. label specificity: the seed m must be (nearly) absent from the 13C runs and the
     partner absent from the 12C runs - removes background ions present in both
  4. carbon-count check from the natural 12C M+1/M ratio -> tier A (consistent),
@@ -15,7 +15,9 @@ Steps (see README "Credentialed truth"):
  6. feature classes: isotope peak / adduct of another truth feature, else "primary"
 
 All thresholds are fixed here, before any tool is scored, and written to params.json.
-usage: credtruth.py DATASET [--cpus N]     DATASET = SZ22 | YEAST
+usage: credtruth.py DATASET [--cpus N]     DATASET = SZ22 | YEAST | PR2464_<study>
+PR2464_<study>: the yeast extract of Metabolomics Workbench PR002464 (Orbitrap studies ST004500 / 01 / 02),
+vial 23 (12C) vs vial 24 (U-13C), 4 injections each; written to data/truth/PR002464/<study>/yeast_cred/
 """
 import argparse
 import json
@@ -37,14 +39,23 @@ PPM = 5.0            # m/z tolerance for every EIC
 CLUSTER_PPM = 3.0    # gap that splits centroid m/z clusters when seeding
 MIN_SCANS = 4        # nonzero scans needed around an apex (seeding and presence)
 R_MIN = 0.8          # 12C vs 13C peak-shape correlation
-MIN_REPS = 2         # of 3 replicates, on each side
+MAX_MISSING = 1      # runs a credentialed peak may miss on each side, at least 2 holding it: 2 of 3, 3 of 4, and 2
+                     # of the 3 left when a PR002464 vial lost an injection to the m/z registry (bench/mz_registry.py)
 MAX_CROSS = 0.2      # label specificity: unlabeled m in 13C runs <= 0.2 x 12C height, and
                      # m + n*13C in 12C runs <= 0.2 x 13C height (+ natural M+n for n=1)
 NAT13C = 0.010816    # natural 13C/12C per carbon (1.07% / 98.93%)
 CARBON_TESTABLE = 10 # carbon check only if the expected M+1 is >= 10 x intensity floor
-FWHM_S = {"SZ22": 1.4, "YEAST": 4.0}   # measured by cred_explore.py (median, top ions)
-RT_DECOY_MIN = {"SZ22": 1.0, "YEAST": 2.0}
+FWHM_S = {"SZ22": 1.4, "YEAST": 4.0,   # measured by cred_explore.py (median, top ions)
+          # PR002464: median FWHM of the tier-A spiked-standard truth of the same study
+          "PR2464_ST004500": 3.5, "PR2464_ST004501": 2.1, "PR2464_ST004502": 2.7}
+RT_DECOY_MIN = {"SZ22": 1.0, "YEAST": 2.0,
+                "PR2464_ST004500": 1.0, "PR2464_ST004501": 1.0, "PR2464_ST004502": 1.0}
 MASS_DECOYS = (-0.02, 0.02)
+
+
+def min_reps(n):
+    """runs of a side with n of them that must hold a credentialed peak"""
+    return max(2, n - MAX_MISSING)
 
 
 def rt_tol_min(ds, dt):
@@ -164,14 +175,14 @@ def merge_seeds(lists, tol_rt):
 
 # ---------------------------------------------------------------- pairing ----
 def presence(runs, offs, mz, t, tol, half):
-    """apex per replicate at reference time t; stops early once MIN_REPS is out of reach.
+    """apex per replicate at reference time t; stops early once min_reps(len(runs)) is out of reach.
     Returns list of (height, apex_rt_ref, profile, rts_ref) or None per replicate."""
     out, missing = [], 0
     for r, o in zip(runs, offs):
         p = apex_in(r, mz, t + o, tol, half)
         if p is None:
             missing += 1
-            if len(runs) - missing < MIN_REPS:
+            if len(runs) - missing < min_reps(len(runs)):
                 return None
             out.append(None)
         else:
@@ -286,15 +297,25 @@ def classify(df, tol):
 
 
 # ------------------------------------------------------------------- main ----
+def cred_files(ds):
+    """(12C files, 13C files, output folder) of a credentialing dataset"""
+    if ds.startswith("PR2464_"):
+        from bench.spiketruth import study_files
+        st = ds.split("_", 1)[1]
+        f = study_files(st)
+        return (list(f.loc[f["vial"] == 23, "path"]), list(f.loc[f["vial"] == 24, "path"]),
+                ROOT / "data/truth/PR002464" / st / "yeast_cred")
+    return RUNS[f"{ds}_12C"]["files"], RUNS[f"{ds}_13C"]["files"], ROOT / "data/truth" / ds
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset", choices=list(FWHM_S))
     ap.add_argument("--cpus", type=int, default=4)
     a = ap.parse_args()
     ds = a.dataset
-    out = ROOT / "data/truth" / ds
+    f12, f13, out = cred_files(ds)
     out.mkdir(parents=True, exist_ok=True)
-    f12, f13 = RUNS[f"{ds}_12C"]["files"], RUNS[f"{ds}_13C"]["files"]
     runs12 = [load_run(f) for f in f12]
     runs13 = [load_run(f) for f in f13]
     dt = float(np.median(np.diff(runs12[0].rt)))
@@ -327,11 +348,16 @@ def main():
     # 2. seeds from all 12C replicates
     seeds = merge_seeds([seeds_from(r) for r in runs12], tol)
     seeds = seeds[(seeds["mz"] >= 60)].reset_index(drop=True)
+    if ds.startswith("PR2464_"):
+        # as the PR002464 spike and plasma truth: seeds >= 10 x the intensity floor (the Orbitrap floor
+        # there is ~150 counts, so unfiltered seeding gives hundreds of thousands of noise seeds)
+        seeds = seeds[seeds["h"] >= 10 * floor].reset_index(drop=True)
+        print(f"[{ds}] {len(seeds)} seeds >= 10 x floor", flush=True)
     print(f"[{ds}] {len(seeds)} candidate seeds", flush=True)
 
     cfg = dict(ds=ds, tol=tol, half=half, dt=dt, floor=floor)
     params = dict(dataset=ds, files_12C=f12, files_13C=f13, PPM=PPM, CLUSTER_PPM=CLUSTER_PPM,
-                  MIN_SCANS=MIN_SCANS, R_MIN=R_MIN, MIN_REPS=MIN_REPS, MAX_CROSS=MAX_CROSS, NAT13C=NAT13C,
+                  MIN_SCANS=MIN_SCANS, R_MIN=R_MIN, MAX_MISSING=MAX_MISSING, MAX_CROSS=MAX_CROSS, NAT13C=NAT13C,
                   FWHM_s=FWHM_S[ds], apex_tol_s=tol * 60, window_half_s=half * 60, floor=floor,
                   rt_offsets_12C_s=[o * 60 for o in off12], rt_offsets_13C_s=[o * 60 for o in off13],
                   carbon_window="n - max(1, 0.15n) <= n_iso <= n + max(2, 0.30n), M+1 shape r>=0.7",

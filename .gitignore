@@ -27,3 +27,8 @@ bench/diag/hzv029_missed_page.py
 
 # specdenoise: its loss-mass table, made on first use
 specdenoise/.cache/
+
+# job logs and zip bundles of figures that sit beside them
+presentation/**/*.out
+presentation/**/*.err
+presentation/**/*.zip

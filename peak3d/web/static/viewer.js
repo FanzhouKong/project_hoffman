@@ -36,6 +36,14 @@
       this.eicAt = new Map();
       if (header.eic) a.eic_row.forEach((row, k) => this.eicAt.set(row, k));
       this.rtS = Float32Array.from(a.g_rt, (v) => v * 60);       // retention times are shown in seconds
+      // compound groups (adducts, in-source fragments, multimers and their isotopes of one compound; null when the
+      // results predate them) and the isotope candidates the shape test did not confirm
+      this.cid = a.g_cid || null;
+      this.compounds = header.compounds || null;
+      this.roles = this.compounds ? this.compounds.roles : [""];
+      this.isoq = a.g_isoq || null;
+      this.isoqOf = a.g_isoq_of || null;
+      this.members = null;                                        // cid -> rows, built on first use
       this.kernel = header.kernel || "peak3d";
       this.kernelLabel = this.kernel === "peak3d" ? "Mosa" : header.kernel_label || this.kernel;
       this.kernelVersion = header.kernel_version || this.params.peak3d_version || "";
@@ -97,6 +105,42 @@
       this.setAnnotations(all);
     }
     stars(g) { const e = this.notes.get(g); return (e && e.stars) || []; }
+    role(g) { return this.cid ? this.roles[this.a.g_role[g]] || "" : ""; }
+    nMembers(g) { return this.cid ? this.a.g_nmem[g] : 1; }
+    // the rows of g's compound, g included, by m/z
+    siblings(g) {
+      if (!this.cid) return [g];
+      if (!this.members) {
+        this.members = new Map();
+        for (let r = 0; r < this.G; r++) {
+          const c = this.cid[r];
+          if (c < 0) continue;
+          const l = this.members.get(c);
+          if (l) l.push(r); else this.members.set(c, [r]);
+        }
+        for (const l of this.members.values()) l.sort((p, q) => this.a.g_mz[p] - this.a.g_mz[q]);
+      }
+      return this.members.get(this.cid[g]) || [g];
+    }
+    // what the feature is within its compound: a confirmed isotope, a possible one (mass arithmetic only), a named
+    // ion, the base ion, or the m/z difference to the base; null for a feature on its own
+    ion(g) {
+      const a = this.a, iso = a.g_iso[g], role = this.role(g), n = this.nMembers(g);
+      if (iso > 0) {
+        const series = / M\+\d+$/.test(role) ? role.replace(/ M\+\d+$/, "") : "";
+        const named = series && series !== "base";          // "[M+Na]+ M+1" names the series; "base M+1" does not
+        return { text: named ? role : `M+${iso}`, cls: "iso", title: `Isotope: M+${iso} of its monoisotopic feature, peak shape confirmed${named ? ` (${series} series)` : ""}` };
+      }
+      if (this.isoq && this.isoq[g] > 0) {
+        const p = this.isoqOf[g];
+        return { text: `M+${this.isoq[g]}?`, cls: "maybe", title: `Possible isotope: m/z and RT fit a +${this.isoq[g]} × 1.00335 step from feature #${a.g_id[p]} (m/z ${a.g_mz[p].toFixed(4)}), but the peak shapes did not confirm it` };
+      }
+      if (!this.cid || n <= 1) return null;
+      if (role.startsWith("[")) return { text: role, cls: "adduct", title: `${role}: an ion of the feature group's neutral mass${isFinite(a.g_nm[g]) ? " " + a.g_nm[g].toFixed(4) : ""}` };
+      if (role === "base") return { text: "M", cls: "base", title: "Base ion of its feature group (the strongest monoisotopic member); no mass relation names it" };
+      if (/^[+-]\d/.test(role)) return { text: `Δ ${role}`, cls: "delta", title: "m/z difference to the feature group's base ion; no known adduct or fragment relation" };
+      return role ? { text: role, cls: "", title: "" } : null;
+    }
     comment(g) { const e = this.notes.get(g); return (e && e.comment) || ""; }
     reviewed(g) { const e = this.notes.get(g); return !!(e && e.annotation); }
     hits(g, spec) { return (this.id && this.idsAt[spec].get(g)) || []; }
@@ -197,6 +241,7 @@
   // times in seconds, plus the MS2 count and best library hit when the results have them
   const TABLE_COLS = ["group_id", "mz", "rt_s", "rt_min_s", "rt_max_s", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
     "rt_sd_s", "iso_offset", "charge"];
+  const COMPOUND_COLS = ["compound_id", "role", "neutral_mass", "is_base", "n_members", "possible_isotope"];
   const HAL_COLS = ["possible_halogen", "halogen_pattern"];
   const HAL_TEXT = ["", "no", "maybe", "yes"];
   const MS2_COLS = ["n_ms2", "n_consensus", "annotation", "annotation_source", "reviewed", "annotation_score", "annotation_adduct",
@@ -204,11 +249,12 @@
   function bundleTable(R, rows) {
     const a = R.a, num = (v, d) => (isFinite(v) ? v.toFixed(d) : ""), clean = (t) => String(t || "").replace(/[\t\r\n]+/g, " ");
     const notes = !!(R.m2 || R.notes.size);
-    const parts = [TABLE_COLS.concat(a.g_hal ? HAL_COLS : [], notes ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
+    const parts = [TABLE_COLS.concat(R.cid ? COMPOUND_COLS : [], a.g_hal ? HAL_COLS : [], notes ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
     let buf = [];
     for (const g of rows) {
       const row = [a.g_id[g], a.g_mz[g].toFixed(6), num(60 * a.g_rt[g], 2), num(60 * a.g_rt_min[g], 2), num(60 * a.g_rt_max[g], 2),
         a.g_ndet[g], a.g_nconf[g], a.g_nfill[g], num(a.g_ppm[g], 3), num(60 * a.g_rtsd[g], 3), a.g_iso[g], a.g_z[g]];
+      if (R.cid) row.push(a.g_cid[g], R.role(g), num(a.g_nm[g], 6), a.g_base[g], a.g_nmem[g], R.isoq && R.isoq[g] ? `M+${R.isoq[g]}` : "");
       if (a.g_hal) row.push(HAL_TEXT[R.hal(g)] || "", R.halHint(g));
       if (notes) {
         const x = R.m2 ? R.annotation(g) : null, kc = R.ms2cAt.get(g), l = R.hits(g, R.defSpec), b = l.length ? R.hit(l[0]) : null;
@@ -232,8 +278,9 @@
     const charts = [];
     const state = { tab: "overview", sel: null, sortKey: "max", sortDir: -1, query: "", mono: false, all: false, withEic: false, ppm: 10,
       mzLo: "", mzHi: "", rtLo: "", rtHi: "", withMs2: false, identified: false, halogen: false, hit: null, autoSearched: false, copy: null,
-      starF: { red: false, blue: false, yellow: false } };
+      starF: { red: false, blue: false, yellow: false }, cidF: null };
     let detailRefs = null, repaintRows = null;    // the Features page's detail parts and table, while it is shown
+    let showSiblingsOf = null, clearCidF = null;  // the Features page's compound filter (list one compound's features)
     const track = (c) => { charts.push(c); return c; };
     const clearCharts = () => { while (charts.length) charts.pop().destroy(); };
 
@@ -249,6 +296,7 @@
       state.tab = id;
       detailRefs = null;
       repaintRows = null;
+      showSiblingsOf = clearCidF = null;
       body.className = id === "features" ? "page wide" : "page";
       headEl = annoEl = shown = null;
       chromCharts.length = 0;              // their charts are among those clearCharts destroys now
@@ -270,6 +318,7 @@
       body.append(h("div.tiles",
         tile("Files", int(R.N), R.params.input_files ? "centroided MS1 mzML" : null),
         tile("Aligned features", int(R.G), st.n_groups_all ? `${int(st.n_groups_all)} groups before the presence rule` : null),
+        R.compounds ? tile("Feature groups", int(R.compounds.n_multi), `features of one compound (adducts, fragments, isotopes) grouped together, holding ${int(R.compounds.n_in_multi)} features; ${int(R.G - R.compounds.n_in_multi)} features on their own`) : null,
         tile("Features per file", mf ? int(mf.med) : "–", mf && R.N > 1 ? `median; range ${int(mf.lo)}–${int(mf.hi)}` : "picked, before alignment"),
         tile("RT alignment", res ? `${fixed(res.mad_after, 2)} s` : R.N > 1 ? "off" : "n/a", res ? `anchor MAD, ${fixed(res.mad_before, 2)} s before correction` : "single file or correction disabled"),
         tile("Processing time", total ? duration(total) : "–", `${R.kernelLabel} ${R.kernelVersion}`),
@@ -317,7 +366,9 @@
       const mzLo = bound(state.mzLo, -Infinity), mzHi = bound(state.mzHi, Infinity);
       const rtLo = bound(state.rtLo, -Infinity), rtHi = bound(state.rtHi, Infinity);
       const starOn = STARS.some((c) => state.starF[c]);
+      const onlyCid = state.cidF != null && R.cid;
       for (let g = 0; g < R.G; g++) {
+        if (onlyCid) { if (R.cid[g] === state.cidF) out.push(g); continue; }
         if (a.g_mz[g] < mzLo || a.g_mz[g] > mzHi || R.rtS[g] < rtLo || R.rtS[g] > rtHi) continue;
         if (state.mono && a.g_iso[g] > 0) continue;
         if (state.all && a.g_ndet[g] < R.N) continue;
@@ -332,12 +383,15 @@
       }
       const key = {
         id: a.g_id, mz: a.g_mz, rt: a.g_rt, ndet: a.g_ndet, nfill: a.g_nfill, max: a.g_max, cv: a.g_cv, iso: a.g_iso,
-        ms2: R.nms2, score: R.annScore, hal: a.g_hal,
+        ms2: R.nms2, score: R.annScore, cmp: R.cid ? a.g_nmem : null, hal: a.g_hal,
       }[state.sortKey];
       if (mzq != null) out.sort((p, r) => Math.abs(a.g_mz[p] - mzq) - Math.abs(a.g_mz[r] - mzq));
       else if (state.sortKey === "ident") {         // annotated first, by name; then the rest by best score
         const name = (g) => (R.annotated[g] ? String(R.annotation(g).name).toLowerCase() : null);
         out.sort((p, r) => { const x = name(p), y = name(r); return x == null ? (y == null ? (R.annScore[r] || 0) - (R.annScore[p] || 0) : 1) : y == null ? -1 : state.sortDir * x.localeCompare(y); });
+      } else if (state.sortKey === "ion") {          // by compound, then m/z: a compound's ions stay together
+        const c = (g) => (R.cid ? R.cid[g] : 0);
+        out.sort((p, r) => state.sortDir * ((c(p) - c(r)) || (a.g_mz[p] - a.g_mz[r])));
       } else if (state.sortKey === "width") out.sort((p, r) => state.sortDir * ((a.g_rt_max[p] - a.g_rt_min[p]) - (a.g_rt_max[r] - a.g_rt_min[r])));
       else if (key) out.sort((p, r) => { const x = key[p], y = key[r]; return isNaN(x) ? 1 : isNaN(y) ? -1 : state.sortDir * (x - y); });
       return out;
@@ -355,6 +409,19 @@
         return c;
       };
       const count = h("span.body-small.muted");
+      // the compound filter: while it is on, the list holds one compound's features and nothing else applies
+      const cidBox = h("span.cid-filter");
+      function showSiblings(g) {
+        state.cidF = R.cid[g];
+        scroller.scrollTop = 0;
+        features_refresh();
+        if (state.sel !== g) select(g); else renderHead(g);
+      }
+      function clearCid() {
+        state.cidF = null;
+        features_refresh();
+        if (state.sel != null) renderHead(state.sel);
+      }
       // one chip per star colour: the features carrying any of the chosen stars
       const starChip = (c) => {
         const b = h("button.chip.state.star-chip", { type: "button", "aria-pressed": String(state.starF[c]), title: `Only features with the ${c} ${MARK[c][1]}` },
@@ -405,7 +472,7 @@
       const filters = [idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
           R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null,
-          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), h("span.spacer"), count, dl)];
+          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, dl)];
       const mini = track(P3.plot.scatter(mapEl, {
         height: 210, x: R.rtS, y: a.g_mz, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
         xLabel: "RT (s)", yLabel: "m/z", xFmt: (v, d) => fixed(v, Math.min(d, 0)), yFmt: (v, d) => fixed(v, Math.min(d, 0)),
@@ -416,13 +483,17 @@
 
       const COLS = [["id", "ID", true], ...(R.m2 ? [["score", "Score", true], ["ident", "Annotation", true]] : []),
         ["mz", "m/z", true], ["rt", "RT (s)", true], ["width", "Width (s)", true], ["ndet", "Detected", true],
-        ["nfill", "Gap-filled", true], ["max", "Max " + R.quant.toLowerCase(), true], ["cv", "CV", true], ["iso", "Isotope", false],
-        ...(a.g_hal ? [["hal", "Halogen", false]] : []), ...(R.m2 ? [["ms2", "MS2", true]] : [])];
-      const DESC = new Set(["max", "ndet", "ms2", "score", "hal"]);
+        ["nfill", "Gap-filled", true], ["max", "Max " + R.quant.toLowerCase(), true], ["cv", "CV", true], ["ion", "Ion", false],
+        ...(a.g_hal ? [["hal", "Halogen", false]] : []),
+        ...(R.cid ? [["cmp", "Feature group", true]] : []),
+        ...(R.m2 ? [["ms2", "MS2", true]] : [])];
+      const DESC = new Set(["max", "ndet", "ms2", "score", "cmp", "hal"]);
       const thead = h("thead", h("tr", COLS.map(([k, label]) => {
         const th = h("th.sortable.r", { "data-k": k }, label);
+        if (k === "ion" || k === "ident" || k === "hal") th.classList.remove("r");
+        if (k === "ion") th.title = "What the feature is within its feature group (the ions of one compound): M+n an isotope (peak shape confirmed), M+n? a possible isotope (mass arithmetic only), a named ion, or Δ the m/z difference to the compound's base ion";
+        if (k === "cmp") th.title = "Feature group (the ions of one compound) and its size; the button lists only that group's features";
         if (k === "hal") th.title = "The run's MS1 isotope check of each monoisotopic feature in its strongest file: the best hypothesis, with ? when only possible";
-        if (k === "iso" || k === "ident" || k === "hal") th.classList.remove("r");
         th.addEventListener("click", () => {
           if (state.sortKey === k) state.sortDir *= -1; else { state.sortKey = k; state.sortDir = DESC.has(k) ? -1 : 1; }
           features_refresh();
@@ -451,15 +522,27 @@
           if (k === state.sortKey && !state.query) th.appendChild(icon(state.sortDir > 0 ? "arrow_upward" : "arrow_downward"));
         });
       }
+      function ionCell(g) {
+        const x = R.ion(g), z = a.g_z[g] > 1 ? h("span.muted.body-small", ` z=${a.g_z[g]}`) : null;
+        if (!x) return h("td.ion", h("span.muted", R.cid ? "–" : "M"), z);
+        return h("td.ion", h("span.ion-tag." + x.cls, { title: x.title }, x.text), z);
+      }
+      function cmpCell(g) {
+        const n = R.nMembers(g);
+        if (n <= 1) return h("td.r.cmp", h("span.muted", "–"));
+        const on = state.cidF === R.cid[g];
+        const b = h("button.cmp-btn.state", { type: "button", "aria-pressed": String(on), title: on ? "Show all features again" : `Show only the ${n} features of feature group #${int(R.cid[g])}` },
+          icon("filter_list"), `#${int(R.cid[g])} · ${n}`);
+        b.addEventListener("click", (e) => { e.stopPropagation(); if (on) clearCid(); else showSiblings(g); });
+        return h("td.r.cmp", b);
+      }
       function rowEl(g) {
-        const iso = a.g_iso[g] > 0 ? `M+${a.g_iso[g]}` : "M";
-        const z = a.g_z[g] > 1 ? ` · z=${a.g_z[g]}` : "";
         const tr = h("tr", { "aria-selected": String(g === state.sel), "data-g": g },
           h("td.r.id-cell", R.stars(g).map((c) => h("span.star-ic.mini." + c, markIcon(c, true))), int(a.g_id[g])), ...(R.m2 ? [scoreCell(g), identCell(g)] : []),
           h("td.r", fixed(a.g_mz[g], 4)), h("td.r", fixed(R.rtS[g], 1)),
           h("td.r", fixed((a.g_rt_max[g] - a.g_rt_min[g]) * 60, 1)), h("td.r", `${a.g_ndet[g]}/${R.N}`),
           h("td.r", int(a.g_nfill[g])), h("td.r", sci(a.g_max[g])), h("td.r", isFinite(a.g_cv[g]) ? fixed(a.g_cv[g], 0) + "%" : "–"),
-          h("td", iso + z), ...(a.g_hal ? [halCell(g)] : []), ...(R.m2 ? [h("td.r", R.nms2[g] ? int(R.nms2[g]) : "–")] : []));
+          ionCell(g), ...(a.g_hal ? [halCell(g)] : []), ...(R.cid ? [cmpCell(g)] : []), ...(R.m2 ? [h("td.r", R.nms2[g] ? int(R.nms2[g]) : "–")] : []));
         tr.addEventListener("click", () => select(g));
         return tr;
       }
@@ -513,7 +596,12 @@
       }
       function features_refresh() {
         list = rows();
-        count.textContent = `${int(list.length)} of ${int(R.G)} features`;
+        count.textContent = state.cidF != null ? `${int(list.length)} features of feature group #${int(state.cidF)}` : `${int(list.length)} of ${int(R.G)} features`;
+        if (state.cidF != null) {
+          const x = h("button.chip.state.cmp-chip", { type: "button", "aria-pressed": "true", title: "Show all features again" }, icon("filter_list"), `Feature group #${int(state.cidF)}`, icon("close"));
+          x.addEventListener("click", clearCid);
+          cidBox.replaceChildren(x);
+        } else cidBox.replaceChildren();
         const emph = new Uint8Array(R.G);
         for (const g of list) emph[g] = 1;
         const num = (v, d) => (v !== "" && isFinite(+v) ? +v : d);
@@ -537,6 +625,8 @@
       }
       detailRefs = { head: headBox, chrom: chromBox, anno: annoBox };
       repaintRows = () => { paintRows(); features_refresh(); };
+      showSiblingsOf = R.cid ? showSiblings : null;
+      clearCidF = clearCid;
       features_refresh();
       if (state.sel == null && list.length) state.sel = list[0];
       if (state.sel != null) {
@@ -649,7 +739,19 @@
 
     function renderHead(g) {
       const a = R.a;
-      const iso = a.g_iso[g] > 0 ? `M+${a.g_iso[g]} isotope` : "Monoisotopic";
+      const ionX = R.ion(g), nmem = R.nMembers(g), inCmp = R.cid && nmem > 1;
+      const ionChip = ionX && ionX.cls !== "base" ? h("span.chip.static.ion-chip." + ionX.cls, { title: ionX.title }, ionX.text) :
+        h("span.chip.static", a.g_iso[g] > 0 ? `M+${a.g_iso[g]} isotope` : "Monoisotopic");
+      const baseChip = inCmp && a.g_base[g] ? h("span.chip.static.ok", { title: "the feature group's base ion: its strongest monoisotopic member" }, "base ion") : null;
+      const nmChip = inCmp && isFinite(a.g_nm[g]) ? h("span.chip.static", { title: "neutral mass of the feature group's compound, from the ions a mass relation explains" }, `M ${fixed(a.g_nm[g], 4)}`) : null;
+      let cmpBtn = null;
+      if (inCmp && showSiblingsOf) {
+        const on = state.cidF === R.cid[g];
+        cmpBtn = h("button.chip.state.cmp-chip", { type: "button", "aria-pressed": String(on), title: on ? "Show all features again" :
+          `List only the ${nmem} features of this feature group: adducts, in-source fragments, multimers and isotopes of one compound, grouped on peak shape and intensity correlation` },
+          icon("filter_list"), `Feature group #${int(R.cid[g])} · ${nmem} features`);
+        cmpBtn.addEventListener("click", () => (on ? clearCidF() : showSiblingsOf(g)));
+      } else if (inCmp) cmpBtn = h("span.chip.static", `Feature group #${int(R.cid[g])} · ${nmem} features`);
       const all = a.g_ndet[g] === R.N;
       const x = R.m2 ? R.annotation(g) : null;
       const stars = h("div.stars", STARS.map((c) => {
@@ -670,7 +772,7 @@
               x && x.unknown ? h("span.body-medium.id-best", h("i", "unknown"), " · set by you") : null),
           h("div.head-line",
             h("span.chip.static" + (all ? ".ok" : ".info"), icon(all ? "check_circle" : "info"), `Detected in ${a.g_ndet[g]} of ${R.N} files`),
-            h("span.chip.static", iso), a.g_z[g] > 0 ? h("span.chip.static", `z = ${a.g_z[g]}`) : null,
+            ionChip, baseChip, cmpBtn, nmChip, a.g_z[g] > 0 ? h("span.chip.static", `z = ${a.g_z[g]}`) : null,
             a.g_nfill[g] ? h("span.chip.static", `${a.g_nfill[g]} gap-filled`) : null,
             R.hal(g) === 3 ? h("span.chip.static.halogen", { title: "the run's MS1 isotope check; Show MS1 shows the pattern" }, icon("science"), `${hypName(R.halHint(g))} isotope pattern`) :
               R.hal(g) === 2 ? h("span.chip.static.info.maybe-halogen", { title: "the run's MS1 isotope check; Show MS1 shows the pattern" }, icon("info"), `${hypName(R.halHint(g))} pattern?`) : null,

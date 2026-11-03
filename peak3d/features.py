@@ -494,7 +494,7 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
     return out, rejected
 
 
-MZ_COLUMNS = ("mz", "mz_min", "mz_max", "mz_corr")
+MZ_COLUMNS = ("mz", "mz_min", "mz_max", "mz_corr", "neutral_mass", "mz_a", "mz_b")
 MZ_TEXT = {c: "%.6f" for c in MZ_COLUMNS}      # write_tsv's text_formats: what precise_mz does
 
 
