@@ -159,3 +159,94 @@ def test_end_to_end_compound_columns(tmp_path):
                         "--cores", "1", "--no-compounds"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr + r.stdout
     assert "compound_id" not in pd.read_csv(out2 / "aligned_feature_table.tsv", sep="\t").columns
+
+
+def test_pooled_sums_match_numpy_on_scaled_concatenated_traces():
+    """the pooled shape score equals Pearson r of the two traces scaled per file and joined end to end"""
+    rng = np.random.default_rng(3)
+    acc = np.zeros((1, 6))
+    xs, ys = [], []
+    for f in range(4):
+        n = 12 + f
+        x = np.abs(rng.normal(size=n)).astype(np.float32) * (10 ** f); y = (x * 0.3 + np.abs(rng.normal(size=n)) * 0.2).astype(np.float32)
+        E = np.concatenate([x, y]); eoff = np.array([0, n, 2 * n]); ws0 = np.array([0, 0])
+        lo = np.array([1, 2]); hi = np.array([n - 2, n - 1])
+        sums = C._pair_sums_kernel(E, eoff, ws0, lo, hi, np.array([0]), np.array([1]))
+        acc += sums
+        s0, s1 = min(lo), max(hi) + 1
+        xs.append(x[s0:s1] / x[s0:s1].max()); ys.append(y[s0:s1] / y[s0:s1].max())
+    r = C._pooled_r(acc)[0]
+    assert np.isclose(r, np.corrcoef(np.concatenate(xs), np.concatenate(ys))[0, 1], atol=1e-5)
+    # flat or short traces give nothing
+    E = np.array([1, 1, 1, 1, 2, 3, 4, 5], np.float32); eoff = np.array([0, 4, 8]); ws0 = np.array([0, 0])
+    assert C._pair_sums_kernel(E, eoff, ws0, np.array([0, 0]), np.array([3, 3]), np.array([0]), np.array([1]))[0, 0] == 4
+    assert np.isnan(C._pooled_r(np.zeros((1, 6)))[0])
+
+
+def test_tasks_for_file():
+    det = np.array([[1, 0, 1], [1, 1, 0], [0, 1, 1]], bool)
+    I = np.array([0, 0, 1]); J = np.array([1, 2, 2])
+    assert C._tasks_for_file(I, J, det, 0).tolist() == [0]
+    assert C._tasks_for_file(I, J, det, 1).tolist() == [2]
+    assert C._tasks_for_file(I, J, det, 2).tolist() == [1]
+
+
+def test_int_ratio_kernel():
+    """fraction of shared files whose height ratio sits within a factor of 2 of the pair's median ratio"""
+    H = np.array([[1e5, 1e5, 1e5, 1e5, 1e5], [2e4, 2e4, 2e4, 2e4, 2e4], [2e4, 2e5, 2e3, 2e4, 2e4], [1e4, 1e4, 0, 0, 0]])
+    L = np.where(H > 0, np.log10(np.maximum(H, 1e-30)), 0.0)
+    present = H > 0
+    I = np.array([0, 0, 0]); J = np.array([1, 2, 3])
+    out = C._int_ratio_kernel(L, present, I, J, 3, C.RATIO_TOL)
+    assert out[0] == 1.0 and abs(out[1] - 0.6) < 1e-9 and np.isnan(out[2])      # 2 shared files < 3
+
+
+def test_consistent_clusters_moves_and_splits():
+    """a member that agrees better with another group moves there; one that disagrees with its own group leaves;
+    agreement is height-weighted, so a tiny group with one strong pair cannot pull a member away"""
+    # stars: group 0 = {0, 1, 2}, group 1 = {3, 4}; member 2 pairs weakly with 0 and 1 but strongly with 3 and 4;
+    # member 1 pairs weakly with everything in its group
+    I = np.array([0, 0, 1, 2, 2, 3, 0]); J = np.array([1, 2, 2, 3, 4, 4, 3])
+    r = np.array([0.5, 0.6, 0.4, 0.95, 0.9, 0.97, 0.2])
+    cid = np.array([0, 0, 0, 1, 1]); h = np.array([1e6, 1e5, 1e5, 5e5, 2e5], float)
+    out, C_, moved, left, it = C._consistent_clusters(cid, 2, I, J, r, 0.8, np.ones(5, bool), h)
+    assert out[2] == out[3] == out[4] and out[0] != out[2]
+    assert out[1] != out[0]                                   # left its group
+    assert moved == 1 and left >= 1 and C_ == len(set(out.tolist()))
+    # an unassigned member (isotope child) stays unassigned
+    cid2 = np.array([0, 0, -1, 1, 1]); elig2 = np.array([1, 1, 0, 1, 1], bool)
+    assert C._consistent_clusters(cid2, 2, I, J, r, 0.8, elig2, h)[0][2] == -1
+    # a true group {base, adduct, fragment}: the two weak members pair noisily with each other but strongly with the
+    # heavy base, and a tiny unrelated group offers one strong pair: nobody moves, nobody leaves
+    I = np.array([0, 0, 1, 1]); J = np.array([1, 2, 2, 3]); r = np.array([0.95, 0.93, 0.5, 0.97])
+    cid = np.array([0, 0, 0, 1]); h = np.array([1e7, 2e5, 1e5, 3e4], float)
+    out, _, moved, left, _ = C._consistent_clusters(cid, 2, I, J, r, 0.85, np.ones(4, bool), h)
+    assert moved == 0 and left == 0 and out[0] == out[1] == out[2] != out[3]
+    # moves only: the first case's member 2 still moves, member 1 is not evicted
+    I = np.array([0, 0, 1, 2, 2, 3, 0]); J = np.array([1, 2, 2, 3, 4, 4, 3])
+    r = np.array([0.5, 0.6, 0.4, 0.95, 0.9, 0.97, 0.2])
+    out, _, moved, left, _ = C._consistent_clusters(np.array([0, 0, 0, 1, 1]), 2, I, J, r, 0.8, np.ones(5, bool),
+                                                    np.array([1e6, 1e5, 1e5, 5e5, 2e5], float), allow_leave=False)
+    assert moved == 1 and left == 0 and out[2] == out[3] and out[1] == out[0]
+
+
+def test_end_to_end_pooled_consistent(tmp_path):
+    """the alternative modes run through the CLI and group the synthetic compound the same way"""
+    d, (MA, MB, MD) = _study(tmp_path)
+    out = tmp_path / "out"
+    r = subprocess.run([sys.executable, "-m", "peak3d", "process", "--input", str(d), "--output", str(out), "--cores", "2",
+                        "--compound-shape", "pooled", "--compound-shape-files", "0", "--compound-cluster", "consistent",
+                        "--compound-veto", "ratio"], cwd=ROOT, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr + r.stdout
+    t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
+
+    def row(m):
+        k = np.flatnonzero(np.abs(t["mz"].values - m) / m * 1e6 < 5)
+        assert len(k) >= 1, f"no feature at {m}"
+        return t.iloc[k[np.argmax(t["n_detected"].values[k])]]
+    a_h, a_na, a_frag, a_m1 = (row(MA + C.PROTON), row(MA + 22.9892207), row(256.0700), row(MA + C.PROTON + C.C13))
+    assert a_h["compound_id"] == a_na["compound_id"] == a_frag["compound_id"] == a_m1["compound_id"]
+    assert a_h["role"] == "[M+H]+" and a_na["role"] == "[M+Na]+"
+    import json
+    info = json.loads((out / "params.json").read_text())["stage_times_s"]["compounds"]
+    assert info["shape_mode"] == "pooled" and info["cluster_mode"] == "consistent" and info["int_mode"] == "ratio"

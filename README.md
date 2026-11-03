@@ -81,7 +81,8 @@ The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out
 
 **Compound groups.** Features of one compound (adducts, in-source fragments, multimers, charge states and
 their isotopes) share a `compound_id`. Co-eluting features are joined when their peak shapes correlate
-(EIC Pearson r in the strongest files where both are detected) and, where the study makes it informative,
+(EIC Pearson r in every file where both are detected, averaged with the weaker ion's height as weight) and,
+where the study makes it informative,
 their intensities correlate across files; the cutoffs are calibrated on the study itself (unrelated pairs
 shifted onto one apex as the null, M/M+1 pairs as positive controls). `role` names the ion when a mass
 relation to the group's neutral mass fits (`[M+H]+`, `[M+Na]+`, `[M-H-H2O]-`, `[2M+H]+`, ...), `[M+H]+ M+1`
@@ -103,7 +104,9 @@ to be used as they are. The options you are most likely to need:
 | `--no-rt-correction` | off | group runs on their native RT |
 | `--no-gap-fill` | off | leave undetected cells empty (0) |
 | `--no-compounds` | off | skip compound grouping |
-| `--compound-veto` | auto | intensity veto in compound grouping: `auto` rejects co-eluting pairs whose heights do not correlate across files (when the study makes that informative), `off` tests every co-eluting pair on peak shape; on the PR002464 spike truth `off` gains recall in one study but triples the unlabelled members per compound in all three |
+| `--compound-veto` | auto | intensity veto in compound grouping: `auto` rejects co-eluting pairs whose heights do not correlate across files (12+ files) or whose height ratio is unstable across files (3 to 11 files), `off` tests every co-eluting pair on peak shape, `ratio` uses the ratio rule at any study size; on the PR002464 spike truth `off` gains recall in one study but triples the unlabelled members per compound in all three |
+| `--compound-shape weighted\|median\|pooled` | weighted | peak-shape score of a co-eluting pair: per-file EIC correlations averaged with the weaker ion's log height as weight, their median, or one correlation pooled over every scan of every shared file |
+| `--compound-shape-files N` | 0 | shared files per pair for the shape score (0 = all; N = the strongest N); the median over the 5 strongest was the earlier default and scores 0 to 2 points lower on the spike truth |
 
 Other commands: `peak3d pick FILE.mzML ... --output OUT` (per-file tables only) and
 `peak3d align --output OUT` (re-run alignment on an existing output with other options).
