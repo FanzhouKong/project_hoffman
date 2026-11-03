@@ -30,6 +30,7 @@ class Peak:
     tau: float = 0.0     # EMG tail constant in minutes; 0 = Gaussian
     z: int = 1
     iso: tuple = ()      # relative heights of M+1, M+2, ... (same shape, at mz + n*C13/z)
+    iso_da: tuple = ()   # optional mass shifts (Da, before / z) of M+1, M+2, ... instead of n*C13, e.g. 37Cl at 1.99705
     clip: float = 0.0    # if > 0: saturate the profile at clip * height (flat top)
 
 
@@ -84,7 +85,7 @@ def make_cloud(peaks, n_scans: int = 600, dt: float = 0.005, t0: float = 0.0,
     for pid, pk in enumerate(peaks):
         shape = profile(rt, pk)
         for n, ratio in enumerate((1.0,) + tuple(pk.iso)):
-            mz0 = pk.mz + n * C13 / pk.z
+            mz0 = pk.mz + (pk.iso_da[n - 1] if n and n <= len(pk.iso_da) else n * C13) / pk.z
             I = pk.height * ratio * shape
             k = int(np.argmax(I))
             rows.append(dict(peak_id=pid, iso_n=n, z=pk.z, mz=mz0, rt=float(rt[k]), height=float(I[k]),

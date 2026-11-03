@@ -29,18 +29,17 @@ COMPOUNDS = [
     ("tribromophenol", {"C": 6, "H": 3, "Br": 3, "O": 1}, True, "Br3"),
     ("bromochlorophenol", {"C": 6, "H": 4, "Br": 1, "Cl": 1, "O": 1}, True, "BrCl"),
 ]
-MASS = dict(halogen.MONO_MASS, P=30.9737620, F=18.9984032)
-ISO = dict(halogen._ISOTOPES, P=[(0.0, 1.0)], F=[(0.0, 1.0)])
+MASS = dict(halogen.MONO_MASS, F=18.9984032)
+ISO = dict(halogen._ISOTOPES, F=[(0.0, 1.0)])
 
 
 def theoretical(formula, K=6):
     """(neutral monoisotopic mass, probability per offset, mean mass shift per offset) of a formula"""
-    halogen._ISOTOPES.update({e: ISO[e] for e in ("P", "F")})
+    halogen._ISOTOPES["F"] = ISO["F"]
     try:
         p, m = halogen.pattern(formula, K)
     finally:
-        for e in ("P", "F"):
-            halogen._ISOTOPES.pop(e, None)
+        halogen._ISOTOPES.pop("F", None)
     mass = sum(MASS[e] * n for e, n in formula.items())
     return mass, p / p[0], m
 
@@ -106,6 +105,30 @@ def test_noisy_patterns(name, formula, is_hal, expect):
         assert (r["verdict"] == "halogen") == is_hal, (name, r["verdict"], r["best"], r["delta_chi2"])
         if is_hal:      # the composition is a hint: BrCl and Cl3 share M+2 spacing and M+4, so only M+2 separates them
             assert r["best"] in ("Cl", "Cl2", "Cl3", "Cl4", "Br", "Br2", "Br3", "BrCl", "Br2Cl", "BrCl2"), (name, r["best"])
+
+
+@pytest.mark.parametrize("name,formula,is_hal,expect", COMPOUNDS, ids=[c[0] for c in COMPOUNDS])
+def test_composition_has_the_ion_mass(name, formula, is_hal, expect):
+    """every hypothesis's composition is the ion's: its monoisotopic mass is the measured m/z (times z) to a few mDa,
+    with the lost electron accounted for, and a sane hydrogen count"""
+    rel, shift, mz = measured(formula)
+    r = halogen.halogen_test(rel, shift, mz, z=1, ppm=5.0, polarity="pos")
+    assert r["ion"] == "+"
+    for i, d in enumerate(r["hypotheses"]):
+        comp = {e: int(n) if n else 1 for e, n in __import__("re").findall(r"([A-Z][a-z]?)(\d*)", d["formula"])}
+        m = halogen.mass_of(comp) - halogen.ELECTRON
+        assert abs(d["mass_error_mda"] - 1e3 * (m - mz)) < 1e-6
+        assert 0 <= comp.get("H", 0) <= 2 * comp.get("C", 0) + comp.get("N", 0) + 3
+        # integer atom counts cannot hit every mass: a few mDa for the winner; a hypothesis whose halogens plus the
+        # carbons M+1 demands overshoot the mass has no sane composition, and that counts against it
+        if i == 0:
+            assert abs(m - mz) < 0.02, (name, d["name"], d["formula"], m, mz)
+        elif abs(m - mz) > halogen.MASS_SLACK:
+            assert d["chi2"] > r["hypotheses"][0]["chi2"]
+    # the pattern itself is unchanged by the balancing: the verdicts of test_exact_patterns hold
+    assert (r["verdict"] == "halogen") == is_hal and r["best"] == expect
+    r2 = halogen.halogen_test(rel, shift, mz, z=1, ppm=5.0, polarity="neg")
+    assert r2["ion"] == "-" and r2["best"] == expect
 
 
 def test_intensities_alone_with_coarse_mass_accuracy():
@@ -242,3 +265,9 @@ def test_extract_pattern_and_feature():
     assert any("2 mass units below" in f for f in res["test"]["flags"])
     # nothing at an empty m/z
     assert halogen.extract_pattern(cloud, 777.777, 1, s0, s1, ppm=5.0) is None
+    # the batch form (the pipeline's column) agrees with the single-feature form, and finds nothing at an empty m/z
+    mzs = np.array([m_dic, m_caf, 777.777])
+    rt = np.full(3, 0.30)
+    code, best = halogen.test_groups(cloud, cloud.rt, mzs, rt, np.full(3, 0.20), np.full(3, 0.39), np.ones(3, int), 5.0)
+    assert code.tolist() == [3, 1, 0] and best.tolist() == ["Cl2", t["best"], ""]
+    assert [halogen.VERDICTS[c] for c in code] == ["yes", "no", ""]

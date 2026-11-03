@@ -59,6 +59,8 @@ def build_parser():
         p.add_argument("--rt-tol-max", type=_positive(float), default=0.25, help="cap on the grouping RT tolerance (min)")
         p.add_argument("--no-rt-correction", action="store_true", help="group on native RT (identity warps)")
         p.add_argument("--no-gap-fill", action="store_true")
+        p.add_argument("--no-halogen-test", action="store_true",
+                       help="skip the MS1 isotope check for chlorine / bromine (the possible_halogen column)")
         p.add_argument("--min-presence", type=_positive(int), default=2,
                        help="a group must be detected, or confirmed by a peak in its gap-filled chromatogram, in at least "
                             "this many files (capped at the number of files; 1 = off; default 2)")
@@ -80,8 +82,8 @@ def build_parser():
         p.add_argument("--similarity", choices=list(METHODS), default="weighted_entropy",
                        help="spectral similarity score (default weighted_entropy)")
         p.add_argument("--min-similarity", type=_unit, default=0.7,
-                       help="score at which a feature's best hit on its consensus spectrum becomes its annotation "
-                            "(default 0.7); every hit above 0.1 is listed")
+                       help="score at which a feature's best hit on its denoised consensus spectrum becomes its "
+                            "annotation (default 0.7); every hit above 0.1 on a raw or denoised spectrum is listed")
         p.add_argument("--precursor-ppm", type=_positive(float), default=10.0,
                        help="feature m/z vs library precursor m/z tolerance (ppm, default 10)")
         p.add_argument("--fragment-tol", type=_positive(float), default=0.02,
@@ -113,6 +115,8 @@ def build_parser():
     p = sub.add_parser("identify", help="identity search of an existing output's MS2 spectra in an .msp or .pkl library")
     p.add_argument("output", type=Path, help="a peak3d output folder (with ms2_spectra.msp)")
     identify_opts(p, required=True)
+    p.add_argument("--cores", type=_positive(int), default=1,
+                   help="worker processes for denoising the MS2 spectra of an output made before the denoising (default 1)")
 
     p = sub.add_parser("external", help="run asari or MassCube instead of the peak3d picker (same output layout)")
     p.add_argument("--kernel", choices=["asari", "masscube"], required=True)
@@ -213,7 +217,8 @@ def main(argv=None):
             sys.exit(f"not a peak3d output folder: {args.output}")
         if not args.library.expanduser().is_file():
             sys.exit(f"--library: no such file: {args.library}")
-        identify(args.output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity)
+        identify(args.output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity,
+                 workers=args.cores)
         from .web.report import refresh_ids
         if refresh_ids(args.output):            # report.html shows the new hits (its chromatograms are kept)
             print("[peak3d] report.html updated", flush=True)

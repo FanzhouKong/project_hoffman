@@ -21,6 +21,12 @@ from peak3d.web import bundle, report, server
 ROOT = Path(__file__).resolve().parents[2]
 
 
+# a dichlorinated ion (diclofenac [M+H]+: 100 : 16 : 65 : 10 : 10.5 at 37Cl / 13C spacings) in every synthetic study
+HALOGEN_MZ = 296.0240
+HALOGEN_ISO = (0.16, 0.65, 0.10, 0.105)
+HALOGEN_DA = (1.00335, 1.99770, 3.00105, 3.99545)
+
+
 def _study(d: Path, n_files=3, n=30, seed=1):
     rng = np.random.default_rng(seed)
     base = list(zip(rng.uniform(150, 900, n), rng.uniform(0.6, 3.4, n), 10 ** rng.uniform(4.5, 6.5, n)))
@@ -28,6 +34,7 @@ def _study(d: Path, n_files=3, n=30, seed=1):
     for k in range(n_files):
         sh = (0.0, 0.04, -0.03)[k % 3]
         peaks = [Peak(float(m), float(r + sh), float(h), 0.05, iso=(0.15,)) for m, r, h in base]
+        peaks.append(Peak(HALOGEN_MZ, 2.0 + sh, 3e5, 0.05, iso=HALOGEN_ISO, iso_da=HALOGEN_DA))
         cloud, _ = make_cloud(peaks, n_scans=800, dt=0.005, thresh=200.0, floor=100.0, n_noise=8000, seed=k,
                               name=f"S{k}")
         write_mzml(cloud, d / f"S{k}.mzML")
@@ -122,6 +129,15 @@ def test_report_contents(processed):
     assert np.median(np.abs(ratio - 1)) < 0.05
     assert len(h["files"]) == 3 and {"n_features", "role", "mz_offset_ppm"} <= set(h["files"][0])
     assert h["residuals"]["n_after"] > 0
+    # the halogen check: the dichlorinated ion is called, its isotopes are not tested, the rest are "no"
+    assert "possible_halogen" in t and "halogen_pattern" in t and h["halogen_names"][0] == "" and "Cl2" in h["halogen_names"]
+    hal = t["possible_halogen"].fillna("")
+    row = t[(t["mz"] - HALOGEN_MZ).abs() < 0.01].index
+    assert len(row) == 1 and hal[row[0]] == "yes" and t["halogen_pattern"][row[0]] == "Cl2"
+    assert a["g_hal"][row[0]] == 3 and h["halogen_names"][a["g_halhint"][row[0]]] == "Cl2"
+    assert (hal[t["iso_offset"] > 0] == "").all() and (hal[(t["iso_offset"] == 0)] != "").all()
+    assert (hal == "yes").sum() == 1 and (hal == "maybe").sum() <= 1
+    assert h["params"]["stage_times_s"]["halogen_s"] < 20
 
 
 def test_report_command_without_cache(processed, tmp_path):
@@ -362,6 +378,11 @@ def test_ms1_pattern_through_the_server(processed):
         j0 = r["k"].index(0)
         assert r["rel"][j0] == 1.0 and abs(r["rel"][j0 + 1] - 0.15) < 0.05
         assert r["test"]["verdict"] == "none" and r["test"]["hypotheses"][0]["chi2"] < 20
+        # the dichlorinated ion through the route, with its ion composition balanced to the m/z
+        hid = int(t[(t["mz"] - HALOGEN_MZ).abs() < 0.01].iloc[0]["group_id"])
+        code, rh = c.json("/api/results/ms1", {"path": str(out), "group_id": hid})
+        assert code == 200 and rh["test"]["verdict"] == "halogen" and rh["test"]["best"] == "Cl2"
+        assert abs(rh["test"]["hypotheses"][0]["mass_error_mda"]) < 12 and "Cl2" in rh["test"]["formula"]
         assert len(r["apex_mz"]) == len(r["apex_inten"]) >= 2
         json.dumps(r)
         # a chosen file, a wrong file, a wrong feature
@@ -402,6 +423,8 @@ def test_identity_search_through_the_server(gui):
         assert code == 200 and meta["method"] == method and meta["n_queries"] == 1 and meta["n_identified"] == 1, meta
         h, a = bundle.unpack(gzip.decompress(c.req(f"/api/results/ms2ids?path={q}")[1]))
         assert h["ids"]["name"][0] == "Glucose" and a["id_score"][0] == pytest.approx(1.0, abs=1e-4), method
+        assert h["ms2"]["denoised"] and len(a["ms2_keep"]) == len(a["ms2_mz"])     # the search denoised the output
+        assert set(a["id_spec"].tolist()) == {1, 3} and h["ids"]["default_spectrum"] == "single_denoised"
         assert "Far precursor" not in h["ids"]["name"] and list(a["id_row"]) == [0] * len(a["id_row"])
         assert h["ids"]["spectra"] and np.allclose(a["id_mz"][:3], [m for m, _ in QUERY])
     # the report now carries the hits too
@@ -432,7 +455,7 @@ def test_identity_search_through_the_server(gui):
     assert eff.loc[1, "annotation"] == "unknown" and eff.loc[1, "source"] == "user" and eff.loc[1, "best_hit"] == "Glucose"
     code, r = c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": None})
     assert code == 200 and r["notes"] is None and not (out / "user_annotations.json").exists()
-    code, r = c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": {"spectrum": "single", "rank": 1}})
+    code, r = c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": {"spectrum": "single_denoised", "rank": 1}})
     a = r["notes"]["annotation"]
     assert code == 200 and a["name"] == "Glucose" and a["status"] == "user" and a["confirmed"]
     # comment and stars, also on a feature without MS2; both reach the exported table

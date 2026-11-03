@@ -202,6 +202,45 @@ def _fill_one(job):
     return stem, miss_idx, h, a, c
 
 
+def _halogen_one(job):
+    stem, cache_dir, native, corr, g_mz, g_rt, g_lo, g_hi, g_z, ppm, idx, noise = job
+    from .halogen import test_groups
+    cloud = Cloud.load_npz(Path(cache_dir) / f"{stem}.npz")
+    code, best = test_groups(cloud, corr, g_mz, g_rt, g_lo, g_hi, g_z, ppm, noise)
+    return idx, code, best
+
+
+def _halogen_columns(stems, cache_dir, res, cons, H, keep_g, g_iso, g_z, g_noise, ppm, cores, log):
+    """possible_halogen (yes / maybe / no, empty = not tested) and halogen_pattern (the best hypothesis) per group:
+    the MS1 isotope pattern of every kept monoisotopic group in the file where it is strongest (peak3d.halogen)"""
+    G, N = H.shape
+    code = np.zeros(G, np.uint8)
+    best = np.array([""] * G, dtype=object)
+    test = keep_g & (g_iso == 0) & (H.max(axis=1) > 0)
+    f_best = H.argmax(axis=1)
+    jobs = []
+    for k, s in enumerate(stems):
+        idx = np.flatnonzero(test & (f_best == k))
+        if len(idx) == 0:
+            continue
+        fa = res.files[s]
+        native = np.interp(cons["rt"][idx], fa.warp.corr, fa.warp.native)
+        own_mz = cons["mz"][idx] / (1.0 - fa.mz_offset_at(native) * 1e-6)    # on this file's own scale
+        jobs.append((s, str(cache_dir), fa.warp.native, fa.warp.corr, own_mz, cons["rt"][idx], cons["rt_min"][idx],
+                     cons["rt_max"][idx], g_z[idx], ppm, idx, g_noise[idx]))
+    n_workers = max(1, min(len(jobs), cores))
+    if n_workers == 1 or len(jobs) <= 1:
+        out = [_halogen_one(j) for j in jobs]
+    else:
+        with get_context("spawn").Pool(n_workers) as pool:
+            out = pool.map(_halogen_one, jobs, chunksize=1)
+    for idx, c, b in out:
+        code[idx] = c
+        best[idx] = b
+    from .halogen import VERDICTS
+    return np.array([VERDICTS[c] for c in code], dtype=object), best, int(test.sum())
+
+
 def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | None = None):
     output = Path(output)
     cache_dir = Path(cache_dir)
@@ -371,12 +410,26 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
         return counts.argmax(axis=1)
     g_iso = _mode(A["iso_offset"].values, 4)
     g_z = _mode(A["charge"].values, 4)
+    # halogen check: the MS1 isotope pattern of every kept monoisotopic group, in its strongest file
+    hal = np.array([""] * G, dtype=object)
+    hal_best = np.array([""] * G, dtype=object)
+    if not getattr(args, "no_halogen_test", False) and N > 0:
+        tic = time.perf_counter()
+        order_n = np.argsort(A["height"].values)
+        g_noise = np.zeros(G)
+        g_noise[gid[order_n]] = A["noise"].values[order_n]       # the strongest member's cell noise
+        hal, hal_best, n_tested = _halogen_columns(stems, cache_dir, res, cons, H, keep_g, g_iso, g_z, g_noise,
+                                                   float(getattr(args, "ppm", 5.0)), args.cores, log)
+        stage_times["halogen_s"] = round(time.perf_counter() - tic, 3)
+        log(f"halogen check: {int((hal == 'yes').sum())} halogen patterns and {int((hal == 'maybe').sum())} possible "
+            f"among {n_tested} monoisotopic groups ({stage_times['halogen_s']} s)")
     # tables
     base = pd.DataFrame({"group_id": np.arange(G), "mz": cons["mz"], "rt": cons["rt"], "rt_min": cons["rt_min"],
                          "rt_max": cons["rt_max"], "n_detected": cons["n_detected"].astype(int),
                          "n_confirmed": n_confirmed.astype(int),
                          "n_filled": n_filled.astype(int), "mz_ppm_spread": cons["mz_ppm_spread"],
-                         "rt_sd": cons["rt_sd"], "iso_offset": g_iso.astype(int), "charge": g_z.astype(int)})
+                         "rt_sd": cons["rt_sd"], "iso_offset": g_iso.astype(int), "charge": g_z.astype(int),
+                         "possible_halogen": hal, "halogen_pattern": hal_best})
     # presence of every group (before the rule) in every file: 2 detected, 1 confirmed peak, 0 absent
     pres = np.where(detected, 2, np.where(confirmed, 1, 0)).astype(np.int8)
     write_tsv(pd.concat([base[["group_id", "mz", "rt", "n_detected", "n_confirmed"]], pd.DataFrame(pres, columns=stems)],
@@ -451,7 +504,7 @@ def ms2_and_identify(output: Path, args, stage: dict) -> None:
     tic = time.perf_counter()
     try:
         from .ms2 import map_to_groups
-        map_to_groups(output)
+        map_to_groups(output, workers=max(1, int(getattr(args, "cores", 1) or 1)))
     except Exception as e:
         log(f"ms2 mapping skipped: {e!r}")
     stage["ms2_s"] = round(time.perf_counter() - tic, 3)
@@ -459,13 +512,14 @@ def ms2_and_identify(output: Path, args, stage: dict) -> None:
         tic = time.perf_counter()
         try:
             from .library import identify
-            identify(output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity)
+            identify(output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity,
+                     workers=max(1, int(getattr(args, "cores", 1) or 1)))
         except Exception as e:
             log(f"identify failed: {e!r}")
         stage["identify_s"] = round(time.perf_counter() - tic, 3)
 
 
-def _reidentify(output: Path, stage: dict) -> None:
+def _reidentify(output: Path, stage: dict, cores: int = 1) -> None:
     """after a regroup the group ids change: repeat the last identity search with its own settings, or drop it"""
     path = output / "identifications.json"
     if not path.exists():
@@ -475,7 +529,7 @@ def _reidentify(output: Path, stage: dict) -> None:
         if not Path(s["library"]).is_file():
             raise FileNotFoundError(s["library"])
         args = argparse.Namespace(library=s["library"], similarity=s["method"], precursor_ppm=s["precursor_ppm"],
-                                  fragment_tol=s["fragment_tol"], min_similarity=s["min_score"])
+                                  fragment_tol=s["fragment_tol"], min_similarity=s["min_score"], cores=cores)
     except (OSError, ValueError, KeyError) as e:
         from .annotations import retire
         retire(output, keep_search=False)
@@ -524,7 +578,7 @@ def align_existing(args):
     files = sorted(str(p) for p in (output / "features").glob("*.tsv") if not p.name.endswith("rejected.tsv")
                    and p.name != "manifest.tsv")
     if (output / "identifications.json").exists():
-        _reidentify(output, stage)
+        _reidentify(output, stage, args.cores)
     else:
         ms2_and_identify(output, args, stage)
     _write_params(output, args, res, stage, files)
