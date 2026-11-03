@@ -235,10 +235,10 @@ def _mark_losses(maxmass, bounds, bitmap):
 
 def loss_table(bounds):
     """cumulative count of plausible-loss bins up to MAX_TABLE for this element bound vector (cached per process and
-    on disk under specdenoise/.cache)"""
+    on disk under $SPECDENOISE_CACHE, else specdenoise/.cache)"""
     key = tuple(int(x) for x in bounds)
     if key not in _TABLES:
-        cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+        cache = os.environ.get("SPECDENOISE_CACHE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
         path = os.path.join(cache, "losses_" + "_".join(map(str, key)) + f"_{int(MAX_TABLE)}_{BIN:g}.npy")
         if os.path.exists(path):
             _TABLES[key] = np.load(path)
@@ -248,7 +248,7 @@ def loss_table(bounds):
             cum = np.concatenate([[0], np.cumsum(bitmap, dtype=np.int64)]).astype(np.int32)
             try:
                 os.makedirs(cache, exist_ok=True)
-                tmp = path + f".{os.getpid()}.tmp"
+                tmp = f"{path[:-4]}.{os.getpid()}.tmp.npy"     # ends in .npy: np.save would append it otherwise
                 np.save(tmp, cum)
                 os.replace(tmp, path)
             except OSError:
