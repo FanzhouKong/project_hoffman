@@ -54,6 +54,13 @@ def test_rules():
     assert fm.precursor_ok(vec("C4H10N3O2"), m("C4H10N3O2"), CAPS, True)
     assert not fm.precursor_ok(vec("C4H9N3O2"), m("C4H9N3O2"), CAPS, True)
     assert fm.precursor_ok(vec("C4H9N3O2"), m("C4H9N3O2"), CAPS, False)
+    # small polar [M+H]+ ions outside the Golden Rules' common ranges but inside the extended ones: taurine (H/C 4,
+    # O/C 1.5), urea (H/C 5), phosphoserine (O/C 2), hypotaurine
+    for t in ("C2H8NO3S", "CH5N2O", "C3H9NO6P", "C2H8NO2S"):
+        assert fm.precursor_ok(vec(t), m(t), CAPS, True), t
+    # beyond the extended ranges: O/C 3.5, H/C 0.05
+    for t in ("C2H8NO7S", "C20HN2"):
+        assert not fm.precursor_ok(vec(t), m(t), CAPS, True), t
 
 
 def brute(target, tol, bounds):

@@ -216,15 +216,16 @@ def ion_ok(f, m, caps_tab):
 
 @njit(cache=True)
 def precursor_ok(f, m, caps_tab, even_electron):
-    """a precursor ion formula inferred from its mass: an organic ion within the Golden Rules' common ranges
-    (99.7 % of known compounds: H/C 0.2-3.1, N/C <= 1.3, O/C <= 1.2, P/C <= 0.3, S/C <= 0.8, F/C <= 1.5, Cl/C <= 0.8,
-    Br/C <= 0.8, Si/C <= 0.5); even-electron (the usual ESI case: [M+H]+, [M+Na]+, [M-H]-, [M+Cl]- ...) means a
-    half-integer DBE"""
+    """a precursor ion formula inferred from its mass: an organic ion within the Golden Rules' extended ranges
+    (99.99 % of known compounds: H/C 0.1-6; N/C <= 4, O/C <= 3, P/C <= 2, S/C <= 3, F/C <= 6, Cl, Br, I/C <= 2,
+    Si/C <= 1 as _ratios_ok); even-electron (the usual ESI case: [M+H]+, [M+Na]+, [M-H]-, [M+Cl]- ...) means a
+    half-integer DBE. Not the common ranges (99.7 %: H/C <= 3.1, O/C <= 1.2, P/C <= 0.3 ...): those miss small polar
+    metabolites, whose protonated ions have few carbons (taurine C2H8NO3S+ has H/C 4 and O/C 1.5; also urea,
+    ethanolamine, phosphoserine, cysteic acid): 4.3 % of NIST23 [M+H]+ spectra below m/z 150 and 0.6 % overall lost
+    their true formula, 0.1 % with the extended ranges. T0 then ranked only wrong candidates and removed the real
+    fragments."""
     c = f[C]
-    if c == 0 or 5 * f[H] < c or 10 * f[H] > 31 * c:
-        return False
-    if 10 * f[N] > 13 * c or 10 * f[O] > 12 * c or 10 * f[P] > 3 * c or 10 * f[S] > 8 * c or 10 * f[F] > 15 * c \
-            or 10 * f[CL] > 8 * c or 10 * f[BR] > 8 * c or 10 * f[I] > 8 * c or 10 * f[SI] > 5 * c:
+    if c == 0 or 10 * f[H] < c or f[H] > 6 * c:
         return False
     if not _ratios_ok(f, caps_tab, _caps_row(m)):
         return False

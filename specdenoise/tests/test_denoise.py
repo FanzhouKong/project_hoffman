@@ -57,6 +57,19 @@ def test_t0_infers_formula_and_denoises():
     assert (r.keep == true).all(), list(zip(mz, r.reasons, true, r.rank))
 
 
+def test_t0_small_polar_precursor():
+    # taurine [M+H]+ (C2H8NO3S+, H/C 4, O/C 1.5), QTOF HILIC mouse feces, highest-TIC spectrum of feature 126.0219:
+    # the Golden Rules' common ranges left only C4H5N3P+ as a candidate and T0 removed 108.0116 (-H2O), the base
+    # fragment
+    mz = [64.96911, 78.98488, 80.96419, 83.05976, 96.99629, 108.01157, 108.99575, 109.01327, 110.00785, 126.02247,
+          127.00544, 127.02658, 128.01915]
+    inten = [1140, 592, 246, 316, 518, 8324, 1308, 366, 630, 9266, 196, 206, 492]
+    r = denoise(mz, inten, 126.021914, params=Params(tier="t0", top_k=5))
+    assert "C2H8NO3S" in [fm.format(c) for c in r.candidates[:5]], [fm.format(c) for c in r.candidates[:5]]
+    kept = dict(zip(mz, r.keep))
+    assert kept[108.01157] and kept[64.96911] and kept[80.96419], list(zip(mz, r.reasons))
+
+
 def test_t0_falls_back_when_formula_disagrees():
     mz, inten, true, pmz = spectrum("C4H9N3O2", "[M+H]+", LOSSES, NOISE)
     r = denoise(mz, inten, pmz, formula="C6H12O6", adduct="[M+H]+")       # wrong formula for this precursor m/z
