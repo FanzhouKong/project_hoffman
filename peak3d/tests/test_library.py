@@ -315,10 +315,10 @@ def test_identify_denoising_search(tmp_path):
     assert (tsv.loc["single", "denoise_key"] == -1).all() and tsv.loc[("single_denoised", "No formula"), "denoise_key"] == -1
     keys = tsv.loc["single_denoised", "denoise_key"]
     assert keys["Leucine CE10"] == keys["Leucine CE20"] == keys["Leucine CE40"] != keys["Isobar"] >= 0
-    z = np.load(out / library.DENOISE_FILE)
-    assert len(z["group_id"]) == 2 and z["ion"][keys["Leucine CE10"]] == "C6H14NO2+"
-    k = keys["Leucine CE10"]
-    m = z["keep"][z["off"][k]:z["off"][k + 1]]
+    with np.load(out / library.DENOISE_FILE) as z:          # closed before the T0 search below replaces the file (Windows)
+        assert len(z["group_id"]) == 2 and z["ion"][keys["Leucine CE10"]] == "C6H14NO2+"
+        k = keys["Leucine CE10"]
+        m = z["keep"][z["off"][k]:z["off"][k + 1]]
     assert m.tolist() == [not (105 < x < 116) for x in np.sort(noisy_mz)]        # the two noise ions removed
     from peak3d.web import bundle
     _, a = bundle.ms2_ids(out, [1, 2], stems=["S0"])
