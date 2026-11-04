@@ -7,4 +7,4 @@ decomposition per ion (tier T1); with only the precursor m/z the precursor formu
 accurate mass and ranked by the fragment intensity they explain (tier T0)."""
 from .denoise import denoise, Result, Params      # noqa: F401
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
