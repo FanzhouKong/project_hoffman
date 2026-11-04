@@ -89,8 +89,10 @@ def _records(df: pd.DataFrame) -> list[dict]:
 @njit(cache=True)
 def eic_on_grid(off, mz, inten, rt, targets, tols, x0, dx, n_pts):
     """per group: the max-intensity EIC within targets +/- tols, on the grid x0 + j*dx (j < n_pts) of the
-    scan times ``rt``. Scans falling in a grid cell are max-pooled; empty cells interpolate linearly
-    between the neighbouring scans, so a grid finer than the scan spacing does not leave holes."""
+    scan times ``rt``. Scans falling in a grid cell are max-pooled; an empty cell interpolates linearly
+    between the neighbouring scans when both hold signal, so a grid finer than the scan spacing does not
+    leave holes inside a peak, and stays at zero when either neighbour is empty: a one-scan rise is drawn
+    as a step, never as a ramp that looks like a shoulder the picker left out."""
     n = len(targets)
     S = len(rt)
     out = np.zeros((n, n_pts), np.float32)
@@ -126,10 +128,31 @@ def eic_on_grid(off, mz, inten, rt, targets, tols, x0, dx, n_pts):
             k = np.searchsorted(rt[a:b], t)
             if k <= 0 or k >= m:
                 continue
+            if vals[k - 1] <= 0.0 or vals[k] <= 0.0:
+                continue
             t0 = rt[a + k - 1]
             t1 = rt[a + k]
             w = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
             out[g, j] = (1.0 - w) * vals[k - 1] + w * vals[k]
+    return out
+
+
+@njit(cache=True)
+def scans_in_window(off, mz, inten, rt, targets, tols, lo, hi):
+    """per group: (MS1 scans whose time ``rt`` lies in [lo, hi], those among them holding a centroid within
+    targets +/- tols), int32 (n, 2). The bounds are inclusive with a small slack so the scans that set them are
+    counted."""
+    n = len(targets)
+    out = np.zeros((n, 2), np.int32)
+    eps = 1e-6
+    for g in range(n):
+        a = np.searchsorted(rt, lo[g] - eps)
+        b = np.searchsorted(rt, hi[g] + eps)
+        out[g, 0] = b - a
+        for s in range(a, b):
+            p = _lower_bound(mz, off[s], off[s + 1], targets[g] - tols[g])
+            if p < off[s + 1] and mz[p] <= targets[g] + tols[g]:
+                out[g, 1] += 1
     return out
 
 
@@ -234,6 +257,7 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
     dx = (rt_hi + pad - x0) / (n_pts - 1)
     mz_c = t["mz"].to_numpy(float)
     traces = np.zeros((n_groups, F, n_pts), np.float32)
+    n_scans = np.zeros((n_groups, F, 2), np.uint16)       # MS1 scans inside [rt_min, rt_max] per file, and with signal
     offsets = {r["stem"]: (r.get("mz_offset_ppm") or 0.0) for r in files_info}
     for j, k in enumerate(shown):
         s = stems[k]
@@ -241,6 +265,8 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
         corr, moff = _file_axis(output, s, cloud)
         target = _native_mz(mz_c, t["rt"].to_numpy(float), cloud, corr, moff, offsets.get(s, 0.0))
         traces[:, j, :] = eic_on_grid(cloud.off, cloud.mz, cloud.inten, corr, target, target * ppm * 1e-6, x0, dx, n_pts)
+        n_scans[:, j, :] = np.minimum(scans_in_window(cloud.off, cloud.mz, cloud.inten, corr, target, target * ppm * 1e-6,
+                                                      rt_lo, rt_hi), 65535)
     scale = traces.reshape(n_groups, -1).max(axis=1)
     q = np.zeros_like(traces, dtype=np.uint16)
     ok = scale > 0
@@ -248,7 +274,7 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
     info = {"files": shown, "points": n_pts, "n": n_groups, "ppm": ppm, "of": G,
             "selection": "most intense groups" if n_groups < G else "all groups"}
     arrays = {"eic_row": rows.astype(np.int32), "eic_x0": x0.astype(np.float32), "eic_dx": dx.astype(np.float32),
-              "eic_scale": scale.astype(np.float32), "eic_q": q.reshape(-1)}
+              "eic_scale": scale.astype(np.float32), "eic_q": q.reshape(-1), "eic_ns": n_scans.reshape(-1)}
     return (info, arrays), None
 
 

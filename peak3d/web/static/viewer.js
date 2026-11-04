@@ -235,7 +235,9 @@
       const traces = e.files.map((f, j) => {
         const y = new Float32Array(P), off = (k * F + j) * P, sc = a.eic_scale[k] / 65535;
         for (let p = 0; p < P; p++) y[p] = a.eic_q[off + p] * sc;
-        return { file: f, y };
+        // MS1 scans of this file inside the peak window, and those holding the ion (older bundles: unknown)
+        const ns = a.eic_ns ? { all: a.eic_ns[(k * F + j) * 2], signal: a.eic_ns[(k * F + j) * 2 + 1] } : null;
+        return { file: f, y, ns };
       });
       return { x, traces };
     }
@@ -1103,6 +1105,20 @@
       }
     }
 
+    // how many MS1 scans the drawn peak rests on: the scans inside the peak window per shown file, and those that
+    // hold the ion within the EIC tolerance. The line between two scans is interpolated, and only where both hold
+    // signal, so a peak that rises within one scan is drawn as a step
+    function scanNote(e) {
+      const ns = e.traces.map((t) => t.ns).filter(Boolean);
+      if (!ns.length) return null;
+      const lo = (k) => Math.min(...ns.map((n) => n[k])), hi = (k) => Math.max(...ns.map((n) => n[k]));
+      const range = (k) => lo(k) === hi(k) ? int(lo(k)) : `${int(lo(k))}–${int(hi(k))}`;
+      const text = ns.length === 1
+        ? `${int(ns[0].all)} MS1 scan${ns[0].all === 1 ? "" : "s"} inside the peak window, ${int(ns[0].signal)} of them holding the ion`
+        : `${range("all")} MS1 scans per file inside the peak window, ${range("signal")} of them holding the ion`;
+      return h("p.body-small.scan-note", h("b", text), ". Between scans the line is interpolated, and only where both neighbouring scans hold the ion; a rise within one scan is a step.");
+    }
+
     // the chromatograms with the peak bounds, apexes and where the MS2 spectra were taken; the values per file and
     // the numbers. Built once per feature: annotation changes leave it alone
     function chromColumn(g) {
@@ -1147,12 +1163,17 @@
           h("p.body-small.muted", `±${R.h.eic.ppm} ppm around the feature, on the aligned RT axis${R.h.eic.files.length < R.N ? `; ${R.h.eic.files.length} of ${R.N} files (evenly spaced)` : ""}. ` +
             `Peak ${fixed(t0, 1)}–${fixed(t1, 1)} s (dashed), apex of each trace (dot)` +
             (tic.length ? (one ? "; red line: where the MS2 spectrum was taken" : `; red line: the highest-TIC MS2 spectrum; red stars: the ${int(merged.length)} spectra merged into the consensus, on their file's trace`) : "") +
-            ". Hover a trace to name its file.")), ms1.button), chartEl);
+            ". Hover a trace to name its file."),
+          scanNote(e)), ms1.button), chartEl);
         const c = track(P3.plot.line(chartEl, {
           height: 250, series, vlines, dots, xLabel: "Aligned RT (s)", yLabel: "Intensity",
           xFmt: (v, d) => fixed(v, Math.min(d, 1)),
           label: (si) => series[si].label,
-          tip: (si, k) => { const st = statusOf(series[si].id); return `<b>${esc(series[si].label)}</b><br>RT ${fixed(e.x[k], 1)} s · ${sci(series[si].y[k])}${st != null ? "<br>" + STATUS[st] : ""}`; },
+          tip: (si, k) => {
+            const st = statusOf(series[si].id), ns = e.traces[si].ns;
+            return `<b>${esc(series[si].label)}</b><br>RT ${fixed(e.x[k], 1)} s · ${sci(series[si].y[k])}${st != null ? "<br>" + STATUS[st] : ""}` +
+              (ns ? `<br>${int(ns.signal)} of ${int(ns.all)} MS1 scans in the peak window hold the ion` : "");
+          },
         }));
         chromCharts.push(c);
         parts.push(P3.plot.legend([

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from peak3d import io
 from peak3d.synth import Peak, make_cloud, write_mzml
 from peak3d.web import bundle, report, server
 
@@ -79,7 +80,10 @@ def _eic_reference(cloud, rt, target, tol, x0, dx, n_pts):
     t = x0 + dx * np.arange(n_pts)
     fill = np.interp(t, rt[a:b], vals)
     inside = (t > rt[a]) & (t < rt[b - 1])
-    out[~seen & inside] = fill[~seen & inside]
+    k = np.searchsorted(rt[a:b], t)                     # interpolate only between two scans that both hold signal
+    both = (k > 0) & (k < b - a)
+    both[both] &= (vals[k[both] - 1] > 0) & (vals[k[both]] > 0)
+    out[~seen & inside & both] = fill[~seen & inside & both]
     return out
 
 
@@ -94,6 +98,27 @@ def test_eic_on_grid_matches_reference(dx):
     ref = _eic_reference(cloud, rt, 300.0, 300.0 * 10e-6, x0, dx, 48)
     assert np.allclose(got, ref, rtol=1e-5, atol=1e-3)
     assert got.max() > 5e4                              # the apex is on the grid
+
+
+def test_eic_on_grid_steps_at_a_one_scan_rise():
+    """an ion absent from one scan and at full height in the next is drawn as a step: the fine grid cells between
+    the two scans stay at zero instead of ramping up (a ramp looks like a shoulder the picker left out)"""
+    rt = np.arange(10) * 0.03                           # 1.8 s scans
+    inten = np.array([0, 0, 0, 1e5, 5e4, 2e4, 1e4, 0, 0, 0])
+    mzs = [np.array([300.0]) if v > 0 else np.zeros(0) for v in inten]
+    cloud = io.from_scans("step", rt, mzs, [np.array([v], np.float32) if v > 0 else np.zeros(0, np.float32) for v in inten])
+    dx = 0.005
+    got = bundle.eic_on_grid(cloud.off, cloud.mz, cloud.inten, cloud.rt, np.array([300.0]), np.array([0.003]),
+                             np.array([0.0]), np.array([dx]), 60)[0]
+    t = np.arange(60) * dx
+    assert np.all(got[t < rt[3] - 0.5 * dx] == 0)      # nothing before the first scan with signal
+    assert got[np.argmin(np.abs(t - rt[3]))] == 1e5
+    inside = (t > rt[3]) & (t < rt[6])
+    assert np.all(got[inside] > 0)                       # still interpolated inside the peak
+    assert np.all(got[t > rt[6] + 0.5 * dx] == 0)      # and a step down at the end
+    n = bundle.scans_in_window(cloud.off, cloud.mz, cloud.inten, cloud.rt, np.array([300.0]), np.array([0.003]),
+                               np.array([rt[2]]), np.array([rt[7]]))
+    assert n.tolist() == [[6, 4]]                        # scans 2..7 in the window, 3..6 hold the ion
 
 
 def test_report_contents(processed):
@@ -123,6 +148,8 @@ def test_report_contents(processed):
     e = h["eic"]
     assert e["n"] == len(t) and e["files"] == [0, 1, 2]
     tr = a["eic_q"].reshape(e["n"], 3, e["points"]).astype(float) * a["eic_scale"][:, None, None] / 65535
+    ns = a["eic_ns"].reshape(e["n"], 3, 2)
+    assert np.all(ns[:, :, 1] <= ns[:, :, 0]) and ns[:, :, 0].min() >= 1    # scans in the window, those holding the ion
     det = st == 3
     apex = tr.max(axis=2)
     ratio = apex[det] / V[det]
