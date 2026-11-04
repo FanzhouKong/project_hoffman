@@ -451,7 +451,11 @@ def test_identity_search_through_the_server(gui):
         assert code == 200 and meta["method"] == method and meta["n_queries"] == 1 and meta["n_identified"] == 1, meta
         h, a = bundle.unpack(gzip.decompress(c.req(f"/api/results/ms2ids?path={q}")[1]))
         assert h["ids"]["name"][0] == "Glucose" and a["id_score"][0] == pytest.approx(1.0, abs=1e-4), method
-        assert h["ms2"]["denoised"] and len(a["ms2_keep"]) == len(a["ms2_mz"])     # the search denoised the output
+        # the denoising search: no per-spectrum copy, a keep mask per denoised hit over the spectrum's peaks
+        assert not h["ms2"]["denoised"] and "ms2_keep" not in a and len(h["ids"]["denoise_ion"]) == len(a["id_row"])
+        d = a["id_dkey"]
+        assert len(d) == len(a["id_row"]) and (d[a["id_spec"] == 1] == -1).all() and (d[a["id_spec"] == 3] >= 0).any()
+        assert all(a["dk_off"][x + 1] - a["dk_off"][x] == len(a["ms2_mz"]) for x in d[d >= 0])
         assert set(a["id_spec"].tolist()) == {1, 3} and h["ids"]["default_spectrum"] == "single_denoised"
         assert "Far precursor" not in h["ids"]["name"] and list(a["id_row"]) == [0] * len(a["id_row"])
         assert h["ids"]["spectra"] and np.allclose(a["id_mz"][:3], [m for m, _ in QUERY])

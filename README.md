@@ -122,8 +122,8 @@ reuse the compiled code.
 | `report.html` | interactive report (feature map, feature table with chromatograms, RT alignment, run details); one self-contained file that opens in any browser, offline, and can be emailed |
 | `ms2_map.tsv` | every MS2 spectrum mapped to a feature (file, scan, time, precursor intensity and purity, whether it went into the consensus) |
 | `ms2_consensus.msp`, `ms2_spectra.msp` | two MS2 spectra per feature: the consensus of all its spectra, and the single highest-TIC spectrum |
-| `ms2_consensus_denoised.msp`, `ms2_spectra_denoised.msp` | the same two spectra denoised: only the ions with a plausible neutral loss from the precursor |
-| `identifications.tsv`, `feature_annotations.tsv` | with `--library`: every library hit above 0.1 for the four spectra, and each feature's annotation (step 5) |
+| `identifications.tsv`, `feature_annotations.tsv` | with `--library`: every library hit above 0.1 on the two spectra, raw and denoised against that hit's formula, and each feature's annotation (step 5) |
+| `identifications_denoise.npz` | which peaks the denoising kept for each (spectrum, candidate formula) a listed hit used |
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
 
@@ -147,17 +147,21 @@ feature then gets two spectra:
   in the MS1 scan before each spectrum.
 - **highest TIC**: the single spectrum with the highest total ion current.
 
-Both are also denoised (`specdenoise`, tier T0 top-5): the precursor's possible formulas are worked out from the
-feature m/z, ranked by how much fragment intensity their sub-formulas explain, and an ion is kept only when its
-neutral loss is a plausible formula under one of the five best. The denoised copies keep the measured m/z and
-intensities of the ions they keep.
-
-With `--library` (an `.msp` file, or a MassCube `.pkl`), all four are searched (`--similarity`, default weighted
-entropy). A library spectrum scoring above 0.1 on a spectrum or on its denoised copy is listed in
-`identifications.tsv` for both (the `spectrum` column: `consensus`, `single`, `consensus_denoised`,
-`single_denoised`), so every hit has a raw and a denoised score. A feature's best hit on the denoised consensus
+With `--library` (an `.msp` file, or a MassCube `.pkl`), both are searched (`--similarity`, default weighted
+entropy) as a **denoising search** (`specdenoise`, tier T1, after Kong et al., Nat Methods 2025): every library
+spectrum within the precursor tolerance is scored on the spectrum as measured and on the spectrum denoised with
+that candidate's own formula and adduct, keeping only the ions whose neutral loss is a plausible sub-formula of
+the candidate's precursor ion. Candidates share few formulas (one compound has many library spectra; isomers),
+so each spectrum is denoised once per formula, not per candidate. A record without a formula is read from its
+SMILES (a small SMILES reader; the result must fit the record's precursor m/z), and a record with neither keeps
+its raw score. `--denoise t0` instead denoises each spectrum once from the feature m/z alone (tier T0 top-5:
+the precursor's possible formulas ranked by the fragment intensity they explain; written as
+`ms2_*_denoised.msp`), `--denoise off` searches the raw spectra only. A library spectrum scoring above 0.1 on
+either version is listed in `identifications.tsv` for both (the `spectrum` column: `consensus`, `single`,
+`consensus_denoised`, `single_denoised`; `denoise_ion` the precursor ion formula it was denoised with), so
+every hit has a raw and a denoised score. A feature's best hit on the denoised consensus
 at or above `--min-similarity` (default 0.7) is its annotation in `feature_annotations.tsv`; the app shows both
-scores and switches the head-to-tail plot between the denoised and the raw spectrum. In the app you can confirm
+scores and switches the head-to-tail plot between the selected candidate's denoised spectrum and the raw one. In the app you can confirm
 it, pick another candidate or mark the feature unknown (the table's `reviewed` column says whether you did), write
 a comment, and give features red, blue or yellow stars to filter by. All of it is saved in `user_annotations.json`,
 kept apart from the search results, and used in the report and the exported tables (`reviewed`, `stars`,

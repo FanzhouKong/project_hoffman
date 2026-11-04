@@ -353,7 +353,9 @@ def test_denoise_on_worker_processes_matches_in_process(tmp_path, monkeypatch):
 
 def test_map_to_groups_writes_denoised_copies(tmp_path):
     out, m, i = _fake_output(tmp_path)
-    ms2.map_to_groups(out)
+    ms2.map_to_groups(out)                       # by default none: the search denoises against each candidate
+    assert not any((out / ms2.SPECTRA[ms2.DENOISED[raw]]).exists() for raw in ms2.RAW)
+    ms2.map_to_groups(out, denoise=True)         # the per-spectrum T0 copies, on request
     for raw in ms2.RAW:
         assert (out / ms2.SPECTRA[ms2.DENOISED[raw]]).exists()
         r = ms2.read_representatives(out, raw)
@@ -378,7 +380,7 @@ def test_identify_scores_raw_and_denoised(tmp_path):
         write_msp_record(fh, [("NAME", "creatine"), ("PRECURSORMZ", pmz), ("IONMODE", "Positive")], mz[true], it[true])
         write_msp_record(fh, [("NAME", "decoy"), ("PRECURSORMZ", pmz + 0.0005), ("IONMODE", "Positive")],
                          mz[~true], it[~true])
-    rows = identify(out, lib, min_score=0.9)
+    rows = identify(out, lib, min_score=0.9, denoise="t0")
     assert set(rows["spectrum"]) == set(ms2.SPECTRA)
     # every listed record has its partner on the other version of the copy
     key = lambda s: set(zip(rows.loc[rows["spectrum"] == s, "group_id"], rows.loc[rows["spectrum"] == s, "library_index"]))
@@ -406,7 +408,7 @@ def test_bundle_carries_denoised_masks_and_hit_pairs(tmp_path):
     lib = tmp_path / "lib.msp"
     with open(lib, "w") as fh:
         write_msp_record(fh, [("NAME", "creatine"), ("PRECURSORMZ", pmz), ("IONMODE", "Positive")], mz[true], it[true])
-    rows = identify(out, lib, min_score=0.9)
+    rows = identify(out, lib, min_score=0.9, denoise="t0")
     head, a = bundle.ms2_ids(out, [1, 2, 3], stems=["A"])
     assert head["ms2"]["denoised"] and head["ms2c"]["denoised"]
     o, rows_c = a["ms2c_off"], a["ms2c_row"].tolist()

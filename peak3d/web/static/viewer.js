@@ -72,8 +72,11 @@
         const m = this.idsAt[a.id_spec ? a.id_spec[j] : 1], l = m.get(row);
         if (l) l.push(j); else m.set(row, [j]);
       });
-      // which copies have a denoised version to show, and whether the search scored them
-      this.dn = { consensus: !!(this.m2c && a.ms2c_keep), single: !!(this.m2 && a.ms2_keep) };
+      // which copies have a denoised version to show, and whether the search scored them. A denoising search
+      // (id_dkey) denoised the spectrum against each candidate's formula: the mask comes with each hit (dk_*)
+      this.dkey = this.id && a.id_dkey && a.dk_off ? a.id_dkey : null;
+      this.dn = this.dkey ? { consensus: !!this.m2c, single: !!this.m2 } :
+        { consensus: !!(this.m2c && a.ms2c_keep), single: !!(this.m2 && a.ms2_keep) };
       this.dnHits = !!this.id && (this.idsAt[2].size > 0 || this.idsAt[3].size > 0);
       const d = this.id && this.id.h.default_spectrum;   // the copy whose best hit is the default annotation
       this.defSpec = d != null && SPEC[d] != null ? SPEC[d] : this.m2c ? 0 : 1;
@@ -164,24 +167,38 @@
       if (this.nms2[g] <= 1) return true;
       return this.m2c.a.ms2c_merged[kc] === 1 && this.m2c.h.file[kc] === this.m2.h.file[ks] && this.m2c.h.scan[kc] === this.m2.h.scan[ks];
     }
-    // one copy's spectrum: which = "consensus" (k into m2c) or "single" (k into m2); dn: only the peaks the denoising kept
-    spectrum(which, k, dn) {
+    // one copy's spectrum: which = "consensus" (k into m2c) or "single" (k into m2); dn: only the peaks the denoising
+    // kept (in a denoising search those of hit j's mask: the whole spectrum when j has none)
+    spectrum(which, k, dn, j) {
       const c = which === "consensus", a = (c ? this.m2c : this.m2).a, p = c ? "ms2c_" : "ms2_";
       const o0 = a[p + "off"][k], o1 = a[p + "off"][k + 1];
-      const mz = a[p + "mz"].subarray(o0, o1), inten = a[p + "int"].subarray(o0, o1), keep = a[p + "keep"];
-      if (!dn || !keep) return { mz, inten };
+      const mz = a[p + "mz"].subarray(o0, o1), inten = a[p + "int"].subarray(o0, o1), keep = dn ? this.mask(which, k, j) : null;
+      if (!keep) return { mz, inten };
       const m = [], v = [];
-      for (let i = o0; i < o1; i++) if (keep[i]) { m.push(a[p + "mz"][i]); v.push(a[p + "int"][i]); }
+      for (let i = 0; i < o1 - o0; i++) if (keep[i]) { m.push(mz[i]); v.push(inten[i]); }
       return { mz: Float32Array.from(m), inten: Float32Array.from(v) };
     }
-    // [peaks kept by the denoising, peaks] of one copy's spectrum (null when it has no denoised version)
-    kept(which, k) {
-      const c = which === "consensus", a = (c ? this.m2c : this.m2).a, p = c ? "ms2c_" : "ms2_", keep = a[p + "keep"];
+    // the denoising's keep flags over one copy's spectrum, or null: the per-spectrum denoised copy's, or in a
+    // denoising search hit j's (null when j has none: its record gave no usable formula)
+    mask(which, k, j) {
+      const c = which === "consensus", a = (c ? this.m2c : this.m2).a, p = c ? "ms2c_" : "ms2_";
+      if (this.dkey) {
+        const d = j != null ? this.dkey[j] : -1;
+        if (d < 0) return null;
+        const ia = this.id.a;
+        return ia.dk_keep.subarray(ia.dk_off[d], ia.dk_off[d + 1]);
+      }
+      const keep = a[p + "keep"];
+      return keep ? keep.subarray(a[p + "off"][k], a[p + "off"][k + 1]) : null;
+    }
+    // [peaks kept by the denoising, peaks] of one copy's spectrum (null when it has no denoised version; j: the hit
+    // whose mask counts, in a denoising search)
+    kept(which, k, j) {
+      const c = which === "consensus", a = (c ? this.m2c : this.m2).a, p = c ? "ms2c_" : "ms2_", keep = this.mask(which, k, j);
       if (!keep) return null;
-      const o0 = a[p + "off"][k], o1 = a[p + "off"][k + 1];
       let n = 0;
-      for (let i = o0; i < o1; i++) n += keep[i];
-      return [n, o1 - o0];
+      for (let i = 0; i < keep.length; i++) n += keep[i];
+      return [n, a[p + "off"][k + 1] - a[p + "off"][k]];
     }
     // the same library record among row g's hits on copy spec (the other score of a hit), or null
     partner(g, j, spec) {
@@ -196,7 +213,8 @@
       const spec = h.spectra ? { mz: a.id_mz.subarray(a.id_off[k], a.id_off[k + 1]), inten: a.id_int.subarray(a.id_off[k], a.id_off[k + 1]) } : null;
       return { j, rank: a.id_rank[j], score: a.id_score[j], nmatch: a.id_nmatch[j], ppm: a.id_ppm[j], prec: a.id_prec[j],
         spectrum: SPEC_NAME[a.id_spec ? a.id_spec[j] : 1], lib: a.id_lib ? a.id_lib[j] : -1,
-        name: h.name[j], adduct: h.precursor_type[j], formula: h.formula[j], inchikey: h.inchikey[j], smiles: h.smiles[j], spec };
+        name: h.name[j], adduct: h.precursor_type[j], formula: h.formula[j], inchikey: h.inchikey[j], smiles: h.smiles[j],
+        dion: h.denoise_ion ? h.denoise_ion[j] : "", spec };
     }
     value(g, f) {
       const q = this.a.m_q[g * this.N + f];
@@ -699,7 +717,7 @@
       go.addEventListener("click", run);
       if (R.m2 && !R.id && st.library && !state.autoSearched) { state.autoSearched = true; setTimeout(run, 0); }   // automatic on open
       return card(".elevated.id-card", "Identity search",
-        "Both MS2 spectra of each feature (the consensus and the highest-TIC spectrum), each as measured and denoised (only ions whose neutral loss from the precursor is a plausible formula), against a spectral library: candidates within the precursor tolerance of the feature m/z, scored on cleaned spectra (precursor region removed, peaks below 1 % dropped). " +
+        "Both MS2 spectra of each feature (the consensus and the highest-TIC spectrum) against a spectral library: candidates within the precursor tolerance of the feature m/z, each scored on the spectrum as measured and on the spectrum denoised with that candidate's own formula and adduct (only ions whose neutral loss is a plausible sub-formula of its precursor ion), all on cleaned spectra (precursor region removed, peaks below 1 % dropped). " +
         "Every hit above 0.1 on either version is listed with both scores; the best hit on the denoised consensus at or above the threshold becomes the feature's annotation, which you can change per feature.",
         h("div.id-form",
           field("Library (.msp, .pkl)", libIn, browseBtn ? h("span.trail", browseBtn) : null),
@@ -837,17 +855,16 @@
       if (one || state.copy == null || (state.copy === "consensus" && kc == null)) state.copy = kc != null ? "consensus" : "single";
       const copy = state.copy, k = copy === "consensus" ? kc : ks, M = copy === "consensus" ? R.m2c : R.m2;
       // raw or denoised: the denoised spectrum by default, when the results have one; the search's hits follow
-      const canDn = R.dn[copy];
+      const canDn = R.dn[copy] && (!R.dkey || R.hits(g, specOf(copy, true)).length > 0);   // search: per candidate
       if (state.dn == null) state.dn = true;
       const dn = canDn && state.dn, both = canDn && R.dnHits;
       const spec = specOf(copy, both && dn), other = both ? specOf(copy, !dn) : null;
       const merged = kc != null ? R.m2c.a.ms2c_merged[kc] : 1, files = kc != null ? R.m2c.a.ms2c_files[kc] : 1;
       const where = `${M.h.file[k]}, scan ${M.h.scan[k]}, ${fixed(M.a[copy === "consensus" ? "ms2c_rt" : "ms2_rt"][k], 1)} s`;
-      const kept = canDn ? R.kept(copy, k) : null;
       const desc = (one ? `${n <= 1 ? "The only MS2 spectrum" : `The one usable MS2 spectrum of the ${int(n)}`}: ${where}.` :
         copy === "consensus" ? `${merged} of ${int(n)} spectra${files > 1 ? ` from ${files} files` : ""} merged (peaks in ≥ 2 spectra, weighted by precursor abundance); most abundant: ${where}.` :
-          `Highest TIC of the ${int(n)}: ${where}.`) +
-        (kept ? ` Denoising (neutral losses from the feature m/z, ${(R.id && R.id.h.denoise) || "T0 top-5"}) kept ${int(kept[0])} of ${int(kept[1])} peaks.` : "");
+          `Highest TIC of the ${int(n)}: ${where}.`);
+      const dnDesc = h("span");
       // 1. which spectrum, how it agrees with the other copy and with the chromatogram
       const top = [];
       if (!one) {
@@ -862,7 +879,7 @@
       }
       const when = ms2Timing(g, one ? "single" : copy);
       if (when) top.push(when);
-      const out = [h("div.copy-pick", ...top), h("p.body-small.muted.ms2-desc", desc)];
+      const out = [h("div.copy-pick", ...top), h("p.body-small.muted.ms2-desc", desc, dnDesc)];
       const hits = R.hits(g, spec);
       if (state.hit != null && !hits.includes(state.hit)) state.hit = R.partner(g, state.hit, spec);   // the same record, other copy
       if (state.hit == null || !hits.includes(state.hit)) state.hit = hits.length ? hits[0] : null;
@@ -870,29 +887,44 @@
       const otherOf = new Map(other != null && lib ? R.hits(g, other).map((j) => [lib[j], j]) : []);
       const pair = (j) => (j != null && lib && lib[j] >= 0 && otherOf.has(lib[j]) ? R.hit(otherOf.get(lib[j])) : null);
       const method = R.id ? String(R.id.h.method_label || R.id.h.method || "score").replace(/ similarity$/i, "") : "";
+      // the denoised hit whose mask applies: the selected one on the denoised tab, its partner on the raw tab
+      const dnHit = () => (!R.dkey || state.hit == null ? null : dn ? state.hit : (pair(state.hit) || { j: null }).j);
+      const keptNow = () => (canDn ? R.kept(copy, k, dnHit()) : null);
+      // what the denoising did to the spectrum shown: per candidate in a denoising search, once per spectrum otherwise
+      const paintDesc = () => {
+        const kept = keptNow();
+        if (!canDn) { dnDesc.textContent = ""; return; }
+        if (R.dkey) {
+          const b = dnHit() != null ? R.hit(dnHit()) : null;
+          dnDesc.textContent = !b ? "" : kept ? ` Denoised against this candidate's precursor ion ${b.dion || ""} (neutral losses that are sub-formulas of it, tier T1): kept ${int(kept[0])} of ${int(kept[1])} peaks.` :
+            " This candidate's record gives no usable formula: its denoised score is the raw one.";
+        } else dnDesc.textContent = kept ? ` Denoising (neutral losses from the feature m/z, ${(R.id && R.id.h.denoise) || "T0 top-5"}) kept ${int(kept[0])} of ${int(kept[1])} peaks.` : "";
+      };
       const spectrum = () => {
         const b = state.hit != null ? R.hit(state.hit) : null;
-        return { top: R.spectrum(copy, k, dn), bottom: b && b.spec ? b.spec : null, bottomLabel: b ? b.name : null, prec: R.a.g_mz[g],
+        return { top: R.spectrum(copy, k, dn, state.hit), bottom: b && b.spec ? b.spec : null, bottomLabel: b ? b.name : null, prec: R.a.g_mz[g],
           score: b ? scoreLine(method, b, pair(state.hit), dn ? "raw" : "denoised") : null,
-          topLabel: (copy === "consensus" && !one ? "consensus" : "measured") + (dn ? ", denoised" : "") };
+          topLabel: (copy === "consensus" && !one ? "consensus" : "measured") + (dn ? (R.dkey && b && b.dion ? `, denoised as ${b.dion}` : ", denoised") : "") };
       };
+      paintDesc();
       // 2. head-to-tail with the score and the precursor; drag to zoom. Its tabs: the denoised or the raw spectrum, each
       // with the selected candidate's score on it (the zoom is kept across the switch)
       let tabs = null;
       // each tab's note: the selected candidate's score on that spectrum, or its peak count when nothing is scored
       const paintTabs = () => {
         if (!tabs) return;
-        const b = state.hit != null ? R.hit(state.hit) : null, p = pair(state.hit);
+        const b = state.hit != null ? R.hit(state.hit) : null, p = pair(state.hit), kept = keptNow();
         tabs.querySelectorAll(".tab").forEach((t, i) => {
           const on = i === 0;
           t.querySelector(".tab-note").textContent = b && both ? fixed((on === dn ? b : p || { score: NaN }).score, 3) :
-            `${int(on ? kept[0] : kept[1])} peaks`;
+            kept ? `${int(on ? kept[0] : kept[1])} peaks` : "";
         });
       };
       if (canDn) {
         tabs = h("div.tabs.spec-tabs", { role: "tablist", "aria-label": "MS2 spectrum shown" }, [[true, "Denoised"], [false, "Raw"]].map(([v, label]) => {
           const t = h("button.tab.state", { type: "button", role: "tab", "aria-selected": String(v === dn),
-            title: v ? "Only the ions whose neutral loss from the precursor is a plausible formula (specdenoise)" : "The spectrum as measured (or merged)" },
+            title: v ? (R.dkey ? "Only the ions whose neutral loss is a plausible sub-formula of the selected candidate's precursor ion (specdenoise, tier T1)" :
+              "Only the ions whose neutral loss from the precursor is a plausible formula (specdenoise)") : "The spectrum as measured (or merged)" },
             label, h("span.tab-note"));
           t.addEventListener("click", () => {
             if (v === dn) return;
@@ -920,6 +952,7 @@
         infoEl.replaceChildren(...(b ? [h("div.cmp-name", b.name),
           h("div.cmp-score.num", `${fixed(b.score, 3)}`, h("span.body-small.muted", ` ${method}${both ? (dn ? " · denoised" : " · raw") : ""} · ${int(b.nmatch)} peaks · candidate ${b.rank}`)),
           p ? h("div.body-small.muted.num", `${dn ? "Raw" : "Denoised"}: ${fixed(p.score, 3)} · ${int(p.nmatch)} peaks · candidate ${p.rank}`) : null,
+          R.dkey && both ? h("div.body-small.muted", (dn ? b : p || b).dion ? `Denoised as ${(dn ? b : p || b).dion}` : "No usable formula: not denoised") : null,
           h("div.cmp-facts.body-small", [b.formula, b.adduct, isFinite(b.ppm) ? `${fixed(b.ppm, 1)} ppm` : null].filter(Boolean).join(" · "))] : []));
         recEl.replaceChildren(b ? kv([["InChIKey", b.inchikey ? h("code.mono.wrap", b.inchikey) : null], ["SMILES", b.smiles ? h("code.mono.wrap", b.smiles) : null],
           ["Library precursor", isFinite(b.prec) ? `m/z ${fixed(b.prec, 4)} (${fixed(b.ppm, 1)} ppm)` : null]]) : h("span"));
@@ -946,6 +979,7 @@
             tb.querySelectorAll("tr").forEach((r) => r.setAttribute("aria-selected", String(r === tr)));
             chart.update(spectrum());
             paintTabs();
+            paintDesc();
             drawCand();
             drawAnn();
           });

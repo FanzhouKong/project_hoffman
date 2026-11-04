@@ -12,9 +12,10 @@ measured tolerance when that is larger. When several features qualify, the
 one strongest in that file wins, then the one with the closest apex. Each feature keeps all its spectra in
 ms2_map.tsv and two spectra for the search: the consensus of all of them, from every file (consensus.build:
 precursor-weighted, a peak needs two spectra), in ms2_consensus.msp, and the single spectrum with the highest total
-ion current (MassCube's choice) in ms2_spectra.msp. Both are also written denoised (denoise_copies: specdenoise's
-neutral-loss rule, tier T0 top-5, judged from the feature m/z alone) to ms2_consensus_denoised.msp and
-ms2_spectra_denoised.msp: the same records holding only the ions the rule keeps; the search scores all four."""
+ion current (MassCube's choice) in ms2_spectra.msp. The identity search denoises them against each candidate's
+formula (library.identify, the denoising search). On request (denoise=True, the search's denoise="t0") both are
+also written denoised once per spectrum (denoise_copies: specdenoise's neutral-loss rule, tier T0 top-5, judged from
+the feature m/z alone) to ms2_consensus_denoised.msp and ms2_spectra_denoised.msp."""
 from __future__ import annotations
 
 import os
@@ -197,7 +198,7 @@ def _stale(output: Path):
 
 
 def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_tol: float = 0.02, workers: int = 1,
-                  denoise: bool = True) -> pd.DataFrame:
+                  denoise: bool = False) -> pd.DataFrame:
     """assign every stored MS2 spectrum to an aligned feature; writes ms2_map.tsv (all assigned spectra),
     ms2_spectra.msp (each feature's highest-TIC spectrum) and ms2_consensus.msp (each feature's consensus spectrum),
     and, with denoise, their denoised copies (denoise_copies, on workers processes). Returns the map (empty when the
@@ -484,7 +485,8 @@ def read_representatives(output, which: str = "single") -> dict | None:
     file order: group_id, n_ms2, n_merged (spectra in the consensus,
     1 for single), vs_single (consensus only: its weighted entropy similarity to the highest-TIC spectrum; nan
     otherwise), prec_mz (the feature's m/z), rt_s (the native time of that, or the consensus's most abundant,
-    spectrum), file, scan, ion_mode, off, mz, inten. None when the output has no such file or it is empty."""
+    spectrum), mz_offset_ppm (the spectrum's file offset from the table's m/z scale, 0 when not written), file, scan,
+    ion_mode, off, mz, inten. None when the output has no such file or it is empty."""
     from .library import read_msp
     path = Path(output) / SPECTRA[which]
     if not path.exists():
@@ -499,5 +501,6 @@ def read_representatives(output, which: str = "single") -> dict | None:
             "n_files": np.array([int(d.get("n_files", 1)) for d in info], np.int32),
             "vs_single": np.array([float(d.get("vs_single", "nan")) for d in info], np.float64),
             "prec_mz": lib.precursor_mz, "rt_s": np.array([float(d.get("rt_s", "nan")) for d in info], np.float64),
+            "mz_offset_ppm": np.array([float(d.get("mz_offset_ppm", 0.0)) for d in info], np.float64),
             "file": [d.get("file", "") for d in info], "scan": [d.get("scan", "") for d in info],
             "ion_mode": list(lib.ion_mode), "off": lib.off, "mz": lib.mz, "inten": lib.inten}

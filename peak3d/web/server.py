@@ -359,7 +359,8 @@ class App:
         key = tuple((output / n).stat().st_mtime_ns if (output / n).exists() else 0
                     for n in ("ms2_spectra.msp", "ms2_consensus.msp", "ms2_spectra_denoised.msp",
                               "ms2_consensus_denoised.msp", "ms2_map.tsv", "identifications.tsv",
-                              "identifications.msp", "identifications.json", "user_annotations.json"))
+                              "identifications.msp", "identifications.json", "identifications_denoise.npz",
+                              "user_annotations.json"))
         hit = self._ms2.get(str(output))
         if hit and hit[0] == key:
             return hit[1]
@@ -720,9 +721,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(res)
 
     def _identify(self, body):
-        """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify; an
-        output made before the denoising is denoised first); rewrites identifications.* and refreshes report.html,
-        then answers with the search summary"""
+        """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify, the
+        denoising search: each candidate scored on the spectrum denoised with its own formula); rewrites
+        identifications.* and refreshes report.html, then answers with the search summary"""
         from ..library import METHODS, identify
         from ..ms2 import default_workers
         out = self._output({"path": [body.get("path") or ""]})

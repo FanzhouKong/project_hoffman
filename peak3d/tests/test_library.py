@@ -277,6 +277,71 @@ def test_identify_rewrites_stale_results(tmp_path):
     assert json.loads((out / "identifications.json").read_text())["n_queries"] == 0
 
 
+def test_identify_denoising_search(tmp_path):
+    """each candidate denoises the query with its own precursor ion formula, once per (query, ion formula)"""
+    out = _output(tmp_path)
+    noisy_mz = np.concatenate([FRAG, [106.8019, 115.5000]])            # losses of 25.3 and 16.6 Da: no formula
+    o = np.argsort(noisy_mz)
+    with open(out / "ms2_spectra.msp", "w") as fh:
+        write_msp_record(fh, [("NAME", "feature_1"), ("PRECURSORMZ", "132.101900"), ("IONMODE", "Positive"),
+                              ("Comment", 'group_id=1 file="S0" scan="scan=5" rt_s=60.000 n_ms2=3 mz_offset_ppm=0.000')],
+                         noisy_mz[o], np.concatenate([FRAG_I, [60.0, 40.0]])[o])
+    lib = tmp_path / "lib.msp"
+    with open(lib, "w") as fh:
+        for k, ce in enumerate((10, 20, 40)):                            # one compound, three spectra
+            write_msp_record(fh, [("NAME", f"Leucine CE{ce}"), ("PRECURSORMZ", 132.1019), ("PRECURSORTYPE", "[M+H]+"),
+                                  ("IONMODE", "Positive"), ("FORMULA", "C6H13NO2")], FRAG, FRAG_I * (k + 1))
+        write_msp_record(fh, [("NAME", "Isobar"), ("PRECURSORMZ", 132.1019), ("PRECURSORTYPE", "[M+H]+"),
+                              ("IONMODE", "Positive"), ("FORMULA", "C5H13N3O")], FRAG, FRAG_I)
+        write_msp_record(fh, [("NAME", "No formula"), ("PRECURSORMZ", 132.1019), ("IONMODE", "Positive")], FRAG, FRAG_I)
+    t = identify(out, lib, "weighted_entropy", min_score=0.0)
+    info = json.loads((out / "identifications.json").read_text())
+    assert info["denoise_mode"] == "search" and info["default_spectrum"] == "single_denoised"
+    st = info["denoise_stats"]
+    assert st["pairs"] == 5 and st["pairs_denoised"] == 4 and st["keys"] == 2      # 2 ion formulas, 1 query
+    assert not (out / "ms2_spectra_denoised.msp").exists()                         # nothing written per spectrum
+    raw = t[t["spectrum"] == "single"].set_index("name")
+    den = t[t["spectrum"] == "single_denoised"].set_index("name")
+    assert set(raw.index) == set(den.index) and (raw["denoise_ion"].fillna("") == "").all()
+    assert den.loc["Leucine CE10", "denoise_ion"] == "C6H14NO2+" and den.loc["Isobar", "denoise_ion"] == "C5H14N3O+"
+    assert den.loc["No formula", "denoise_ion"] == ""
+    assert den.loc["Leucine CE10", "score"] == pytest.approx(1.0)
+    assert den.loc["Leucine CE10", "score"] > raw.loc["Leucine CE10", "score"]
+    assert den.loc["No formula", "score"] == raw.loc["No formula", "score"]        # nothing to denoise against
+    assert den.loc["Isobar", "score"] < den.loc["Leucine CE10", "score"]           # its formula explains fewer ions
+    assert info["n_identified"] == 1
+    # the masks behind the denoised hits, once per (spectrum, ion formula), and what the viewer gets of them
+    tsv = pd.read_csv(out / "identifications.tsv", sep="\t").set_index(["spectrum", "name"])
+    assert (tsv.loc["single", "denoise_key"] == -1).all() and tsv.loc[("single_denoised", "No formula"), "denoise_key"] == -1
+    keys = tsv.loc["single_denoised", "denoise_key"]
+    assert keys["Leucine CE10"] == keys["Leucine CE20"] == keys["Leucine CE40"] != keys["Isobar"] >= 0
+    z = np.load(out / library.DENOISE_FILE)
+    assert len(z["group_id"]) == 2 and z["ion"][keys["Leucine CE10"]] == "C6H14NO2+"
+    k = keys["Leucine CE10"]
+    m = z["keep"][z["off"][k]:z["off"][k + 1]]
+    assert m.tolist() == [not (105 < x < 116) for x in np.sort(noisy_mz)]        # the two noise ions removed
+    from peak3d.web import bundle
+    _, a = bundle.ms2_ids(out, [1, 2], stems=["S0"])
+    d = a["id_dkey"]
+    assert (d[a["id_spec"] == 1] == -1).all() and (d >= 0).sum() == 4 and len(a["dk_off"]) == 3
+    with open(out / "ms2_spectra.msp", "a") as fh:                                 # MS2 remapped since the search
+        write_msp_record(fh, [("NAME", "feature_2"), ("PRECURSORMZ", "250.000000"), ("IONMODE", "Positive"),
+                              ("Comment", 'group_id=2 file="S1" scan="scan=9" rt_s=120.000 n_ms2=1')],
+                         np.array([80.0, 120.0]), np.array([1.0, 1.0]))
+    assert (bundle.ms2_ids(out, [1, 2], stems=["S0"])[1]["id_dkey"] >= 0).sum() == 4    # same peaks: masks kept
+    lines = (out / "ms2_spectra.msp").read_text().replace("Num Peaks: 6\n", "Num Peaks: 7\n50.0\t1\n", 1)
+    (out / "ms2_spectra.msp").write_text(lines)
+    assert (bundle.ms2_ids(out, [1, 2], stems=["S0"])[1]["id_dkey"] == -1).all()    # a peak more: masks dropped
+    t0 = identify(out, lib, "weighted_entropy", min_score=0.0, denoise="t0")      # the per-spectrum T0 copies
+    assert (out / "ms2_spectra_denoised.msp").exists() and set(t0["spectrum"]) == {"single", "single_denoised"}
+    assert json.loads((out / "identifications.json").read_text())["denoise_mode"] == "t0"
+    assert not (out / library.DENOISE_FILE).exists()
+    off = identify(out, lib, "weighted_entropy", min_score=0.0, denoise="off")
+    assert set(off["spectrum"]) == {"single"}
+    with pytest.raises(ValueError):
+        identify(out, lib, denoise="t2")
+
+
 def test_candidate_pairs_window_and_modes():
     q_mz = np.array([100.0, 200.0])
     lib_prec = np.array([np.nan, 100.0005, 99.9995, 100.01, 200.0, 200.0])

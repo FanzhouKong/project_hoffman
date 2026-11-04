@@ -108,6 +108,10 @@ def build_parser():
                        help="feature m/z vs library precursor m/z tolerance (ppm, default 10)")
         p.add_argument("--fragment-tol", type=_positive(float), default=0.02,
                        help="fragment m/z tolerance (Da, default 0.02)")
+        p.add_argument("--denoise", choices=["search", "t0", "off"], default="search",
+                       help="MS2 denoising for the search: search (default) = each candidate scored on the spectrum "
+                            "denoised with its own formula and adduct (tier T1); t0 = one copy per spectrum denoised "
+                            "from the feature m/z alone; off = raw spectra only")
 
     p = sub.add_parser("process", help="pick + align + group + gap-fill")
     p.add_argument("--input", type=Path, required=True, help="directory of .mzML files")
@@ -253,7 +257,7 @@ def main(argv=None):
         if not args.library.expanduser().is_file():
             sys.exit(f"--library: no such file: {args.library}")
         identify(args.output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity,
-                 workers=args.cores)
+                 workers=args.cores, denoise=args.denoise)
         from .web.report import refresh_ids
         if refresh_ids(args.output):            # report.html shows the new hits (its chromatograms are kept)
             print("[peak3d] report.html updated", flush=True)

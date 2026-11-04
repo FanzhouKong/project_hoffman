@@ -199,7 +199,8 @@ def write_table(output) -> Path:
     return p
 
 
-SEARCH_FILES = ("identifications.tsv", "identifications.msp", "identifications.json", TABLE_FILE)
+SEARCH_FILES = ("identifications.tsv", "identifications.msp", "identifications.json", "identifications_denoise.npz",
+                TABLE_FILE)
 
 
 def retire(output, keep_search: bool) -> None:

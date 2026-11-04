@@ -263,10 +263,10 @@ def _take(off, arrays, idx):
     return new.astype(np.int32), [np.asarray(a)[sel] for a in arrays]
 
 
-ID_TEXT = ("name", "precursor_type", "formula", "inchikey", "smiles")
+ID_TEXT = ("name", "precursor_type", "formula", "inchikey", "smiles", "denoise_ion")
 SPEC_CODE = {"consensus": 0, "single": 1, "consensus_denoised": 2, "single_denoised": 3}
 # what refresh_ids swaps: these arrays and header keys
-MS2_PREFIXES = ("ms2_", "ms2c_", "id_", "mk_")
+MS2_PREFIXES = ("ms2_", "ms2c_", "id_", "mk_", "dk_")
 MS2_KEYS = ("ms2", "ms2c", "ids", "ann", "ms2_note")
 
 
@@ -319,6 +319,30 @@ def _marks(output: Path, row_of, stems):
     return {"mk_row": np.array([row_of[int(g)] for g in m.loc[keep, "group_id"]], np.int32),
             "mk_t": t[keep].to_numpy(np.float32), "mk_kind": kind[keep].to_numpy(np.uint8),
             "mk_file": np.array([file_of.get(f, -1) for f in m.loc[keep, "file"]], np.int16)}
+
+
+def _denoise_masks(output: Path, hits: pd.DataFrame, row_of: dict, arrays: dict) -> dict | None:
+    """the denoising search's masks (identifications_denoise.npz): id_dkey per hit (-1 none), dk_off / dk_keep the
+    peaks each mask keeps over its copy's spectrum (ms2_* or ms2c_*, same peak order); a mask whose length no
+    longer matches that spectrum (MS2 remapped since the search) is dropped. None for other searches"""
+    from ..library import DENOISE_FILE
+    p = output / DENOISE_FILE
+    if "denoise_key" not in hits or not p.exists():
+        return None
+    with np.load(p) as z:
+        gid, copy, off, keep = z["group_id"], z["copy"], z["off"], z["keep"]
+    peaks = {}
+    for c, prefix in ((0, "ms2c_"), (1, "ms2_")):
+        if prefix + "row" in arrays:
+            o = arrays[prefix + "off"]
+            for k, row in enumerate(arrays[prefix + "row"].tolist()):
+                peaks[(c, row)] = int(o[k + 1] - o[k])
+    ok = np.array([peaks.get((int(c), row_of.get(int(g), -1)), -1) == int(off[i + 1] - off[i])
+                   for i, (g, c) in enumerate(zip(gid, copy))], bool)
+    d = np.nan_to_num(hits["denoise_key"].to_numpy(np.float64), nan=-1).astype(np.int64)
+    d[(d >= len(ok)) | (d < -1)] = -1
+    d = np.where((d >= 0) & ok[np.maximum(d, 0)], d, -1)
+    return {"id_dkey": d.astype(np.int32), "dk_off": off.astype(np.int32), "dk_keep": keep.astype(np.uint8)}
 
 
 def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
@@ -375,6 +399,9 @@ def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
                       id_nmatch=np.clip(np.nan_to_num(num("n_matched", 0)), 0, 65535).astype(np.uint16),
                       id_ppm=num("ppm_error").astype(np.float32), id_prec=num("library_precursor_mz"),
                       id_lib=np.nan_to_num(num("library_index", -1), nan=-1).astype(np.int32))
+        dk = _denoise_masks(output, hits, row_of, arrays)
+        if dk is not None:
+            arrays.update(dk)
         if lib is not None:
             used, lk = np.unique(hits["_rec"].to_numpy(np.int64), return_inverse=True)
             off, (mz, inten) = _take(np.asarray(lib.off), (lib.mz, lib.inten), used)

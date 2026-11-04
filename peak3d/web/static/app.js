@@ -49,7 +49,7 @@
     keep_cache: "Keeps .cache/ (large) so `peak3d align` can re-run alignment without re-picking.",
     set: "One NAME=VALUE per line; advanced picker parameters.",
     no_report: "A single HTML file with these views and chromatograms; opens in any browser, easy to share.",
-    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one) and denoised (ions without a plausible neutral loss removed); with a library, both are searched after the run, as measured and denoised, and the best hit on the denoised consensus becomes each feature's annotation.",
+    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with a library, both are searched after the run, each candidate scored on the spectrum as measured and denoised with its own formula (ions without a plausible neutral loss removed), and the best hit on the denoised consensus becomes each feature's annotation.",
   };
   const INVERTED = new Set(["no_rt_correction", "no_gap_fill", "no_report"]);
   const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];

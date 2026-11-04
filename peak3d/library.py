@@ -23,7 +23,9 @@ METHODS = {"entropy": "Unweighted entropy similarity", "weighted_entropy": "Weig
            "dot": "Unweighted dot product", "weighted_dot": "Weighted dot product",
            "reverse_entropy": "Reverse entropy score"}
 ID_COLUMNS = ["group_id", "spectrum", "rank", "score", "n_matched", "name", "precursor_type", "formula", "inchikey",
-              "smiles", "library_precursor_mz", "ppm_error", "library_index"]
+              "smiles", "library_precursor_mz", "ppm_error", "library_index", "denoise_ion", "denoise_key"]
+DENOISE_FILE = "identifications_denoise.npz"    # search: the keep mask of every (spectrum, ion formula) a listed hit used
+DENOISE_MODES = {"search": "T1 per candidate formula (denoising search)", "t0": "T0 top-5", "off": None}
 
 
 class Strings(Sequence):
@@ -100,6 +102,7 @@ class Library:
     n_skipped: int = 0            # records without peaks, MS1 records
     _clean: dict = field(default_factory=dict, repr=False)   # fragment tol -> cleaned CSR (similarity.clean_batch)
     _index: tuple = field(default=None, repr=False)
+    _ions: object = field(default=None, repr=False)          # specdenoise.search.IonTable, filled by the searches
 
     def __len__(self):
         return len(self.precursor_mz)
@@ -255,33 +258,89 @@ def _in_order(gid, other):
     return off, np.asarray(other["mz"])[sel], np.asarray(other["inten"])[sel]
 
 
+def _ion_ids(lib: Library, records: np.ndarray) -> np.ndarray:
+    """the precursor ion formula id of each library record (specdenoise.search.IonTable kept with the library, -1
+    where a record has none; a record without a formula is read from its SMILES)"""
+    from specdenoise.search import IonTable
+    if lib._ions is None:
+        lib._ions = IonTable(len(lib))
+    return lib._ions.ids(records, lib.formula, lib.precursor_type, lib.mode, lib.precursor_mz, lib.smiles)
+
+
+def _search_denoised(q, lib: Library, pq, pl, inv, lo, lm, li, raw_sc, raw_nm, method, fragment_tol, stats):
+    """scores of the denoising search: each pair's query denoised by T1 against its library record's precursor ion
+    formula, once per (query, ion formula), then scored against that record; pairs whose record has no usable ion
+    formula keep their raw score. Returns (scores, matched, ion formula id per pair (-1 = none), the keys: dict of
+    pair_key, key_q, key_ion, key_off, keep)."""
+    from specdenoise import Params
+    from specdenoise.search import denoise_keys, masked_spectra, unique_keys
+    from .similarity import METHOD_CODE, clean_batch, score_pairs
+    t = time.perf_counter()
+    u = np.unique(pl)
+    pair_ion = _ion_ids(lib, u)[np.searchsorted(u, pl)].astype(np.int64)
+    tab = lib._ions
+    key_q, key_ion, pair_key = unique_keys(pq, pair_ion, q["prec_mz"], tab.mz, tab.Z)
+    t1 = time.perf_counter()
+    off = np.asarray(q["off"], np.int64)
+    shift = np.repeat(np.asarray(q.get("mz_offset_ppm", np.zeros(len(off) - 1)), np.float64), np.diff(off))
+    mz = np.asarray(q["mz"], np.float64)
+    key_off, keep = denoise_keys(off, mz * (1.0 - shift * 1e-6), q["inten"], q["prec_mz"], key_q, tab.P[key_ion],
+                                 tab.Z[key_ion], Params())
+    t2 = time.perf_counter()
+    d_off, d_mz, d_it = masked_spectra(off, mz, np.asarray(q["inten"], np.float64), key_q, key_off, keep)
+    ko, km, ki = clean_batch(d_off, d_mz, d_it, np.asarray(q["prec_mz"], np.float64)[key_q], fragment_tol)
+    sc, nm = raw_sc.copy(), raw_nm.copy()
+    has = np.flatnonzero(pair_key >= 0)
+    if len(has):
+        sc[has], nm[has] = score_pairs(ko, km, ki, lo, lm, li, pair_key[has], inv[has].astype(np.int64),
+                                       METHOD_CODE[method], float(fragment_tol))
+    t3 = time.perf_counter()
+    for k, v in (("pairs", len(pl)), ("pairs_denoised", len(has)), ("keys", len(key_q)),
+                 ("peaks_judged", int(key_off[-1])), ("seconds_ions", t1 - t), ("seconds_t1", t2 - t1),
+                 ("seconds_score", t3 - t2)):
+        stats[k] = stats.get(k, 0) + v
+    stats["ion_formulas"] = len(tab)
+    keys = dict(pair_key=pair_key, key_q=key_q, key_ion=key_ion, key_off=key_off, keep=keep)
+    return sc, nm, np.where(pair_key >= 0, pair_ion, -1), keys
+
+
 def identify(output, library_path, method: str = "weighted_entropy", precursor_ppm: float = 10.0,
              fragment_tol: float = 0.02, min_score: float = 0.7, top_k: int | None = None,
-             precursor_da: float | None = None, workers: int = 1) -> pd.DataFrame:
+             precursor_da: float | None = None, workers: int = 1, denoise: str = "search") -> pd.DataFrame:
     """search the MS2 copies of every feature (ms2.SPECTRA: the consensus of all its spectra and the single
-    highest-TIC spectrum, each raw and denoised; an output made before the denoising is denoised first, on workers
-    processes) in the library. A library record is listed on a raw copy and on its denoised copy alike when it scores
+    highest-TIC spectrum, each raw and denoised) in the library. denoise picks the denoised copies: "search" (the
+    denoising search, specdenoise.search: per candidate, the query denoised by tier T1 against that library record's
+    precursor ion formula, its formula and adduct; once per query and ion formula; a record without a usable formula
+    keeps the raw score, its denoise_ion empty), "t0" (ms2.DENOISE: one T0 copy per spectrum, judged from the m/z
+    alone, written by the MS2 mapping; an output made before it is denoised first, on workers processes) or "off". A library record is listed on a raw copy and on its denoised copy alike when it scores
     above LIST_MIN (or at least min_score, when that is lower) on either, so every listed hit has both scores; ranks
     are per copy, and top_k (when given) keeps the records within the top_k of either. min_score is the annotation
     threshold: a feature's best hit on the default copy (the denoised consensus; the consensus or the single
     spectrum for outputs without it) at or above it is its default annotation (annotations.py). precursor_da (Da)
     replaces precursor_ppm as the precursor window when given. Writes identifications.tsv (one row per hit, spectrum
     = the copy), identifications.msp (the library spectrum of every listed record once, Comment library_index=...),
-    identifications.json (settings, default copy and counts) and feature_annotations.tsv, replacing earlier ones."""
+    identifications.json (settings, default copy and counts) and feature_annotations.tsv, replacing earlier ones; the
+    search also writes identifications_denoise.npz, the keep mask behind every denoised hit (denoise_key: its index,
+    -1 when the record gave no ion formula; masks run over the raw copy's peaks in file order)."""
     from . import ms2
     from .annotations import write_table
     from .pipeline import log
     from .similarity import METHOD_CODE, clean_batch, score_pairs
     if method not in METHODS:
         raise ValueError(f"unknown similarity {method!r}; one of {', '.join(METHODS)}")
+    if denoise not in DENOISE_MODES:
+        raise ValueError(f"unknown denoising {denoise!r}; one of {', '.join(DENOISE_MODES)}")
     output = Path(output)
     tic = time.perf_counter()
-    try:
-        denoised = ms2.ensure_denoised(output, workers)
-    except Exception as e:        # the raw copies are searched regardless
-        denoised = False
-        log(f"ms2 denoising skipped: {e!r}")
+    denoised = False
+    if denoise == "t0":
+        try:
+            denoised = ms2.ensure_denoised(output, workers)
+        except Exception as e:        # the raw copies are searched regardless
+            log(f"ms2 denoising skipped: {e!r}")
     t_dn = time.perf_counter() - tic
+    stats: dict = {}
+    dk = dict(group_id=[], copy=[], ion=[], masks=[])     # the masks the listed denoised hits use (DENOISE_FILE)
     lib = load(library_path)
     t_load = time.perf_counter() - tic - t_dn
     parts, nq = [], 0
@@ -311,6 +370,11 @@ def identify(output, library_path, method: str = "weighted_entropy", precursor_p
             sc, nm = score_pairs(qo, qm, qi, lo, lm, li, pq, inv.astype(np.int64), METHOD_CODE[method],
                                  float(fragment_tol))
             scored.append((name, sc, nm))
+        pair_ion = keys = None
+        if denoise == "search":
+            sc, nm, pair_ion, keys = _search_denoised(q, lib, pq, pl, inv, lo, lm, li, scored[0][1], scored[0][2],
+                                                      method, fragment_tol, stats)
+            scored.append((ms2.DENOISED[raw], sc, nm))
         listed = np.zeros(len(pq), bool)
         for _, sc, nm in scored:
             listed |= ((sc > LIST_MIN) | (sc >= min_score)) & (nm > 0)
@@ -329,16 +393,40 @@ def identify(output, library_path, method: str = "weighted_entropy", precursor_p
             hits["rank"] = hits.groupby("q", sort=False).cumcount() + 1
             L = hits["lib"].to_numpy()
             lp = lib.precursor_mz[L]
+            ion = [""] * len(hits)
+            dkey = np.full(len(hits), -1, np.int64)
+            if pair_ion is not None and name != raw:
+                ids = pair_ion[sel][hits.index.to_numpy()]
+                u, back = np.unique(ids, return_inverse=True)
+                ion = np.array([lib._ions.label(int(v)) for v in u], object)[back]
+                pk = keys["pair_key"][sel][hits.index.to_numpy()]
+                used, back = np.unique(pk[pk >= 0], return_inverse=True)
+                dkey[pk >= 0] = len(dk["group_id"]) + back
+                for k in used.tolist():
+                    dk["group_id"].append(int(q["group_id"][keys["key_q"][k]]))
+                    dk["copy"].append(0 if raw == "consensus" else 1)
+                    dk["ion"].append(lib._ions.label(int(keys["key_ion"][k])))
+                    dk["masks"].append(keys["keep"][keys["key_off"][k]:keys["key_off"][k + 1]])
             parts.append(pd.DataFrame({
                 "group_id": q["group_id"][hits["q"].to_numpy()], "spectrum": name, "rank": hits["rank"].to_numpy(),
                 "score": hits["score"].round(4).to_numpy(), "n_matched": hits["n_matched"].to_numpy(),
                 "name": [lib.names[i] for i in L], "precursor_type": [lib.precursor_type[i] for i in L],
                 "formula": [lib.formula[i] for i in L], "inchikey": [lib.inchikey[i] for i in L],
                 "smiles": [lib.smiles[i] for i in L], "library_precursor_mz": lp,
-                "ppm_error": np.round((q["prec_mz"][hits["q"].to_numpy()] - lp) / lp * 1e6, 2), "library_index": L}))
+                "ppm_error": np.round((q["prec_mz"][hits["q"].to_numpy()] - lp) / lp * 1e6, 2), "library_index": L,
+                "denoise_ion": ion, "denoise_key": dkey}))
     rows = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=ID_COLUMNS)
     rows = rows[ID_COLUMNS]
     rows.to_csv(output / "identifications.tsv", sep="\t", index=False, float_format="%.6g")
+    (output / DENOISE_FILE).unlink(missing_ok=True)
+    if denoise == "search":
+        lens = np.array([len(m) for m in dk["masks"]], np.int64)
+        off = np.zeros(len(lens) + 1, np.int64)
+        np.cumsum(lens, out=off[1:])
+        with open(output / DENOISE_FILE, "wb") as fh:
+            np.savez(fh, group_id=np.array(dk["group_id"], np.int64), copy=np.array(dk["copy"], np.uint8),
+                     ion=np.array(dk["ion"], dtype=str), off=off,
+                     keep=np.concatenate(dk["masks"]).astype(bool) if dk["masks"] else np.zeros(0, bool))
     with open(output / "identifications.msp", "w", encoding="utf-8") as fh:
         for i in pd.unique(rows["library_index"].to_numpy(np.int64)):
             write_msp_record(fh, [("NAME", lib.names[i]), ("PRECURSORMZ", lib.precursor_mz[i]),
@@ -347,7 +435,12 @@ def identify(output, library_path, method: str = "weighted_entropy", precursor_p
                                   ("IONMODE", {1: "Positive", 2: "Negative"}.get(int(lib.mode[i]), "")),
                                   ("Comment", f"library_index={int(i)}")],
                              lib.mz[lib.off[i]:lib.off[i + 1]], lib.inten[lib.off[i]:lib.off[i + 1]])
-    default = ms2.default_copy(output)
+    if denoise == "t0":
+        default = ms2.default_copy(output)
+    else:                         # search: a denoised copy exists wherever its raw one does; off: raw copies only
+        have = [c for c in ms2.RAW if (output / ms2.SPECTRA[c]).exists() and (output / ms2.SPECTRA[c]).stat().st_size]
+        default = (ms2.DENOISED[have[0]] if denoise == "search" else have[0]) if have else "single"
+        denoised = denoise == "search" and bool(have)
     best = rows[rows["rank"] == 1]
     copy = best[best["spectrum"] == default].set_index("group_id")["score"]
     n_id = int((copy >= min_score).sum())
@@ -357,12 +450,17 @@ def identify(output, library_path, method: str = "weighted_entropy", precursor_p
                 precursor_da=None if precursor_da is None else float(precursor_da), fragment_tol=float(fragment_tol),
                 min_score=float(min_score), list_min=LIST_MIN, top_k=top_k, n_queries=int(nq), n_identified=n_id,
                 n_hits=int(len(rows)), default_spectrum=default, default_label=ms2.LABEL[default],
-                denoise=ms2.DENOISE_LABEL if denoised else None, seconds=round(secs, 3),
+                denoise=(DENOISE_MODES[denoise] if denoise == "search" else ms2.DENOISE_LABEL) if denoised else None,
+                denoise_mode=denoise, denoise_stats={k: round(v, 3) if isinstance(v, float) else v
+                                                     for k, v in stats.items()} or None,
+                seconds=round(secs, 3),
                 created=time.strftime("%Y-%m-%d %H:%M:%S"))
     (output / "identifications.json").write_text(json.dumps(info, indent=1))
     write_table(output)
+    ds = (f"; denoising search: {stats['keys']} query x ion formula keys for {stats['pairs']} pairs, "
+          f"T1 {stats['seconds_t1']:.1f} s" if stats.get("pairs") else "")
     log(f"identify: {n_id} of {nq} features with MS2 annotated from {Path(library_path).name} ({len(lib)} spectra, "
         f"{METHODS[method].lower()} >= {min_score:g} on the {ms2.LABEL[default]}; {len(rows)} hits above "
         f"{LIST_MIN:g} listed; {secs:.1f} s, library read {t_load:.1f} s"
-        f"{f', denoising {t_dn:.1f} s' if t_dn >= 0.05 else ''})")
+        f"{f', denoising {t_dn:.1f} s' if t_dn >= 0.05 else ''}{ds})")
     return rows

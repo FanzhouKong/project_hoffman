@@ -548,7 +548,8 @@ def ms2_and_identify(output: Path, args, stage: dict) -> None:
     tic = time.perf_counter()
     try:
         from .ms2 import map_to_groups
-        map_to_groups(output, workers=max(1, int(getattr(args, "cores", 1) or 1)))
+        map_to_groups(output, workers=max(1, int(getattr(args, "cores", 1) or 1)),
+                      denoise=getattr(args, "denoise", "search") == "t0")
     except Exception as e:
         log(f"ms2 mapping skipped: {e!r}")
     stage["ms2_s"] = round(time.perf_counter() - tic, 3)
@@ -557,7 +558,7 @@ def ms2_and_identify(output: Path, args, stage: dict) -> None:
         try:
             from .library import identify
             identify(output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity,
-                     workers=max(1, int(getattr(args, "cores", 1) or 1)))
+                     workers=max(1, int(getattr(args, "cores", 1) or 1)), denoise=getattr(args, "denoise", "search"))
         except Exception as e:
             log(f"identify failed: {e!r}")
         stage["identify_s"] = round(time.perf_counter() - tic, 3)
@@ -573,7 +574,8 @@ def _reidentify(output: Path, stage: dict, cores: int = 1) -> None:
         if not Path(s["library"]).is_file():
             raise FileNotFoundError(s["library"])
         args = argparse.Namespace(library=s["library"], similarity=s["method"], precursor_ppm=s["precursor_ppm"],
-                                  fragment_tol=s["fragment_tol"], min_similarity=s["min_score"], cores=cores)
+                                  fragment_tol=s["fragment_tol"], min_similarity=s["min_score"], cores=cores,
+                                  denoise=s.get("denoise_mode") or ("t0" if s.get("denoise") else "off"))
     except (OSError, ValueError, KeyError) as e:
         from .annotations import retire
         retire(output, keep_search=False)
