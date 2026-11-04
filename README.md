@@ -9,6 +9,49 @@ This repository holds two things:
 - **`bench/` + `scripts/`**, the benchmark ("peakbench") that compares peak3d with asari, MassCube and
   IDSL.IPA on public datasets with ground truth. See [Benchmark](#benchmark-peakbench) below.
 
+## Run the Mosa app (download, double-click)
+
+Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
+
+Download the file for your computer from the
+[releases page](https://github.com/FanzhouKong/project_hoffman/releases) (newest preview build:
+[app-preview](https://github.com/FanzhouKong/project_hoffman/releases/tag/app-preview)). Nothing else to install.
+
+| Computer | File | Start |
+|---|---|---|
+| Windows 10/11, 64-bit | `peak3d-windows-x64.zip` | right-click > **Extract All**, open the `peak3d` folder, double-click `peak3d.exe` |
+| Mac with Apple silicon (M1 or later), macOS 14+ | `peak3d-macos-arm64.zip` | unzip, move `peak3d.app` to Applications, double-click it |
+| Mac with an Intel processor, macOS 14+ | `peak3d-macos-x64.zip` | the same |
+| Linux, x86-64 (glibc 2.35+, e.g. Ubuntu 22.04) | `peak3d-linux-x64.tar.gz` | `tar xzf peak3d-linux-x64.tar.gz` then `./peak3d/peak3d` |
+
+Mosa opens in your web browser, with a small window to reopen or quit it. Three feature finders are on offer, and
+whichever you pick, the rest (chromatograms, MS2, library search, annotation, report) is the same:
+
+- **Mosa** (the default).
+- **asari** 1.18.5, included in the app on macOS and Linux (not yet on Windows, where it does not run inside the app).
+- **MassCube** 1.2.22, not included: its licence (CC BY-NC 4.0) allows non-commercial use only. The MassCube tab has
+  a **Download and install MassCube** button: after you accept the licence, Mosa installs it with a private Python
+  (about 950 MB, a few minutes) and can remove it again. From the command line:
+  `peak3d addon install masscube --accept-licence`. Choose a folder of mzML files, or
+press **Create example data** to try it with three small synthetic runs, then **Run Mosa** and **Open
+results**. The first run compiles Mosa (about a minute); later runs start at once. Your data stay on your
+computer.
+
+The app is not yet signed with an Apple or Microsoft certificate, so the first start asks you to confirm:
+
+- **macOS**: double-click peak3d; when macOS says it cannot verify it, click **Done**, open **System Settings >
+  Privacy & Security**, scroll down and click **Open Anyway** next to peak3d. Or, in Terminal:
+  `xattr -dr com.apple.quarantine /Applications/peak3d.app`
+- **Windows**: on "Windows protected your PC", click **More info**, then **Run anyway**. Extract the ZIP first:
+  started from inside the ZIP, `peak3d.exe` cannot find its `_internal` folder.
+
+If the app does not start, its log says why: `%LOCALAPPDATA%\peak3d\cache\peak3d.log` (Windows),
+`~/Library/Caches/peak3d/peak3d.log` (macOS).
+
+The program is also the full command line, e.g. `peak3d.exe process --input mzml --output out --cores 8` on
+Windows, `/Applications/peak3d.app/Contents/MacOS/peak3d process ...` on macOS, `./peak3d/peak3d process ...` on
+Linux.
+
 ## Quick start: peak3d on your own mzML files
 
 ### 1. Install
@@ -24,7 +67,7 @@ pip install -e .
 
 # or plain pip, Python >= 3.10
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install -e .            # or pip install -e ".[asari]" to run asari as well (peak3d external --kernel asari)
 ```
 
 This installs the `peak3d` command. Check the installation with the built-in demo, which writes three
@@ -50,7 +93,7 @@ ThermoRawFileParser -d data/raw -o data/mzml -f 2
 ```
 
 - Profile-mode files are refused with a message saying how to convert them.
-- MS2 scans are ignored; DDA files work as they are.
+- DDA files work as they are: MS1 is used for the features, the MS2 spectra are mapped to them (step 5).
 - Polarity-switching files: run once per polarity with `--polarity pos` and `--polarity neg`.
 
 ### 3. Run
@@ -67,7 +110,7 @@ reuse the compiled code.
 
 | file | content |
 |---|---|
-| `aligned_feature_table.tsv` | one row per feature: `mz`, `rt` (min), RT range, detection counts, isotope label (`iso_offset`, 0 = monoisotopic), `charge`, its compound group (`compound_id`, `role`, `neutral_mass`, `is_base`, `n_members`; see below), and one **height** column per file |
+| `aligned_feature_table.tsv` | one row per feature: `mz`, `rt` (min), RT range, detection counts, isotope label (`iso_offset`, 0 = monoisotopic), `charge`, its compound group (`compound_id`, `role`, `neutral_mass`, `is_base`, `n_members`; see below),, the halogen check (`possible_halogen` yes / maybe / no, `halogen_pattern` the best hypothesis, e.g. Cl2; see the GUI section) and one **height** column per file |
 | `compounds.tsv` | one row per compound group: base ion, members (group ids, m/z, roles), neutral mass |
 | `compound_pairs.tsv` | every co-eluting pair that was tested: shape correlation, intensity correlation, mass relation, joined or not |
 | `aligned_feature_area.tsv` | the same table with peak areas |
@@ -76,6 +119,11 @@ reuse the compiled code.
 | `rt_correction/` | per-file RT warps and a summary of the correction |
 | `qc/` | RT drift curves, residual histograms, presence histogram |
 | `params.json` | every estimated parameter and the software versions |
+| `report.html` | interactive report (feature map, feature table with chromatograms, RT alignment, run details); one self-contained file that opens in any browser, offline, and can be emailed |
+| `ms2_map.tsv` | every MS2 spectrum mapped to a feature (file, scan, time, precursor intensity and purity, whether it went into the consensus) |
+| `ms2_consensus.msp`, `ms2_spectra.msp` | two MS2 spectra per feature: the consensus of all its spectra, and the single highest-TIC spectrum |
+| `identifications.tsv`, `feature_annotations.tsv` | with `--library`: every library hit above 0.1 on the two spectra, raw and denoised against that hit's formula, and each feature's annotation (step 5) |
+| `identifications_denoise.npz` | which peaks the denoising kept for each (spectrum, candidate formula) a listed hit used |
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
 
@@ -88,6 +136,78 @@ shifted onto one apex as the null, M/M+1 pairs as positive controls). `role` nam
 relation to the group's neutral mass fits (`[M+H]+`, `[M+Na]+`, `[M-H-H2O]-`, `[2M+H]+`, ...), `[M+H]+ M+1`
 for isotopes, and otherwise the m/z difference to the base ion (`is_base` = 1, the strongest monoisotopic
 member), e.g. `-44.0262`. Nothing is removed: every feature keeps its own row.
+
+### 5. MS2 and library search (DDA files)
+
+Each MS2 spectrum is assigned to the feature whose m/z and RT window hold its precursor and time. Each
+feature then gets two spectra:
+
+- **consensus** (used by default): all its spectra, from every file, merged. A peak is kept only when at least
+  two spectra hold it, so noise ions do not add up. Intensities are weighted by how abundant the precursor was
+  in the MS1 scan before each spectrum.
+- **highest TIC**: the single spectrum with the highest total ion current.
+
+With `--library` (an `.msp` file, or a MassCube `.pkl`), both are searched (`--similarity`, default weighted
+entropy) as a **denoising search** (`specdenoise`, tier T1, after Kong et al., Nat Methods 2025): every library
+spectrum within the precursor tolerance is scored on the spectrum as measured and on the spectrum denoised with
+that candidate's own formula and adduct, keeping only the ions whose neutral loss is a plausible sub-formula of
+the candidate's precursor ion. Candidates share few formulas (one compound has many library spectra; isomers),
+so each spectrum is denoised once per formula, not per candidate. A record without a formula is read from its
+SMILES (a small SMILES reader; the result must fit the record's precursor m/z), and a record with neither keeps
+its raw score. `--denoise t0` instead denoises each spectrum once from the feature m/z alone (tier T0 top-5:
+the precursor's possible formulas ranked by the fragment intensity they explain; written as
+`ms2_*_denoised.msp`), `--denoise off` searches the raw spectra only. A library spectrum scoring above 0.1 on
+either version is listed in `identifications.tsv` for both (the `spectrum` column: `consensus`, `single`,
+`consensus_denoised`, `single_denoised`; `denoise_ion` the precursor ion formula it was denoised with), so
+every hit has a raw and a denoised score. A feature's best hit on the denoised consensus
+at or above `--min-similarity` (default 0.7) is its annotation in `feature_annotations.tsv`; the app shows both
+scores and switches the head-to-tail plot between the selected candidate's denoised spectrum and the raw one. In the app you can confirm
+it, pick another candidate or mark the feature unknown (the table's `reviewed` column says whether you did), write
+a comment, and give features red, blue or yellow stars to filter by. All of it is saved in `user_annotations.json`,
+kept apart from the search results, and used in the report and the exported tables (`reviewed`, `stars`,
+`comment` columns). `peak3d identify OUT --library LIB` searches again without re-processing; your notes are kept.
+
+### In the browser: `peak3d gui`
+
+```bash
+peak3d gui                      # opens http://127.0.0.1:8765/?token=... in your browser
+```
+
+The GUI picks the mzML folder and output folder, sets the options (the same as the command line, with the
+equivalent command shown), runs peak3d with live progress, and opens the results in the same viewer as
+`report.html`. It runs on your computer: data never leave it, and the browser is only the window. Runs are
+ordinary `peak3d process` subprocesses, so results are identical to the command line. `peak3d report OUT`
+rebuilds `report.html` for an existing output.
+
+The Features tab shows what each feature is within its compound group: `M+1` a confirmed isotope, `M+1?` a
+possible one (m/z and RT fit a 13C step from a stronger feature, but the peak shapes did not confirm it), a named
+ion such as `[M+Na]+`, or `Δ -57.0215`, the m/z difference to the group's base ion when no relation names it. The
+Feature group column's button lists only that group's features (the adducts, fragments, multimers and isotopes of
+one compound, `compound_id` in the tables); the same button sits in the feature's header.
+
+The standalone app above is the same GUI without a Python installation.
+
+**Halogen check.** Every run tests the MS1 isotope pattern of each monoisotopic feature, in the file where it is
+strongest, for chlorine and bromine (`--no-halogen-test` skips it): the ratios M+1..M+4 / M, summed over the top
+half of the peak, are fitted under elemental hypotheses (no halogen, S, S2, Si4-12 for siloxanes, Cl1-4, Br1-3,
+BrCl, Br2Cl, BrCl2; the carbon count from M+1, N, O, P and H then filling the ion's mass), and where the mass
+accuracy allows, the spacing of M+2 adds evidence (37Cl and 81Br sit 0.010 and 0.009 Da below 13C2). A halogen is
+called when its best hypothesis beats the best halogen-free one by 9 chi-square units and fits the pattern itself,
+with its M+2 where its isotope puts it; "possible" above 4 or when one of those fails. A window that does not
+co-elute with M, or whose position is outside any isotopologue (the +2.016 Da homologue of a co-eluting lipid is
+the common case), is left out; a saturated M and a weak signal are flagged. The table gets `possible_halogen` (yes / maybe /
+no, empty for isotopes and features without signal) and `halogen_pattern` (the best hypothesis, e.g. Cl2); the
+feature list shows them as a **Halogen** column with a **Possible halogen** filter, and a called feature carries a
+chip in its header. The compositions shown are pattern models, not identifications.
+
+**Show MS1** (beside a feature's chromatograms) reads the MS1 spectrum at the feature's apex from the point-cloud
+cache (the strongest file by default, any file on request) and draws it head-to-tail against the best hypothesis's
+pattern, with the ratios, spacings, flags and the ranking of the hypotheses; a co-eluting peak one or two units
+below warns that the feature may not be the monoisotopic peak. The report has no button: it needs the server and
+the cache (`--keep-cache`).
+
+On a cluster, start the GUI inside a job with `--host 0.0.0.0` and reach it through an SSH tunnel to that
+node; the access token in the link keeps other users out.
 
 ### Options
 

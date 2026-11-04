@@ -46,8 +46,19 @@ tail on their own when they hold >= 25 features, the rest in quantile segments o
 in [0, 1] that minimises the mean absolute deviation of these features from the median of the other
 files (the medoid for 2-3 files): 1 keeps the fit, 0 leaves the file on its native axis. Factors are
 interpolated between segments; the scaled warp stays monotone. On the held-out features the applied
-correction is therefore never worse, segment by segment, than none. Each file's m/z scale is recalibrated by the median offset of its anchors against the consensus
-(batch-wise calibration drifts of a few ppm are common). Features are then grouped across files
+correction is therefore never worse, segment by segment, than none. Each file's m/z scale is recalibrated against the
+others (batch-wise calibration drifts of a few ppm are common): before anchors are matched, a coarse offset is the mode of
+the m/z differences of anchor pairs within 50 ppm and the coarse RT window (kept when it stands out from chance pairs, and
+centred so that the median file defines the scale); it is removed from every step that matches anchors (medoid choice,
+matching, consensus, do-no-harm check), and the median offset of the matched inlier anchors against the consensus refines
+it. Without the coarse step, matching within the narrow tolerance would see only offsets well inside it. The offset is a
+curve over each file's run time, so a calibration that drifts or jumps mid-run is followed: a file whose pairs fall into
+two modes (a jump, as in 25 PR002464 injections at 1.3-4.5 min) gets a step where its pairs switch, when a step fits
+them as well as a running median does (a drift keeps the running median); the jump is also looked for with the file's
+strongest features over the whole run, since anchors leave out the run's ends and can have gaps; and a file with no
+mode against the reference (a U-13C-only sample against a 12C one) is measured against the file it shares most pairs
+with. `--mz-static` keeps one offset per file instead. Gap-filling extracts each file at the group m/z on that file's
+own scale (at the group's time). Features are then grouped across files
 on the corrected axes: m/z within each pair's own intensity-dependent tolerance, RT within the
 larger of 3x the anchor residual MAD and half the narrower peak's width (apexes of one compound
 overlap), one member per file; a second pass merges same-ion groups with overlapping RT ranges
@@ -136,7 +147,7 @@ Options: `--ppm 5`, `--rt-tol-max 0.25`, `--min-score 0.5`, `--min-presence 2`, 
 | `features/<stem>.tsv` | per-file features: mz, rt, rt_apex, height, area, area_bsub, rt_min, rt_max, scans, n_scans, n_gaps, fwhm, asym, mz_sd_ppm, baseline (where the bounds walk stopped), baseline_lo, noise (cell floor, used in the S/N), snr, prominence_rel, persistence, gauss_r2, ridge_ratio, background_ratio, far_level, tv_ratio, n_valleys, tv_excess, noise_i (sigma at the apex under the file's noise law), iso_offset, charge, iso_parent, iso_ratio, score_rule, score_model, score, flags, rt_corr, rt_min_corr, rt_max_corr, is_anchor, group_id, group_kept, compound_id, role |
 | `features/<stem>.params.json` | every per-file estimated parameter, counts and stage timings |
 | `rt_correction/<stem>.tsv` | the warp: scan, rt_native, rt_corr |
-| `rt_correction/summary.tsv` | per file: role, anchor tier, counts, knots, coarse shift, max shift, MAD before/after (s), do-no-harm check (validation features, smallest / median factor, their mean deviation native / anchor fit / applied, s), flag |
+| `rt_correction/summary.tsv` | per file: role, anchor tier, counts, knots, coarse shift, max shift, MAD before/after (s), anchors matched relative to the median file (flag few_anchors_matched below 0.8, shown first), m/z offset and its coarse part (ppm), do-no-harm check (validation features, smallest / median factor, their mean deviation native / anchor fit / applied, s), flag |
 | `rt_correction/anchors.tsv` | every matched anchor with residuals before/after the anchor fit (before the do-no-harm scaling) |
 | `qc/` | drift curves, residual histograms, anchor fits, presence histogram, `holdout.tsv` |
 | `params.json` | resolved parameters, versions, medoid, tolerances, stage times |

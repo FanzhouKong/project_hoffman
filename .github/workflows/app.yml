@@ -1,0 +1,223 @@
+name: app
+# Standalone peak3d app (PyInstaller) for Windows, macOS and Linux: build, use it as a user would, publish.
+# Branch pushes replace the "app-preview" pre-release; a v* tag makes a versioned release.
+on:
+  push:
+    branches: [main, gui-prototype]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # asari hangs inside the Windows app (not yet understood): the Windows build leaves it out
+          - { name: windows-x64, os: windows-latest, extras: "" }
+          - { name: macos-arm64, os: macos-14, extras: "[asari]" }
+          # the last numba/llvmlite with Intel-Mac wheels (newer releases build for Apple silicon only)
+          - { name: macos-x64, os: macos-15-intel, pins: "numba==0.62.1 llvmlite==0.45.1", extras: "[asari]" }
+          - { name: linux-x64, os: ubuntu-22.04, extras: "[asari]" }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      BROWSER: none        # no browser windows on the build machines
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install ${{ matrix.pins }} ".${{ matrix.extras }}" "pyinstaller>=6.10,<7"
+      - name: Build
+        run: pyinstaller --noconfirm --clean packaging/peak3d.spec
+      - name: Locate the program
+        run: |
+          case "${{ runner.os }}" in
+            Windows) echo "BIN=$PWD/dist/peak3d/peak3d.exe" >> "$GITHUB_ENV" ;;
+            macOS)   echo "BIN=$PWD/dist/peak3d.app/Contents/MacOS/peak3d" >> "$GITHUB_ENV" ;;
+            Linux)   echo "BIN=$PWD/dist/peak3d/peak3d" >> "$GITHUB_ENV" ;;
+          esac
+      - name: Command line inside the app (demo, cold and with the compile cache)
+        run: |
+          "$BIN" --version
+          start=$(date +%s); "$BIN" demo --output smoke1 --cores 2; echo "cold: $(( $(date +%s) - start )) s"
+          test -f smoke1/peak3d_out/report.html
+          start=$(date +%s); "$BIN" demo --output smoke2 --cores 2; echo "warm: $(( $(date +%s) - start )) s"
+      - name: asari inside the app (bundled; runs as the app's own `_asari` command)
+        if: matrix.extras == '[asari]'
+        timeout-minutes: 10
+        run: |
+          "$BIN" external --kernel asari --input smoke1/demo_mzml --output asari_out --cores 2
+          test -f asari_out/aligned_feature_table.tsv && test -f asari_out/report.html
+          echo "asari features: $(( $(wc -l < asari_out/aligned_feature_table.tsv) - 1 ))"
+      - name: GUI inside the app runs peak3d (example data, one run, results)
+        run: |
+          "$BIN" gui --no-browser --port 8799 --token ci --root "$PWD" > gui.log 2>&1 &
+          api() { curl -sf -H "X-Peak3d-Token: ci" -H "Content-Type: application/json" "$@"; }
+          for i in $(seq 60); do api http://127.0.0.1:8799/api/info > /dev/null && break; sleep 1; done
+          ex=$(api -X POST -d '{}' http://127.0.0.1:8799/api/example); echo "$ex"
+          inp=$(echo "$ex" | python -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["input"]))')
+          out=$(python -c 'import json,os; print(json.dumps(os.path.join(os.getcwd(), "gui_out")))')
+          api -X POST -d "{\"input\": $inp, \"output\": $out, \"options\": {\"cores\": 2}}" http://127.0.0.1:8799/api/runs
+          for i in $(seq 200); do
+            st=$(api http://127.0.0.1:8799/api/runs/r1 | python -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+            [ "$st" != running ] && break; sleep 3
+          done
+          api http://127.0.0.1:8799/api/runs/r1 | python -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d["log"][-8:]))'
+          echo "run: $st"; test "$st" = done && test -f gui_out/report.html
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8799/api/results/bundle?path=$(python -c 'import os,urllib.parse; print(urllib.parse.quote(os.path.join(os.getcwd(), "gui_out")))')" -H "X-Peak3d-Token: ci")
+          echo "results: HTTP $code"; test "$code" = 200
+      - name: Double-click start (no arguments) serves the app
+        run: |
+          "$BIN" > app.log 2>&1 &
+          state="$HOME/.peak3d/app.json"
+          for i in $(seq 60); do [ -f "$state" ] && break; sleep 1; done
+          url=$(python -c "import json,os; print(json.load(open(os.path.expanduser('~/.peak3d/app.json')))['url'].split('?')[0])")
+          tok=$(python -c "import json,os; print(json.load(open(os.path.expanduser('~/.peak3d/app.json')))['token'])")
+          curl -sf -H "X-Peak3d-Token: $tok" "${url}api/info"; echo
+          if [ "${{ runner.os }}" = Windows ]; then taskkill //F //IM peak3d.exe > /dev/null 2>&1 || true; else pkill -f "$BIN" || true; fi
+      - name: Package
+        run: |
+          mkdir -p upload
+          case "${{ runner.os }}" in
+            Windows) (cd dist && 7z a -tzip -mx=7 ../upload/peak3d-${{ matrix.name }}.zip peak3d > /dev/null) ;;
+            macOS)   ditto -c -k --keepParent dist/peak3d.app upload/peak3d-${{ matrix.name }}.zip ;;
+            Linux)   tar -C dist -czf upload/peak3d-${{ matrix.name }}.tar.gz peak3d ;;
+          esac
+          ls -la upload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peak3d-${{ matrix.name }}
+          path: upload/*
+          retention-days: 14
+          compression-level: 0
+      - name: Windows double-click (no console, as from Explorer), screenshots
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force check | Out-Null
+          $notes = [System.Collections.Generic.List[string]]::new()
+          $notes.Add("commit $env:GITHUB_SHA")
+          $exe = (Resolve-Path "dist\peak3d\peak3d.exe").Path
+          $state = "$HOME\.peak3d\app.json"
+          Remove-Item -Force $state -ErrorAction SilentlyContinue
+          $ok = $false; $p = $null
+          try {
+            $p = Start-Process -FilePath $exe -PassThru            # no redirection: no console handles, like a double-click
+            for ($i = 0; $i -lt 90 -and -not (Test-Path $state); $i++) { Start-Sleep 1 }
+            if (-not (Test-Path $state)) { throw "the app did not start its server within 90 s" }
+            $s = Get-Content $state | ConvertFrom-Json
+            $base = $s.url.Split("?")[0].TrimEnd("/"); $h = @{ "X-Peak3d-Token" = $s.token }
+            $info = Invoke-RestMethod "$base/api/info" -Headers $h
+            $notes.Add("app $($info.version) on $($info.platform), python $($info.python)")
+            Start-Sleep 3
+            $win = (Get-Process -Id $p.Id).MainWindowTitle
+            $notes.Add("control window title: '$win'")
+            $ex = Invoke-RestMethod "$base/api/example" -Method Post -Headers $h -ContentType "application/json" -Body "{}"
+            $body = @{ input = $ex.input; output = "$PWD\check\run"; options = @{ cores = 2 } } | ConvertTo-Json
+            $run = Invoke-RestMethod "$base/api/runs" -Method Post -Headers $h -ContentType "application/json" -Body $body
+            for ($i = 0; $i -lt 200; $i++) { $st = Invoke-RestMethod "$base/api/runs/$($run.id)" -Headers $h; if ($st.state -ne "running") { break }; Start-Sleep 3 }
+            $notes.Add("run: $($st.state) in $([math]::Round($st.elapsed)) s")
+            $notes.Add("run log tail:"); $st.log | Select-Object -Last 6 | ForEach-Object { $notes.Add("  $_") }
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("$PWD\check\windows-desktop.png")
+            $edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+            if (-not (Test-Path $edge)) { $edge = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe" }
+            & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --virtual-time-budget=5000 --screenshot="$PWD\check\windows-app.png" "$($s.url)" | Out-Null
+            $rep = (Resolve-Path "check\run\report.html").Path.Replace("\", "/")
+            & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --virtual-time-budget=5000 --screenshot="$PWD\check\windows-report.png" "file:///$rep" | Out-Null
+            $ok = ($win -eq "Mosa") -and ($st.state -eq "done")
+          } catch {
+            $notes.Add("ERROR: $($_.Exception.Message)")
+          } finally {
+            $notes.Add("process alive: $([bool]($p -and -not $p.HasExited))")
+            $notes.Add("app log:")
+            Get-Content "$env:LOCALAPPDATA\peak3d\cache\peak3d.log" -ErrorAction SilentlyContinue | ForEach-Object { $notes.Add("  $_") }
+            $notes | Out-File -Encoding utf8 check\windows-check.txt
+            Get-Content check\windows-check.txt
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+          if (-not $ok) { throw "Windows double-click check failed (see windows-check.txt)" }
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && always()
+        with:
+          name: ci-check-windows
+          path: check/*.*
+          retention-days: 7
+      - name: MassCube installed by the app on request (optional add-on; does not fail the build)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          PEAK3D_ADDONS: ${{ runner.temp }}/peak3d-addons
+        run: |
+          set +e                       # record each exit code (the default shell stops at the first failure)
+          mkdir -p check-mc
+          log="check-mc/masscube-${{ matrix.name }}.log"
+          start=$(date +%s)
+          "$BIN" addon install masscube --accept-licence > "$log" 2>&1; rc=$?
+          echo "install exit $rc after $(( $(date +%s) - start )) s" | tee -a "$log"
+          if [ $rc -ne 0 ]; then tail -60 "$log"; exit 1; fi
+          "$BIN" addon status masscube >> "$log" 2>&1
+          "$BIN" external --kernel masscube --input smoke1/demo_mzml --output masscube_out --cores 2 >> "$log" 2>&1; rc=$?
+          echo "run exit $rc" | tee -a "$log"
+          if [ $rc -ne 0 ]; then tail -60 "$log"; exit 1; fi
+          test -f masscube_out/aligned_feature_table.tsv && test -f masscube_out/report.html
+          echo "MassCube features: $(( $(wc -l < masscube_out/aligned_feature_table.tsv) - 1 ))" | tee -a "$log"
+          "$BIN" addon remove masscube
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-check-${{ matrix.name }}-masscube
+          path: check-mc/*
+          retention-days: 7
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: upload
+          pattern: peak3d-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: checks
+          pattern: ci-check-*
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ls checks/* > /dev/null 2>&1; then          # screenshots and notes from the platform checks (not for users)
+            gh release delete ci-checks --yes --cleanup-tag || true
+            gh release create ci-checks checks/* --prerelease --target "$GITHUB_SHA" --title "CI checks (not a download)" \
+              --notes "Screenshots and notes from the app checks of ${GITHUB_SHA::7}. Not for users."
+          fi
+          ls -la upload
+          n=$(ls upload | wc -l)
+          if [ "$n" -lt 4 ]; then echo "only $n of 4 downloads built: keeping the current release"; exit 1; fi
+          notes="Standalone Mosa app (the peak3d program): download the file for your computer, unzip, double-click (see the README for the one-time security confirmation on macOS and Windows). Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            gh release create "$GITHUB_REF_NAME" upload/* --title "Mosa $GITHUB_REF_NAME" --notes "$notes"
+          else
+            gh release delete app-preview --yes --cleanup-tag || true
+            gh release create app-preview upload/* --prerelease --target "$GITHUB_SHA" \
+              --title "Mosa app (preview)" --notes "$notes"
+          fi

@@ -5,6 +5,7 @@ has run a parallel kernel (the JIT warm-up), and forked children deadlock. Spawn
 the compiled kernels from the on-disk numba cache instead."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pickle
@@ -19,13 +20,15 @@ import pandas as pd
 
 from . import __version__
 from .align import AlignParams, AlignResult, FileAlignment, align_run, anchors_table, summary_table
-from .features import COLUMNS, build_features, precise_mz, write_features
+from .features import COLUMNS, MZ_TEXT, build_features, precise_mz, write_features
 from .estimate import apply_scan_gains, estimate, parse_overrides, refit_after_gains, scan_gains, variant_label
 from .gapfill import fill_file
 from .grouping import consensus, group_features, merge_complementary
 from .compounds import cluster_compounds, group_iso_parent as _group_iso_parent, write_compounds
 from .io import Cloud, load_cloud
+from .ms2 import Collector, from_collected, save as save_ms2
 from .pick import pick_cloud
+from .tsv import write_tsv
 from .warp import FitDiag, TableWarp
 
 RESERVED = {"group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_filled", "mz_ppm_spread", "rt_sd",
@@ -55,6 +58,8 @@ def _warm_jit():
     build_features(cloud, b)
     from .gapfill import fill_file as _ff
     _ff(cloud, TableWarp.identity(cloud.rt), np.array([300.0]), np.array([0.5]), np.array([0.05]), 5.0)
+    from .tsv import warm
+    warm()
 
 
 def _load_model(path):
@@ -75,14 +80,29 @@ def _apply_model(feats, model):
 
 
 def _pick_one(job):
-    path, features_dir, cache_dir, min_score, keep_rejected, polarity, threads, model_path, overrides = job
+    path, features_dir, cache_dir, min_score, keep_rejected, polarity, threads, model_path, overrides, ms2_dir = job
     import numba
     numba.set_num_threads(max(1, int(threads)))
     t = {}
     tic = time.perf_counter()
-    cloud = load_cloud(path, polarity)
+    spectra = Collector()
+    cloud = load_cloud(path, polarity, spectra)     # MS2 spectra come along in the same pass
     t["parse"] = time.perf_counter() - tic
     stem = cloud.name
+    if spectra:
+        save_ms2(from_collected(spectra, cloud.polarity), Path(ms2_dir) / f"{stem}.npz")
+    tic = time.perf_counter()
+    P = estimate(cloud, overrides=overrides)
+    t["estimate"] = time.perf_counter() - tic
+    if P.scan_gain:
+        # correct the scan-wide gain before anything else, then refit what it changes (floor, noise law) on the
+        # corrected cloud; the cache holds the corrected cloud, so gap filling and alignment see the same intensities
+        tic = time.perf_counter()
+        g, g_sd, g_n = scan_gains(cloud, P)
+        apply_scan_gains(cloud, g)
+        P = refit_after_gains(cloud, P)
+        P.gain_sd, P.n_gain_scans = g_sd, g_n
+        t["scan_gain"] = time.perf_counter() - tic
     tic = time.perf_counter()
     P = estimate(cloud, overrides=overrides)
     t["estimate"] = time.perf_counter() - tic
@@ -111,7 +131,7 @@ def _pick_one(job):
     t["features"] = time.perf_counter() - tic
     write_features(feats, Path(features_dir) / f"{stem}.tsv")
     if rej is not None:
-        precise_mz(rej).to_csv(Path(features_dir) / f"{stem}.rejected.tsv", sep="\t", index=False, float_format="%.6g")
+        write_tsv(rej, Path(features_dir) / f"{stem}.rejected.tsv", "%.6g", text_formats=MZ_TEXT)
     params = b.params.to_dict()
     params.update(n_scans=int(cloud.n_scans), n_centroids=int(cloud.n_points), polarity=cloud.polarity,
                   n_basins_initial=b.n_basins_initial, n_after_merge=b.n_after_merge,
@@ -120,7 +140,7 @@ def _pick_one(job):
                   peak3d_version=__version__)
     (Path(features_dir) / f"{stem}.params.json").write_text(json.dumps(params, indent=1))
     return dict(stem=stem, path=str(path), n_features=int(len(feats)), n_centroids=int(cloud.n_points),
-                n_scans=int(cloud.n_scans), parse_s=round(t["parse"], 3), pick_s=round(t["pick"], 3),
+                n_scans=int(cloud.n_scans), n_ms2=len(spectra), parse_s=round(t["parse"], 3), pick_s=round(t["pick"], 3),
                 features_s=round(t["features"], 3))
 
 
@@ -128,8 +148,10 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
     output = Path(output)
     features_dir = output / "features"
     cache_dir = Path(cache_dir or getattr(args, "cache_dir", None) or output / ".cache")
+    ms2_dir = output / "ms2"
     features_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    ms2_dir.mkdir(parents=True, exist_ok=True)
     files = [Path(f) for f in files]
     stems = [f.stem for f in files]
     if len(set(stems)) != len(stems):
@@ -137,6 +159,7 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
     for s in stems:
         if s in RESERVED:
             raise ValueError(f"file stem {s!r} collides with a reserved column name")
+        (ms2_dir / f"{s}.npz").unlink(missing_ok=True)      # a re-run must not inherit an earlier run's spectra
     overrides = parse_overrides(getattr(args, "set", None))   # fail before any work on a bad --set
     n_workers = max(1, min(len(files), args.cores))
     threads = max(1, args.cores // n_workers)
@@ -145,7 +168,7 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
     _warm_jit()
     log(f"JIT warm-up {time.perf_counter() - tic:.1f} s; picking {len(files)} files with {n_workers} workers x {threads} threads")
     jobs = [(str(f), str(features_dir), str(cache_dir), args.min_score, args.keep_rejected, args.polarity, threads,
-             str(args.model) if args.model else None, overrides) for f in files]
+             str(args.model) if args.model else None, overrides, str(ms2_dir)) for f in files]
     tic = time.perf_counter()
     if n_workers == 1:
         results = [_pick_one(j) for j in jobs]
@@ -192,6 +215,45 @@ def _fill_one(job):
     return stem, miss_idx, h, a, c
 
 
+def _halogen_one(job):
+    stem, cache_dir, native, corr, g_mz, g_rt, g_lo, g_hi, g_z, ppm, idx, noise = job
+    from .halogen import test_groups
+    cloud = Cloud.load_npz(Path(cache_dir) / f"{stem}.npz")
+    code, best = test_groups(cloud, corr, g_mz, g_rt, g_lo, g_hi, g_z, ppm, noise)
+    return idx, code, best
+
+
+def _halogen_columns(stems, cache_dir, res, cons, H, keep_g, g_iso, g_z, g_noise, ppm, cores, log):
+    """possible_halogen (yes / maybe / no, empty = not tested) and halogen_pattern (the best hypothesis) per group:
+    the MS1 isotope pattern of every kept monoisotopic group in the file where it is strongest (peak3d.halogen)"""
+    G, N = H.shape
+    code = np.zeros(G, np.uint8)
+    best = np.array([""] * G, dtype=object)
+    test = keep_g & (g_iso == 0) & (H.max(axis=1) > 0)
+    f_best = H.argmax(axis=1)
+    jobs = []
+    for k, s in enumerate(stems):
+        idx = np.flatnonzero(test & (f_best == k))
+        if len(idx) == 0:
+            continue
+        fa = res.files[s]
+        native = np.interp(cons["rt"][idx], fa.warp.corr, fa.warp.native)
+        own_mz = cons["mz"][idx] / (1.0 - fa.mz_offset_at(native) * 1e-6)    # on this file's own scale
+        jobs.append((s, str(cache_dir), fa.warp.native, fa.warp.corr, own_mz, cons["rt"][idx], cons["rt_min"][idx],
+                     cons["rt_max"][idx], g_z[idx], ppm, idx, g_noise[idx]))
+    n_workers = max(1, min(len(jobs), cores))
+    if n_workers == 1 or len(jobs) <= 1:
+        out = [_halogen_one(j) for j in jobs]
+    else:
+        with get_context("spawn").Pool(n_workers) as pool:
+            out = pool.map(_halogen_one, jobs, chunksize=1)
+    for idx, c, b in out:
+        code[idx] = c
+        best[idx] = b
+    from .halogen import VERDICTS
+    return np.array([VERDICTS[c] for c in code], dtype=object), best, int(test.sum())
+
+
 def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | None = None):
     output = Path(output)
     cache_dir = Path(cache_dir)
@@ -204,7 +266,9 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     grids = {s: _scan_rt(cache_dir, s) for s in stems}
     dts = [float(np.median(np.diff(g))) if len(g) > 1 else 0.01 for g in grids.values()]
     dt_med = float(np.median(dts))
-    P = AlignParams(ppm=args.ppm, rt_tol_max=args.rt_tol_max, holdout=args.holdout)
+    dyn = not bool(getattr(args, "mz_static", False))       # --mz-static: one offset per file, no jump handling
+    P = AlignParams(ppm=args.ppm, rt_tol_max=args.rt_tol_max, holdout=args.holdout, mz_dynamic=dyn,
+                    mz_relaxed_second_mode=dyn, mz_step_curve=dyn, mz_fallback_ref=dyn, mz_probe_features=dyn)
 
     tic = time.perf_counter()
     if args.no_rt_correction:
@@ -229,8 +293,9 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
         is_anchor = np.zeros(len(df), bool)
         is_anchor[fa.anchor_idx] = True
         df["is_anchor"] = is_anchor
-        df["mz_corr"] = df["mz"].values * (1.0 - fa.mz_offset_ppm * 1e-6)
-        pd.DataFrame({"scan": np.arange(len(fa.warp.native)), "rt_native": fa.warp.native, "rt_corr": fa.warp.corr}) \
+        df["mz_corr"] = df["mz"].values * (1.0 - fa.mz_offset_at(df["rt"].values) * 1e-6)
+        pd.DataFrame({"scan": np.arange(len(fa.warp.native)), "rt_native": fa.warp.native, "rt_corr": fa.warp.corr,
+                      "mz_offset_ppm": fa.mz_offset_at(fa.warp.native)}) \
             .to_csv(rtc_dir / f"{s}.tsv", sep="\t", index=False, float_format="%.6f")
     summary_table(res).to_csv(rtc_dir / "summary.tsv", sep="\t", index=False, float_format="%.4g")
     anchors_table(res).to_csv(rtc_dir / "anchors.tsv", sep="\t", index=False, float_format="%.6g")
@@ -288,12 +353,11 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     G = len(cons["mz"])
     log(f"complementary merge: {G0} -> {G} groups")
     A["gid"] = gid
-    for k, s in enumerate(stems):
+    for k, s in enumerate(stems):                # the lists are written once, with group_kept, after the presence rule
         sel = A["file"].values == k
         g = np.empty(len(feats[s]), np.int64)
         g[A["row"].values[sel]] = gid[sel]
         feats[s]["group_id"] = g
-        write_features(feats[s], features_dir / f"{s}.tsv")
     stage_times["group_s"] = round(time.perf_counter() - tic, 3)
     log(f"grouped {len(A)} features from {N} files into {G} groups ({stage_times['group_s']} s)")
 
@@ -306,7 +370,8 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     detected[gid, A["file"].values] = True
 
     # gap filling, with confirmation: a missing cell whose smoothed EIC holds a real peak at the group's
-    # position counts as presence of the group in that file
+    # position counts as presence of the group in that file; each file is read at the group m/z on its own
+    # scale (the group m/z is on the corrected one, the cached centroids are not)
     n_filled = np.zeros(G, np.int64)
     confirmed = np.zeros((G, N), bool)
     if not args.no_gap_fill and N > 0:
@@ -326,7 +391,9 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
             if len(miss) == 0:
                 continue
             fa = res.files[s]
-            jobs.append((s, str(cache_dir), fa.warp.native, fa.warp.corr, cons["mz"][miss], cons["rt"][miss],
+            native = np.interp(cons["rt"][miss], fa.warp.corr, fa.warp.native)
+            own_mz = cons["mz"][miss] / (1.0 - fa.mz_offset_at(native) * 1e-6)    # on this file's own scale
+            jobs.append((s, str(cache_dir), fa.warp.native, fa.warp.corr, own_mz, cons["rt"][miss],
                          half[miss], res.ppm_tol, miss, threads, g_noise[miss], g_h[miss], fwhm_scans.get(s, 0.0)))
         if n_workers == 1 or len(jobs) <= 1:
             out = [_fill_one(j) for j in jobs]
@@ -384,27 +451,41 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
             feats[s]["role"] = comp["role"].values[feats[s]["group_id"].values]
         write_features(feats[s], features_dir / f"{s}.tsv")
 
+    # halogen check: the MS1 isotope pattern of every kept monoisotopic group, in its strongest file
+    hal = np.array([""] * G, dtype=object)
+    hal_best = np.array([""] * G, dtype=object)
+    if not getattr(args, "no_halogen_test", False) and N > 0:
+        tic = time.perf_counter()
+        order_n = np.argsort(A["height"].values)
+        g_noise = np.zeros(G)
+        g_noise[gid[order_n]] = A["noise"].values[order_n]       # the strongest member's cell noise
+        hal, hal_best, n_tested = _halogen_columns(stems, cache_dir, res, cons, H, keep_g, g_iso, g_z, g_noise,
+                                                   float(getattr(args, "ppm", 5.0)), args.cores, log)
+        stage_times["halogen_s"] = round(time.perf_counter() - tic, 3)
+        log(f"halogen check: {int((hal == 'yes').sum())} halogen patterns and {int((hal == 'maybe').sum())} possible "
+            f"among {n_tested} monoisotopic groups ({stage_times['halogen_s']} s)")
     # tables
     base = pd.DataFrame({"group_id": np.arange(G), "mz": cons["mz"], "rt": cons["rt"], "rt_min": cons["rt_min"],
                          "rt_max": cons["rt_max"], "n_detected": cons["n_detected"].astype(int),
                          "n_confirmed": n_confirmed.astype(int),
                          "n_filled": n_filled.astype(int), "mz_ppm_spread": cons["mz_ppm_spread"],
-                         "rt_sd": cons["rt_sd"], "iso_offset": g_iso.astype(int), "charge": g_z.astype(int)})
+                         "rt_sd": cons["rt_sd"], "iso_offset": g_iso.astype(int), "charge": g_z.astype(int),
+                         "possible_halogen": hal, "halogen_pattern": hal_best})
     if comp is not None:
         for c in ("compound_id", "role", "neutral_mass", "is_base", "n_members"):
             base[c] = comp[c].values
     # presence of every group (before the rule) in every file: 2 detected, 1 confirmed peak, 0 absent
     pres = np.where(detected, 2, np.where(confirmed, 1, 0)).astype(np.int8)
-    precise_mz(pd.concat([base[["group_id", "mz", "rt", "n_detected", "n_confirmed"]], pd.DataFrame(pres, columns=stems)], axis=1)) \
-        .to_csv(output / "presence_mask.tsv", sep="\t", index=False)
+    write_tsv(pd.concat([base[["group_id", "mz", "rt", "n_detected", "n_confirmed"]], pd.DataFrame(pres, columns=stems)],
+                        axis=1), output / "presence_mask.tsv", text_formats=MZ_TEXT)
     main_is_height = getattr(args, "quant", "height") == "height"
     main = pd.concat([base, pd.DataFrame(H if main_is_height else AR, columns=stems)], axis=1)[keep_g]
     other = pd.concat([base, pd.DataFrame(AR if main_is_height else H, columns=stems)], axis=1)[keep_g]
-    precise_mz(main).to_csv(output / "aligned_feature_table.tsv", sep="\t", index=False, float_format="%.6g")
-    precise_mz(other).to_csv(output / ("aligned_feature_area.tsv" if main_is_height else "aligned_feature_height.tsv"),
-                             sep="\t", index=False, float_format="%.6g")
-    pd.concat([base[["group_id"]], pd.DataFrame((~detected).astype(np.int8), columns=stems)], axis=1)[keep_g] \
-        .to_csv(output / "filled_mask.tsv", sep="\t", index=False)
+    write_tsv(main, output / "aligned_feature_table.tsv", "%.6g", text_formats=MZ_TEXT)
+    write_tsv(other, output / ("aligned_feature_area.tsv" if main_is_height else "aligned_feature_height.tsv"), "%.6g",
+              text_formats=MZ_TEXT)
+    write_tsv(pd.concat([base[["group_id"]], pd.DataFrame((~detected).astype(np.int8), columns=stems)], axis=1)[keep_g],
+              output / "filled_mask.tsv")
     stage_times["n_groups_all"] = int(G)
     stage_times["n_groups_kept"] = int(keep_g.sum())
     return res, cons, stage_times
@@ -436,7 +517,75 @@ def _write_params(output: Path, args, res: AlignResult | None, stage_times: dict
     (output / "params.json").write_text(json.dumps(p, indent=1, default=str))
 
 
+def _write_report(output: Path, cache_dir: Path, args):
+    """report.html next to the tables, while the cache (chromatograms) still exists; never fails the run"""
+    if getattr(args, "no_report", False):
+        return
+    tic = time.perf_counter()
+    try:
+        from .web.report import write_report
+        log("writing report.html")
+        path = write_report(output, cache_dir)
+        log(f"report: {path} ({path.stat().st_size / 1e6:.1f} MB, {time.perf_counter() - tic:.1f} s)")
+    except Exception as e:
+        log(f"report skipped: {e!r}")
+
+
+def check_library(args):
+    """fail before any work when --library names no readable file"""
+    lib = getattr(args, "library", None)
+    if lib and not Path(lib).expanduser().is_file():
+        sys.exit(f"--library: no such file: {lib}")
+
+
+def ms2_and_identify(output: Path, args, stage: dict) -> None:
+    """MS2 spectra -> features (when the files had any), then the identity search when --library is given;
+    neither fails a finished run. Called after the groups were (re)built, so the group ids of an earlier search and
+    of the user's annotations no longer hold: the user's annotations are set aside, an earlier search without a
+    library to repeat it is removed"""
+    from .annotations import retire
+    retire(output, keep_search=bool(getattr(args, "library", None)))
+    tic = time.perf_counter()
+    try:
+        from .ms2 import map_to_groups
+        map_to_groups(output, workers=max(1, int(getattr(args, "cores", 1) or 1)),
+                      denoise=getattr(args, "denoise", "search") == "t0")
+    except Exception as e:
+        log(f"ms2 mapping skipped: {e!r}")
+    stage["ms2_s"] = round(time.perf_counter() - tic, 3)
+    if getattr(args, "library", None):
+        tic = time.perf_counter()
+        try:
+            from .library import identify
+            identify(output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity,
+                     workers=max(1, int(getattr(args, "cores", 1) or 1)), denoise=getattr(args, "denoise", "search"))
+        except Exception as e:
+            log(f"identify failed: {e!r}")
+        stage["identify_s"] = round(time.perf_counter() - tic, 3)
+
+
+def _reidentify(output: Path, stage: dict, cores: int = 1) -> None:
+    """after a regroup the group ids change: repeat the last identity search with its own settings, or drop it"""
+    path = output / "identifications.json"
+    if not path.exists():
+        return
+    try:
+        s = json.loads(path.read_text())
+        if not Path(s["library"]).is_file():
+            raise FileNotFoundError(s["library"])
+        args = argparse.Namespace(library=s["library"], similarity=s["method"], precursor_ppm=s["precursor_ppm"],
+                                  fragment_tol=s["fragment_tol"], min_similarity=s["min_score"], cores=cores,
+                                  denoise=s.get("denoise_mode") or ("t0" if s.get("denoise") else "off"))
+    except (OSError, ValueError, KeyError) as e:
+        from .annotations import retire
+        retire(output, keep_search=False)
+        log(f"identifications removed (groups changed, library not available: {e!r})")
+        return
+    ms2_and_identify(output, args, stage)
+
+
 def process(files, args):
+    check_library(args)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(args.cache_dir) if args.cache_dir else output / ".cache"
@@ -452,8 +601,10 @@ def process(files, args):
     except Exception as e:  # QC plots never fail the run
         log(f"qc plots skipped: {e!r}")
     stage["qc_s"] = round(time.perf_counter() - tic, 3)
+    ms2_and_identify(output, args, stage)
     _write_params(output, args, res, stage, files, extra=dict(n_files=len(files),
                                                                 n_features_total=int(sum(r["n_features"] for r in results))))
+    _write_report(output, cache_dir, args)
     if not args.keep_cache and cache_dir == output / ".cache":
         shutil.rmtree(cache_dir, ignore_errors=True)
 
@@ -472,4 +623,9 @@ def align_existing(args):
         log(f"qc plots skipped: {e!r}")
     files = sorted(str(p) for p in (output / "features").glob("*.tsv") if not p.name.endswith("rejected.tsv")
                    and p.name != "manifest.tsv")
+    if (output / "identifications.json").exists():
+        _reidentify(output, stage, args.cores)
+    else:
+        ms2_and_identify(output, args, stage)
     _write_params(output, args, res, stage, files)
+    _write_report(output, cache_dir, args)
