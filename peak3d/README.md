@@ -131,7 +131,7 @@ peak3d demo --output OUT      # three synthetic runs, to check an installation
 Without installing, `PYTHONPATH=<repo> python -m peak3d ...` does the same.
 
 Options: `--ppm 5`, `--rt-tol-max 0.25`, `--min-score 0.5`, `--min-presence 2`, `--polarity pos|neg`,
-`--no-rt-correction`, `--no-gap-fill`, `--holdout`, `--quant height|area`, `--keep-cache`,
+`--no-rt-correction`, `--no-gap-fill`, `--holdout`, `--quant height|area`, `--compounds`, `--no-keep-cache`,
 `--keep-rejected`, `--model PKL` (optional re-scorer with `feature_columns` and `predict_proba`).
 
 ## Outputs (`OUT/`)

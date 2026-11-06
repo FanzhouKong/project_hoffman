@@ -35,7 +35,7 @@ export NUMBA_CACHE_DIR="$work/.numba" MPLCONFIGDIR="$work/.mpl"
 
 cd "$work"
 /usr/bin/time -v env PYTHONPATH="$ROOT" "$PEAK3D_ENV/bin/python" -m peak3d process --input data --output peak3d_out \
-    --cores "$SLURM_CPUS_PER_TASK" --keep-cache 2>&1 | tee "$ROOT/$out/peak3d.log"
+    --cores "$SLURM_CPUS_PER_TASK" --compounds 2>&1 | tee "$ROOT/$out/peak3d.log"
 cd "$ROOT"
 rm -rf "$out/peak3d_out"
 cp -r "$work/peak3d_out" "$out/peak3d_out"

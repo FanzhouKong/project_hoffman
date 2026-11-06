@@ -427,7 +427,7 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
 
     # compound groups: adducts, in-source fragments, multimers and their isotopes of one compound
     comp = None
-    if not getattr(args, "no_compounds", False):
+    if getattr(args, "compounds", False):
         tic = time.perf_counter()
         comp, comp_pairs, comp_info = cluster_compounds(
             cons, H, detected | confirmed, detected, A, stems, cache_dir, fwhm_scans, fwhm_study, dt_med, rt_tol,
@@ -605,7 +605,7 @@ def process(files, args):
     _write_params(output, args, res, stage, files, extra=dict(n_files=len(files),
                                                                 n_features_total=int(sum(r["n_features"] for r in results))))
     _write_report(output, cache_dir, args)
-    if not args.keep_cache and cache_dir == output / ".cache":
+    if getattr(args, "no_keep_cache", False) and cache_dir == output / ".cache":
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
@@ -613,7 +613,7 @@ def align_existing(args):
     output = Path(args.output)
     cache_dir = Path(args.cache_dir) if args.cache_dir else output / ".cache"
     if not cache_dir.exists():
-        sys.exit(f"cache directory {cache_dir} not found (run process with --keep-cache)")
+        sys.exit(f"cache directory {cache_dir} not found (process keeps it unless run with --no-keep-cache)")
     stage = {}
     res, cons, stage = align_and_group(output, cache_dir, args, stage)
     try:

@@ -213,7 +213,7 @@ def ms1_pattern(output, cache_dir, stem: str, mz: float, rt: float, rt_lo: float
     output, cache_dir = Path(output), Path(cache_dir)
     npz = cache_dir / f"{stem}.npz"
     if not npz.exists():
-        raise FileNotFoundError(f"no point-cloud cache for {stem} (re-run with --keep-cache)")
+        raise FileNotFoundError(f"no point-cloud cache for {stem} (the run deleted it: re-run without --no-keep-cache)")
     cloud = Cloud.load_npz(npz)
     corr, moff = _file_axis(output, stem, cloud)
     target = float(_native_mz([mz], [rt], cloud, corr, moff, offset_ppm)[0])

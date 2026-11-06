@@ -85,7 +85,7 @@ def test_finish_writes_the_viewer_layout(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     args = argparse.Namespace(cmd="external", kernel="asari", input=d, output=out, cores=1, polarity=None,
-                              keep_cache=False, no_report=True, library=None, similarity="weighted_entropy",
+                              no_keep_cache=True, no_report=True, library=None, similarity="weighted_entropy",
                               min_similarity=0.7, precursor_ppm=10.0, fragment_tol=0.02)
     external.finish(files, args, table, "asari", "9.9", {"kernel_s": 1.0}, "pos")
     t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")

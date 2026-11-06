@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.0.0](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.0.0) (all releases:
+[Mosa v1.1.0](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.0) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases); the
 [app-preview](https://github.com/FanzhouKong/project_hoffman/releases/tag/app-preview) pre-release is rebuilt from
 every push and may be ahead of, or less tested than, the versioned one). Nothing else to install.
@@ -112,9 +112,9 @@ reuse the compiled code.
 
 | file | content |
 |---|---|
-| `aligned_feature_table.tsv` | one row per feature: `mz`, `rt` (min), RT range, detection counts, isotope label (`iso_offset`, 0 = monoisotopic), `charge`, its compound group (`compound_id`, `role`, `neutral_mass`, `is_base`, `n_members`; see below),, the halogen check (`possible_halogen` yes / maybe / no, `halogen_pattern` the best hypothesis, e.g. Cl2; see the GUI section) and one **height** column per file |
-| `compounds.tsv` | one row per compound group: base ion, members (group ids, m/z, roles), neutral mass |
-| `compound_pairs.tsv` | every co-eluting pair that was tested: shape correlation, intensity correlation, mass relation, joined or not |
+| `aligned_feature_table.tsv` | one row per feature: `mz`, `rt` (min), RT range, detection counts, isotope label (`iso_offset`, 0 = monoisotopic), `charge`, its compound group with `--compounds` (`compound_id`, `role`, `neutral_mass`, `is_base`, `n_members`; see below), the halogen check (`possible_halogen` yes / maybe / no, `halogen_pattern` the best hypothesis, e.g. Cl2; see the GUI section) and one **height** column per file |
+| `compounds.tsv` | with `--compounds`: one row per compound group: base ion, members (group ids, m/z, roles), neutral mass |
+| `compound_pairs.tsv` | with `--compounds`: every co-eluting pair that was tested: shape correlation, intensity correlation, mass relation, joined or not |
 | `aligned_feature_area.tsv` | the same table with peak areas |
 | `filled_mask.tsv` | 1 where a value was gap-filled rather than detected |
 | `features/<file>.tsv` | every feature of each file, with shape, S/N and quality descriptors |
@@ -129,7 +129,8 @@ reuse the compiled code.
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
 
-**Compound groups.** Features of one compound (adducts, in-source fragments, multimers, charge states and
+**Compound groups** (`--compounds`; off by default since 1.1.0, as it takes minutes and up to ~25 GB of memory on
+studies of 200 files). Features of one compound (adducts, in-source fragments, multimers, charge states and
 their isotopes) share a `compound_id`. Co-eluting features are joined when their peak shapes correlate
 (EIC Pearson r in every file where both are detected, averaged with the weaker ion's height as weight) and,
 where the study makes it informative,
@@ -206,7 +207,7 @@ chip in its header. The compositions shown are pattern models, not identificatio
 cache (the strongest file by default, any file on request) and draws it head-to-tail against the best hypothesis's
 pattern, with the ratios, spacings, flags and the ranking of the hypotheses; a co-eluting peak one or two units
 below warns that the feature may not be the monoisotopic peak. The report has no button: it needs the server and
-the cache (`--keep-cache`).
+the cache (kept by default; `--no-keep-cache` deletes it at the end of a run).
 
 On a cluster, start the GUI inside a job with `--host 0.0.0.0` and reach it through an SSH tunnel to that
 node; the access token in the link keeps other users out.
@@ -225,7 +226,8 @@ to be used as they are. The options you are most likely to need:
 | `--ppm X` | 5 | m/z tolerance for aligning runs |
 | `--no-rt-correction` | off | group runs on their native RT |
 | `--no-gap-fill` | off | leave undetected cells empty (0) |
-| `--no-compounds` | off | skip compound grouping |
+| `--compounds` | off | group the features of one compound (adducts, fragments, isotopes; see Compound groups) |
+| `--no-keep-cache` | off | delete the point-cloud cache (`.cache/`, about the size of the mzML files) at the end; it is kept by default for Show MS1 and `peak3d align` |
 | `--compound-veto` | auto | intensity veto in compound grouping: `auto` rejects co-eluting pairs whose heights do not correlate across files (12+ files) or whose height ratio is unstable across files (3 to 11 files), `off` tests every co-eluting pair on peak shape, `ratio` uses the ratio rule at any study size; on the PR002464 spike truth `off` gains recall in one study but triples the unlabelled members per compound in all three |
 | `--compound-shape weighted\|median\|pooled` | weighted | peak-shape score of a co-eluting pair: per-file EIC correlations averaged with the weaker ion's log height as weight, their median, or one correlation pooled over every scan of every shared file |
 | `--compound-shape-files N` | 0 | shared files per pair for the shape score (0 = all; N = the strongest N); the median over the 5 strongest was the earlier default and scores 0 to 2 points lower on the spike truth |

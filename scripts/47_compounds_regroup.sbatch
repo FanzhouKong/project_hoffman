@@ -7,7 +7,8 @@
 #   copied, cache shared read-only), leaving the base run untouched:
 #   sbatch --export=ALL,DATE=2026-10-31,VARIANT=noveto,EXTRA="--compound-veto off" --array=1-3 scripts/47_compounds_regroup.sbatch
 #   STEMS_FILE=path (stems, one per line) regroups only those files (a small-study test); EVAL_EXTRA passes
-#   options to the truth check
+#   options to the truth check; CODE=path runs the peak3d source tree there (e.g. a worktree of an earlier release),
+#   EVAL_CODE=path takes the truth check from there
 #SBATCH --job-name=cmp-regroup
 #SBATCH --account=metabolomicsgrp
 #SBATCH --partition=high
@@ -23,6 +24,10 @@ source /etc/profile.d/modules.sh
 cd "$SLURM_SUBMIT_DIR" || { echo "NO_MOUNT $(hostname)"; exit 9; }
 ROOT=$PWD
 PEAK3D_ENV=${PEAK3D_ENV:-$ROOT/envs/peak3d}
+CODE=${CODE:-$ROOT}
+# compound grouping is opt-in since 1.1.0 (--compounds); earlier trees group by default and lack the flag
+# python -m puts the working directory first on sys.path: run peak3d from inside $CODE, outputs on absolute paths
+CFLAG=$(cd "$CODE" && "$PEAK3D_ENV/bin/python" -m peak3d align --help | grep -q -- "--compounds" && echo --compounds || true)
 DATE=${DATE:-$(date +%F)}
 studies=(ST004500 ST004501 ST004502)
 study=${studies[$((SLURM_ARRAY_TASK_ID - 1))]}
@@ -46,8 +51,10 @@ if [ -n "${VARIANT:-}" ]; then
 fi
 export NUMBA_CACHE_DIR="$TMPDIR/numba_$study" MPLCONFIGDIR="$TMPDIR/mpl_$study"
 echo "$study regroup on $(hostname), $SLURM_CPUS_PER_TASK CPUs"
-env PYTHONPATH="$ROOT" "$PEAK3D_ENV/bin/python" -m peak3d align --output "$out/peak3d_out" --cache-dir "$cache" \
-    --cores "$SLURM_CPUS_PER_TASK" ${EXTRA:-} 2>&1 | tee "$out/regroup.log"
-env PYTHONPATH="$ROOT" "$PEAK3D_ENV/bin/python" bench/diag/compound_truth.py --out "$out/peak3d_out" --study "$study" \
+echo "code $CODE ($(git -C "$CODE" rev-parse --short HEAD)$(git -C "$CODE" diff --quiet || echo ", uncommitted changes")) $CFLAG"
+(cd "$CODE" && "$PEAK3D_ENV/bin/python" -c "import peak3d; print('peak3d', peak3d.__version__, 'from', peak3d.__file__)" &&
+ "$PEAK3D_ENV/bin/python" -m peak3d align --output "$ROOT/$out/peak3d_out" --cache-dir "$ROOT/$cache" \
+    --cores "$SLURM_CPUS_PER_TASK" $CFLAG ${EXTRA:-}) 2>&1 | tee "$out/regroup.log"
+env PYTHONPATH="$ROOT" "$PEAK3D_ENV/bin/python" "${EVAL_CODE:-$ROOT}/bench/diag/compound_truth.py" --out "$out/peak3d_out" --study "$study" \
     --report "$out/compound_truth" ${EVAL_EXTRA:-} 2>&1 | tee "$out/compound_truth.log"
 echo REGROUP_DONE

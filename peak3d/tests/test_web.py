@@ -49,7 +49,7 @@ def processed(tmp_path_factory):
     d = _study(tmp / "data")
     out = tmp / "out"
     r = subprocess.run([sys.executable, "-m", "peak3d", "process", "--input", str(d), "--output", str(out), "--cores", "2",
-                        "--keep-cache"], cwd=ROOT, capture_output=True, text=True)
+                        "--compounds"], cwd=ROOT, capture_output=True, text=True)       # the cache is kept by default
     assert r.returncode == 0, r.stdout + r.stderr
     return d, out
 
@@ -249,6 +249,11 @@ def test_schema_and_argv():
     assert sch["cores"]["kind"] == "int" and sch["cores"]["min_exclusive"] == 0
     assert sch["min_score"]["kind"] == "float" and sch["min_score"]["max"] == 1
     assert sch["polarity"]["kind"] == "choice" and sch["no_gap_fill"]["kind"] == "flag"
+    # 1.1.0: compound grouping is opt-in, the cache is kept unless --no-keep-cache; hidden flags stay off the form
+    assert sch["compounds"]["kind"] == "flag" and sch["compounds"]["default"] is False
+    assert sch["no_keep_cache"]["kind"] == "flag" and sch["no_keep_cache"]["default"] is False
+    assert not {"keep_cache", "no_compounds", "mz_dynamic"} & set(sch)
+    assert server.validate_argv(["process", "--input", "x", "--output", "y", "--keep-cache", "--no-compounds"]) is None
     argv = server.options_to_argv({"cores": 4, "min_score": 0.5, "no_gap_fill": True, "polarity": None, "ppm": "7"},
                                   list(sch.values()))
     assert argv == ["--cores", "4", "--ppm", "7", "--no-gap-fill"]          # parser order, defaults left out

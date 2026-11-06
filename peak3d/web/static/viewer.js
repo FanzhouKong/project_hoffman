@@ -1184,7 +1184,7 @@
       } else {
         parts.push(h("div.section-title.first.with-action", h("h3.title-small", "Chromatograms"), ms1.button),
           banner(R.h.eic ? "Not stored for this feature: the report keeps chromatograms for the most intense features only (peak3d report --eic-budget raises the limit)." :
-            `Not available: ${R.h.eic_note || "no point-cloud cache"}. Re-run with --keep-cache, or build the report while the cache exists.`));
+            `Not available: ${R.h.eic_note || "no point-cloud cache"}. Re-run without --no-keep-cache, or build the report while the cache exists.`));
       }
       if (ms1.box) parts.push(ms1.box);
       if (R.a.m_q) {

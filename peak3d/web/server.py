@@ -79,7 +79,7 @@ def option_schema(command: str = "process"):
         return []
     fields = []
     for a in sub.choices[command]._actions:
-        if a.dest in SKIP_OPTIONS or not a.option_strings:
+        if a.dest in SKIP_OPTIONS or not a.option_strings or a.help == "==SUPPRESS==":    # hidden: old command lines
             continue
         f = {"dest": a.dest, "flag": max(a.option_strings, key=len), "help": a.help or "",
              "default": a.default if not isinstance(a.default, Path) else str(a.default)}

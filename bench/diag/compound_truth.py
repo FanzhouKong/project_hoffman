@@ -37,7 +37,8 @@ from peak3d.compounds import _star_kernel  # noqa: E402
 TRUTH = ROOT / "data/truth/PR002464"
 CLASSES = ["formula_ion", "adduct", "isotope", "fragment", "unannotated"]
 META = {"group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread", "rt_sd",
-        "iso_offset", "charge", "compound_id", "role", "neutral_mass", "is_base", "n_members"}
+        "iso_offset", "charge", "compound_id", "role", "neutral_mass", "is_base", "n_members", "possible_halogen",
+        "halogen_pattern"}
 
 
 def load_truth(study, tier):

@@ -90,6 +90,22 @@ def test_group_iso_parent_parent_row_missing_from_alignment():
     assert out.tolist() == [-1, 0]
 
 
+def test_group_iso_parent_many_groups_int32_gid():
+    """grouping hands over int32 group ids; with more than ~46k groups child * (G + 1) used to wrap in int32,
+    giving isotopes random parents and, now and then, the parent index G (IndexError in cluster_compounds; a
+    201-file Agilent study with 261183 groups)"""
+    G = 261_183
+    child = np.arange(1, G, 2, dtype=np.int32)          # odd groups are the M+1 of the even group before them
+    n = len(child)
+    A = pd.DataFrame({"file": np.zeros(2 * n, np.int64), "row": np.arange(2 * n),
+                      "iso_parent": np.r_[np.full(n, -1), np.arange(n)]})
+    gid = np.r_[child - 1, child].astype(np.int32)      # rows 0..n-1: parents, rows n..2n-1: their children
+    g_iso = np.zeros(G, np.int64); g_iso[child] = 1
+    out = C.group_iso_parent(A, gid, G, g_iso)
+    expect = np.full(G, -1, np.int64); expect[child] = child - 1
+    assert np.array_equal(out, expect)
+
+
 def test_pair_relations_hold_na_h_and_c13():
     rel = C.pair_relations("pos")
     assert np.any(np.isclose(rel, 22.9892207 - C.PROTON, atol=1e-6))
@@ -128,8 +144,9 @@ def test_end_to_end_compound_columns(tmp_path):
     d, (MA, MB, MD) = _study(tmp_path)
     out = tmp_path / "out"
     r = subprocess.run([sys.executable, "-m", "peak3d", "process", "--input", str(d), "--output", str(out),
-                        "--cores", "2"], cwd=ROOT, capture_output=True, text=True)
+                        "--cores", "2", "--compounds"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr + r.stdout
+    assert (out / ".cache").is_dir()                 # kept by default since 1.1.0 (Show MS1, peak3d align)
     t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
     for c in ("compound_id", "role", "neutral_mass", "is_base", "n_members"):
         assert c in t.columns
@@ -153,12 +170,13 @@ def test_end_to_end_compound_columns(tmp_path):
     assert me["n_members"] >= 4 and "[M+Na]+" in me["roles"]
     # B co-elutes 0.6 FWHM later with a different profile: it must not be swallowed
     assert row(MB + C.PROTON)["compound_id"] != a_h["compound_id"]
-    # --no-compounds leaves the columns out
+    # by default (since 1.1.0) there is no compound grouping; --no-keep-cache deletes the cache at the end
     out2 = tmp_path / "out2"
     r = subprocess.run([sys.executable, "-m", "peak3d", "process", "--input", str(d), "--output", str(out2),
-                        "--cores", "1", "--no-compounds"], cwd=ROOT, capture_output=True, text=True)
+                        "--cores", "1", "--no-keep-cache"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr + r.stdout
     assert "compound_id" not in pd.read_csv(out2 / "aligned_feature_table.tsv", sep="\t").columns
+    assert not (out2 / "compounds.tsv").exists() and not (out2 / ".cache").exists()
 
 
 def test_pooled_sums_match_numpy_on_scaled_concatenated_traces():
@@ -236,7 +254,7 @@ def test_end_to_end_pooled_consistent(tmp_path):
     out = tmp_path / "out"
     r = subprocess.run([sys.executable, "-m", "peak3d", "process", "--input", str(d), "--output", str(out), "--cores", "2",
                         "--compound-shape", "pooled", "--compound-shape-files", "0", "--compound-cluster", "consistent",
-                        "--compound-veto", "ratio"], cwd=ROOT, capture_output=True, text=True)
+                        "--compound-veto", "ratio", "--compounds"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr + r.stdout
     t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
 

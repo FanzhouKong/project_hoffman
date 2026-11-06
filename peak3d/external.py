@@ -303,7 +303,7 @@ def finish(files, args, table: pd.DataFrame, kernel: str, version: str, stage: d
              n_files=len(files), alignment=f"by {k['label']}", n_features_total=int(man["n_features"].sum()))
     (output / "params.json").write_text(json.dumps(p, indent=1, default=str))
     _write_report(output, cache_dir, args)
-    if not getattr(args, "keep_cache", False):
+    if getattr(args, "no_keep_cache", False):
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 

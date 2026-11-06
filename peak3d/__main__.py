@@ -39,6 +39,10 @@ def _unit(v):
     return x
 
 
+NO_KEEP_CACHE = ("delete the point-cloud cache (.cache/, about the size of the mzML data) at the end; by default it is "
+                 "kept for the viewer's Show MS1 and for `peak3d align`")
+
+
 def build_parser():
     ap = argparse.ArgumentParser(prog="peak3d", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"peak3d {__version__}")
@@ -71,9 +75,11 @@ def build_parser():
         for old in ("--mz-dynamic", "--mz-relaxed-second-mode", "--mz-step-curve", "--mz-fallback-reference",
                     "--mz-probe-features"):     # on by default since 2026-10-31; accepted so earlier command lines run
             p.add_argument(old, action="store_true", help=argparse.SUPPRESS)
-        p.add_argument("--no-compounds", action="store_true",
-                       help="skip compound grouping (adducts, in-source fragments, multimers and their isotopes of "
-                            "one compound, joined on peak-shape and intensity correlation)")
+        p.add_argument("--compounds", action="store_true",
+                       help="group the features of one compound (adducts, in-source fragments, multimers and their "
+                            "isotopes, joined on peak-shape and intensity correlation); off by default since 1.1.0: "
+                            "on large studies it takes minutes and much memory (~25 GB for 200 files, 260k groups)")
+        p.add_argument("--no-compounds", action="store_true", help=argparse.SUPPRESS)    # the default since 1.1.0
         p.add_argument("--compound-veto", choices=["auto", "off", "ratio"], default="auto",
                        help="intensity veto in compound grouping: auto (default) rejects co-eluting pairs whose "
                             "heights do not correlate across files (12+ files; fewer: whose height ratio is unstable "
@@ -117,7 +123,8 @@ def build_parser():
     p.add_argument("--input", type=Path, required=True, help="directory of .mzML files")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--cache-dir", type=Path, default=None, help="where per-file point clouds are cached (default <output>/.cache)")
-    p.add_argument("--keep-cache", action="store_true")
+    p.add_argument("--no-keep-cache", action="store_true", help=NO_KEEP_CACHE)
+    p.add_argument("--keep-cache", action="store_true", help=argparse.SUPPRESS)       # the default since 1.1.0
     p.add_argument("--no-report", action="store_true", help="do not write report.html")
     common(p)
     align_opts(p)
@@ -149,7 +156,8 @@ def build_parser():
     p.add_argument("--cores", type=_positive(int), default=1, help="worker processes (default 1)")
     p.add_argument("--polarity", choices=["pos", "neg"], default=None,
                    help="ion mode (default: read from the first file)")
-    p.add_argument("--keep-cache", action="store_true", help="keep the point-cloud cache (.cache/)")
+    p.add_argument("--no-keep-cache", action="store_true", help=NO_KEEP_CACHE)
+    p.add_argument("--keep-cache", action="store_true", help=argparse.SUPPRESS)       # the default since 1.1.0
     p.add_argument("--no-report", action="store_true", help="do not write report.html")
     identify_opts(p)
 
@@ -285,7 +293,7 @@ def main(argv=None):
         data = write_demo(args.output)
         print(f"[peak3d] demo: 3 synthetic runs in {data}", flush=True)
         args = parser.parse_args(["process", "--input", str(data), "--output", str(args.output / "peak3d_out"),
-                                  "--cores", str(args.cores)])
+                                  "--cores", str(args.cores), "--compounds"])     # the demo data are made to show them
     if args.cmd == "process":
         if not args.input.is_dir():
             sys.exit(f"--input must be a directory of .mzML files: {args.input}")

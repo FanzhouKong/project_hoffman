@@ -784,6 +784,7 @@ def group_iso_parent(A, gid, G, g_iso):
     """group index of each isotopic group's monoisotopic parent: the majority over its members' per-file
     iso_parent rows (-1 = none / not an isotope)"""
     out = np.full(G, -1, np.int64)
+    gid = np.asarray(gid, np.int64)     # grouping returns int32: child * (G + 1) below wraps past ~46k groups
     par = A["iso_parent"].values
     has = par >= 0
     if not has.any():

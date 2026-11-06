@@ -133,3 +133,4 @@ def test_demo(tmp_path):
     assert sorted(p.name for p in (tmp_path / "demo_mzml").iterdir()) == ["demo1.mzML", "demo2.mzML", "demo3.mzML"]
     t = pd.read_csv(tmp_path / "peak3d_out/aligned_feature_table.tsv", sep="\t")
     assert ((t["n_detected"] == 3) & (t["iso_offset"] == 0)).sum() >= 54   # 60 injected compounds, found in all runs
+    assert "compound_id" in t.columns and (tmp_path / "peak3d_out/.cache").is_dir()   # demo shows groups; cache kept
