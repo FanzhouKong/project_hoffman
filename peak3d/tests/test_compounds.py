@@ -146,7 +146,7 @@ def test_end_to_end_compound_columns(tmp_path):
     r = subprocess.run([sys.executable, "-m", "peak3d", "process", "--input", str(d), "--output", str(out),
                         "--cores", "2", "--compounds"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert (out / ".cache").is_dir()                 # kept by default since 1.1.0 (Show MS1, peak3d align)
+    assert (out / ".cache").is_dir()                 # kept by default since 1.1.1 (Show MS1, peak3d align)
     t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
     for c in ("compound_id", "role", "neutral_mass", "is_base", "n_members"):
         assert c in t.columns
@@ -170,7 +170,7 @@ def test_end_to_end_compound_columns(tmp_path):
     assert me["n_members"] >= 4 and "[M+Na]+" in me["roles"]
     # B co-elutes 0.6 FWHM later with a different profile: it must not be swallowed
     assert row(MB + C.PROTON)["compound_id"] != a_h["compound_id"]
-    # by default (since 1.1.0) there is no compound grouping; --no-keep-cache deletes the cache at the end
+    # by default (since 1.1.1) there is no compound grouping; --no-keep-cache deletes the cache at the end
     out2 = tmp_path / "out2"
     r = subprocess.run([sys.executable, "-m", "peak3d", "process", "--input", str(d), "--output", str(out2),
                         "--cores", "1", "--no-keep-cache"], cwd=ROOT, capture_output=True, text=True)

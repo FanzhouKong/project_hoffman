@@ -77,9 +77,9 @@ def build_parser():
             p.add_argument(old, action="store_true", help=argparse.SUPPRESS)
         p.add_argument("--compounds", action="store_true",
                        help="group the features of one compound (adducts, in-source fragments, multimers and their "
-                            "isotopes, joined on peak-shape and intensity correlation); off by default since 1.1.0: "
+                            "isotopes, joined on peak-shape and intensity correlation); off by default since 1.1.1: "
                             "on large studies it takes minutes and much memory (~25 GB for 200 files, 260k groups)")
-        p.add_argument("--no-compounds", action="store_true", help=argparse.SUPPRESS)    # the default since 1.1.0
+        p.add_argument("--no-compounds", action="store_true", help=argparse.SUPPRESS)    # the default since 1.1.1
         p.add_argument("--compound-veto", choices=["auto", "off", "ratio"], default="auto",
                        help="intensity veto in compound grouping: auto (default) rejects co-eluting pairs whose "
                             "heights do not correlate across files (12+ files; fewer: whose height ratio is unstable "
@@ -124,7 +124,7 @@ def build_parser():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--cache-dir", type=Path, default=None, help="where per-file point clouds are cached (default <output>/.cache)")
     p.add_argument("--no-keep-cache", action="store_true", help=NO_KEEP_CACHE)
-    p.add_argument("--keep-cache", action="store_true", help=argparse.SUPPRESS)       # the default since 1.1.0
+    p.add_argument("--keep-cache", action="store_true", help=argparse.SUPPRESS)       # the default since 1.1.1
     p.add_argument("--no-report", action="store_true", help="do not write report.html")
     common(p)
     align_opts(p)
@@ -157,7 +157,7 @@ def build_parser():
     p.add_argument("--polarity", choices=["pos", "neg"], default=None,
                    help="ion mode (default: read from the first file)")
     p.add_argument("--no-keep-cache", action="store_true", help=NO_KEEP_CACHE)
-    p.add_argument("--keep-cache", action="store_true", help=argparse.SUPPRESS)       # the default since 1.1.0
+    p.add_argument("--keep-cache", action="store_true", help=argparse.SUPPRESS)       # the default since 1.1.1
     p.add_argument("--no-report", action="store_true", help="do not write report.html")
     identify_opts(p)
 

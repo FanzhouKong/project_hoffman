@@ -249,7 +249,7 @@ def test_schema_and_argv():
     assert sch["cores"]["kind"] == "int" and sch["cores"]["min_exclusive"] == 0
     assert sch["min_score"]["kind"] == "float" and sch["min_score"]["max"] == 1
     assert sch["polarity"]["kind"] == "choice" and sch["no_gap_fill"]["kind"] == "flag"
-    # 1.1.0: compound grouping is opt-in, the cache is kept unless --no-keep-cache; hidden flags stay off the form
+    # 1.1.1: compound grouping is opt-in, the cache is kept unless --no-keep-cache; hidden flags stay off the form
     assert sch["compounds"]["kind"] == "flag" and sch["compounds"]["default"] is False
     assert sch["no_keep_cache"]["kind"] == "flag" and sch["no_keep_cache"]["default"] is False
     assert not {"keep_cache", "no_compounds", "mz_dynamic"} & set(sch)

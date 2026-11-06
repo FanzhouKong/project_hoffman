@@ -25,7 +25,7 @@ cd "$SLURM_SUBMIT_DIR" || { echo "NO_MOUNT $(hostname)"; exit 9; }
 ROOT=$PWD
 PEAK3D_ENV=${PEAK3D_ENV:-$ROOT/envs/peak3d}
 CODE=${CODE:-$ROOT}
-# compound grouping is opt-in since 1.1.0 (--compounds); earlier trees group by default and lack the flag
+# compound grouping is opt-in since 1.1.1 (--compounds); earlier trees group by default and lack the flag
 # python -m puts the working directory first on sys.path: run peak3d from inside $CODE, outputs on absolute paths
 CFLAG=$(cd "$CODE" && "$PEAK3D_ENV/bin/python" -m peak3d align --help | grep -q -- "--compounds" && echo --compounds || true)
 DATE=${DATE:-$(date +%F)}

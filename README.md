@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.1.0](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.0) (all releases:
+[Mosa v1.1.1](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.1) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases); the
 [app-preview](https://github.com/FanzhouKong/project_hoffman/releases/tag/app-preview) pre-release is rebuilt from
 every push and may be ahead of, or less tested than, the versioned one). Nothing else to install.
@@ -129,7 +129,7 @@ reuse the compiled code.
 
 The full list of columns is in [`peak3d/README.md`](peak3d/README.md#outputs-out).
 
-**Compound groups** (`--compounds`; off by default since 1.1.0, as it takes minutes and up to ~25 GB of memory on
+**Compound groups** (`--compounds`; off by default since 1.1.1, as it takes minutes and up to ~25 GB of memory on
 studies of 200 files). Features of one compound (adducts, in-source fragments, multimers, charge states and
 their isotopes) share a `compound_id`. Co-eluting features are joined when their peak shapes correlate
 (EIC Pearson r in every file where both are detected, averaged with the weaker ion's height as weight) and,
