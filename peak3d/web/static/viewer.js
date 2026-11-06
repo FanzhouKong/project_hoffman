@@ -466,6 +466,10 @@
           dl.disabled = false;
         }
       });
+      // the chromatogram of any m/z in chosen files (needs the app's server: a report has no button)
+      const eicBtn = opts.eic ? h("button.btn.outlined.state", { type: "button", onclick: () => eicDialog(),
+        title: "The whole-run chromatogram of an m/z (the selected feature's, or one you type) in the files you choose; zoom in and out" },
+        icon("show_chart"), "Extract EIC") : null;
       // m/z and retention-time windows (either end may stay open); the mini map's box fills them too
       const rangeIn = {};
       const range = (label, lo, hi, unit) => {
@@ -492,7 +496,7 @@
       const filters = [idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
           R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null,
-          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, dl)];
+          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, eicBtn, dl)];
       const mini = track(P3.plot.scatter(mapEl, {
         height: 210, x: R.rtS, y: a.g_mz, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
         xLabel: "RT (s)", yLabel: "m/z", xFmt: (v, d) => fixed(v, Math.min(d, 0)), yFmt: (v, d) => fixed(v, Math.min(d, 0)),
@@ -1133,30 +1137,39 @@
         const one = R.m2 ? R.oneSpectrum(g) : true;
         const tic = marks.filter((m) => m.kind & 2), merged = one ? [] : marks.filter((m) => m.kind & 1);
         const hasStatus = !!R.a.m_status;
-        const series = e.traces.map((t) => {
-          const st = statusOf(t.file);
-          return { id: t.file, label: R.stems[t.file], x: e.x, y: t.y, color: hasStatus && st != null && st < 3 ? S2 : S1, width: 1.5, alpha: 0.9 };
-        });
-        const at = (y, t) => {            // a trace's value at time t (linear between grid points)
-          const x = e.x, n = x.length;
+        const colorOf = (f) => { const st = statusOf(f); return hasStatus && st != null && st < 3 ? S2 : S1; };
+        const at = (x, y, t) => {            // a trace's value at time t (linear between its points)
+          const n = x.length;
+          if (!n) return 0;
           if (t <= x[0]) return y[0];
           if (t >= x[n - 1]) return y[n - 1];
-          let j = 0;
-          while (j < n - 2 && x[j + 1] < t) j++;
-          const w = (t - x[j]) / (x[j + 1] - x[j] || 1);
-          return (1 - w) * y[j] + w * y[j + 1];
+          let lo = 0, hi = n - 1;
+          while (hi - lo > 1) { const m = (lo + hi) >> 1; if (x[m] <= t) lo = m; else hi = m; }
+          const w = (t - x[lo]) / (x[hi] - x[lo] || 1);
+          return (1 - w) * y[lo] + w * y[hi];
         };
-        const dots = [];
-        for (const sr of series) {          // each trace's apex inside the peak bounds
-          let k = -1, bv = 0;
-          for (let p = 0; p < sr.x.length; p++) if (sr.x[p] >= t0 && sr.x[p] <= t1 && sr.y[p] > bv) { bv = sr.y[p]; k = p; }
-          if (k >= 0) dots.push({ x: sr.x[k], y: bv, color: sr.color });
-        }
-        for (const m of merged) {            // the spectra in the consensus: stars on their file's trace
-          const sr = series.find((r) => r.id === m.file);
-          const y = sr ? at(sr.y, m.t) : Math.max(...series.map((r) => at(r.y, m.t)));
-          dots.push({ x: m.t, y, color: "--viz-ms2", shape: "star", r: 6 });
-        }
+        // the traces: the window the results store around the peak or, once Whole run has read them (the app only),
+        // every MS1 scan of the run for the same files, m/z and tolerance
+        const whole = { on: false, q: { mz: +a.g_mz[g].toFixed(5), ppm: R.h.eic.ppm, offset: true } };
+        const lines = () => {
+          const series = e.traces.map((t) => {
+            const w = whole.on ? eicPeek(R.stems[t.file], whole.q) : null;
+            const full = !!(w && w.x);
+            return { id: t.file, label: R.stems[t.file], x: full ? w.x : e.x, y: full ? w.y : t.y, color: colorOf(t.file), width: 1.5, alpha: 0.9, ns: t.ns };
+          });
+          const dots = [];
+          for (const sr of series) {          // each trace's apex inside the peak bounds
+            let k = -1, bv = 0;
+            for (let p = 0; p < sr.x.length; p++) if (sr.x[p] >= t0 && sr.x[p] <= t1 && sr.y[p] > bv) { bv = sr.y[p]; k = p; }
+            if (k >= 0) dots.push({ x: sr.x[k], y: bv, color: sr.color });
+          }
+          for (const m of merged) {            // the spectra in the consensus: stars on their file's trace
+            const sr = series.find((r) => r.id === m.file);
+            const y = sr ? at(sr.x, sr.y, m.t) : Math.max(...series.map((r) => at(r.x, r.y, m.t)));
+            dots.push({ x: m.t, y, color: "--viz-ms2", shape: "star", r: 6 });
+          }
+          return { series, dots };
+        };
         const vlines = [{ x: t0, color: "--viz-ink-2", dash: [5, 4], width: 1.25 }, { x: t1, color: "--viz-ink-2", dash: [5, 4], width: 1.25 },
           ...tic.map((m) => ({ x: m.t, color: "--viz-ms2", dash: [], width: 2.5 }))];
         parts.push(h("div.section-title.first.with-action", h("div", h("h3.title-small", "Chromatograms"),
@@ -1164,17 +1177,60 @@
             `Peak ${fixed(t0, 1)}–${fixed(t1, 1)} s (dashed), apex of each trace (dot)` +
             (tic.length ? (one ? "; red line: where the MS2 spectrum was taken" : `; red line: the highest-TIC MS2 spectrum; red stars: the ${int(merged.length)} spectra merged into the consensus, on their file's trace`) : "") +
             ". Hover a trace to name its file."),
-          scanNote(e)), ms1.button), chartEl);
-        const c = track(P3.plot.line(chartEl, {
-          height: 250, series, vlines, dots, xLabel: "Aligned RT (s)", yLabel: "Intensity",
+          scanNote(e)), ms1.button));
+        // zoom: drag, scroll, buttons; Peak returns to the stored window, Whole run reads the full chromatograms
+        const win = [e.x[0], e.x[e.x.length - 1]];
+        const readout = h("span.readout");
+        const zb = (ic, title, f) => h("button.icon-btn.state", { type: "button", title, "aria-label": title, onclick: f }, icon(ic));
+        const peakBtn = h("button.btn.text.state", { type: "button", "aria-pressed": "true", title: "Back to the window around the peak" }, "Peak");
+        const wholeBtn = opts.eic ? h("button.btn.text.state", { type: "button", "aria-pressed": "false",
+          title: "Read every MS1 scan of the whole run for these files (from the point-cloud cache) and show it all; zoom in for detail" }, icon("show_chart"), "Whole run") : null;
+        // the button of what is shown is marked; any other range is spelled out
+        const onView = (xd) => {
+          const atWin = xd ? Math.abs(xd[0] - win[0]) < 1e-9 && Math.abs(xd[1] - win[1]) < 1e-9 : !whole.on;
+          peakBtn.setAttribute("aria-pressed", String(atWin));
+          if (wholeBtn) wholeBtn.setAttribute("aria-pressed", String(whole.on && !xd));
+          readout.textContent = xd && !atWin ? `RT ${fixed(xd[0], 1)}–${fixed(xd[1], 1)} s` : "";
+        };
+        const wholeNote = h("div.chrom-note");
+        parts.push(h("div.chrom-tools", zb("zoom_in", "Zoom in", () => c.zoomBy(0.5)), zb("zoom_out", "Zoom out", () => c.zoomBy(2)), peakBtn, wholeBtn, readout), chartEl, wholeNote);
+        const c = track(P3.plot.line(chartEl, Object.assign({
+          height: 250, vlines, xLabel: "Aligned RT (s)", yLabel: "Intensity", zoom: true, onView,
           xFmt: (v, d) => fixed(v, Math.min(d, 1)),
-          label: (si) => series[si].label,
+          label: (si) => c.spec.series[si].label,
           tip: (si, k) => {
-            const st = statusOf(series[si].id), ns = e.traces[si].ns;
-            return `<b>${esc(series[si].label)}</b><br>RT ${fixed(e.x[k], 1)} s · ${sci(series[si].y[k])}${st != null ? "<br>" + STATUS[st] : ""}` +
+            const sr = c.spec.series[si], st = statusOf(sr.id), ns = sr.ns;
+            return `<b>${esc(sr.label)}</b><br>RT ${fixed(sr.x[k], 1)} s · ${sci(sr.y[k])}${st != null ? "<br>" + STATUS[st] : ""}` +
               (ns ? `<br>${int(ns.signal)} of ${int(ns.all)} MS1 scans in the peak window hold the ion` : "");
           },
-        }));
+        }, lines())));
+        onView(null);
+        peakBtn.addEventListener("click", () => (whole.on ? c.setView({ x: win.slice(), y: null }) : c.resetZoom()));
+        if (wholeBtn) wholeBtn.addEventListener("click", async () => {
+          if (whole.on) return c.resetZoom();
+          const stems = e.traces.map((t) => R.stems[t.file]);
+          let done = 0;
+          wholeBtn.disabled = true;
+          const progress = () => wholeBtn.replaceChildren(P3.spinner(14), `Reading ${int(done)} of ${int(stems.length)}`);
+          progress();
+          wholeNote.replaceChildren();
+          await eicLimited(stems, async (s) => { await eicGet(s, whole.q); done++; if (shown === g) progress(); }, () => shown === g);
+          if (shown !== g) return;
+          wholeBtn.disabled = false;
+          wholeBtn.replaceChildren(icon("show_chart"), "Whole run");
+          const bad = stems.filter((s) => { const v = eicPeek(s, whole.q); return !v || v.error; });
+          if (bad.length === stems.length) {
+            eicRetry();
+            return wholeNote.replaceChildren(banner(`Whole run not available: ${(eicPeek(stems[0], whole.q) || {}).error || "no answer"}`, "error"));
+          }
+          whole.on = true;
+          c.update(lines());
+          c.resetZoom();
+          wholeNote.replaceChildren(h("p.body-small.muted", `Whole run: every MS1 scan of ${int(stems.length - bad.length)} file${stems.length - bad.length > 1 ? "s" : ""}` +
+            (bad.length ? ` (${int(bad.length)} kept the stored window: ${bad.map((s) => `${s}: ${(eicPeek(s, whole.q) || {}).error || "no answer"}`).join("; ")})` : "") +
+            ". Drag across a peak to zoom in; Peak returns to the window around this feature."));
+          if (bad.length) eicRetry();
+        });
         chromCharts.push(c);
         parts.push(P3.plot.legend([
           ...(hasStatus ? [{ kind: "line", color: S1, label: "detected by the picker" }, { kind: "line", color: S2, label: "gap-filled" }] : []),
@@ -1209,6 +1265,214 @@
         ["Found by", `picker in ${a.g_ndet[g]}, confirmed by gap filling in ${a.g_nconf[g]}, filled in ${a.g_nfill[g]}`],
       ]));
       return parts;
+    }
+
+    // ---------------------------------------------------------------- extracted ion chromatograms
+    // on request (Extract EIC beside Download table): the whole-run chromatogram of any m/z in the files the user
+    // picks, read from the point-cloud cache by the app's server (bundle.extract_eic), so a report shows no button.
+    // A file keeps its colour while it stays chosen (eight categorical slots, the rest share the neutral grey).
+    const EIC_COLORS = ["--viz-cat-1", "--viz-cat-2", "--viz-cat-3", "--viz-cat-4", "--viz-cat-5", "--viz-cat-6", "--viz-cat-7", "--viz-cat-8"];
+    // whole-run chromatograms from the app's server (opts.eic), fetched once per file and query and shared by the
+    // feature's chromatograms (Whole run) and Extract EIC; the oldest are dropped past EIC_KEEP
+    const EIC_KEEP = 240;
+    const eicStore = new Map();
+    const eicKey = (s, q) => `${s}|${q.mz}|${q.ppm}|${q.offset}`;
+    function eicGet(s, q) {
+      const k = eicKey(s, q);
+      let it = eicStore.get(k);
+      if (!it) {
+        it = { v: null };
+        it.p = opts.eic(s, q.mz, q.ppm, q.offset).then(
+          (r) => (it.v = { r, x: Float64Array.from(r.rt_s), xn: Float64Array.from(r.rt_native_s), y: Float64Array.from(r.intensity) }),
+          (err) => (it.v = { error: err.message || String(err) }));
+        eicStore.set(k, it);
+        if (eicStore.size > EIC_KEEP) eicStore.delete(eicStore.keys().next().value);
+      }
+      return it.p;
+    }
+    const eicPeek = (s, q) => { const it = eicStore.get(eicKey(s, q)); return it ? it.v : null; };
+    const eicRetry = () => { for (const [k, it] of eicStore) if (it.v && it.v.error) eicStore.delete(k); };
+    // run fn over items, n at a time, while alive() holds
+    async function eicLimited(items, fn, alive, n = 2) {
+      const todo = items.slice();
+      const next = async () => { while (todo.length && alive()) await fn(todo.shift()); };
+      await Promise.all(Array.from({ length: n }, next));
+    }
+
+    function eicDialog() {
+      const a = R.a, g = state.sel;
+      const featMz = g != null ? +a.g_mz[g].toFixed(5) : null;
+      const st = { axis: "aligned", offset: true, query: null };      // query: the m/z, ppm and offset last extracted
+      const chosen = new Set(), slot = new Map();
+      let chart = null, gen = 0;
+      // first choice: the selected feature's three most intense files, else the first file
+      if (g != null && a.m_q) {
+        R.stems.map((s, f) => [s, R.value(g, f)]).filter(([, v]) => v > 0).sort((x, y) => y[1] - x[1]).slice(0, 3).forEach(([s]) => chosen.add(s));
+      }
+      if (!chosen.size && R.N) chosen.add(R.stems[0]);
+      const take = (s) => { const used = new Set(slot.values()); for (let k = 0; k < EIC_COLORS.length; k++) if (!used.has(k)) { slot.set(s, k); return; } };
+      chosen.forEach(take);
+      const colorOf = (s) => (slot.has(s) ? EIC_COLORS[slot.get(s)] : "--viz-neutral");
+
+      const dlg = h("dialog.dialog.eic-dialog", { "aria-label": "Extracted ion chromatograms" });
+      const close = () => dlg.close();
+      dlg.addEventListener("close", () => { gen++; if (chart) chart.destroy(); dlg.remove(); });
+
+      // the query: m/z, tolerance, offset correction, RT axis
+      const mzIn = h("input", { type: "number", step: "any", min: "0", placeholder: "e.g. 166.0863", "aria-label": "m/z",
+        value: featMz != null ? String(featMz) : "" });
+      const ppmIn = h("input.narrow", { type: "number", step: "any", min: "0", "aria-label": "Tolerance (ppm)",
+        value: String((R.h.eic && R.h.eic.ppm) || 10) });
+      const offIn = h("input", { type: "checkbox", checked: true });
+      offIn.addEventListener("change", () => { st.offset = offIn.checked; extract(); });
+      const axisSeg = h("div.segmented", { role: "group", "aria-label": "RT axis" }, [["aligned", "Aligned RT"], ["native", "Raw RT"]].map(([k, label]) =>
+        h("button.state", { type: "button", "aria-pressed": String(st.axis === k), title: k === "aligned" ? "Each file's retention times after the run's RT correction (as in the feature table)" : "Retention times as written in each mzML file",
+          onclick: (e) => { st.axis = k; axisSeg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === e.currentTarget))); redraw(); } }, label)));
+      const go = h("button.btn.filled.state", { type: "button" }, icon("show_chart"), "Extract");
+      go.addEventListener("click", () => extract());
+      for (const i of [mzIn, ppmIn]) {
+        i.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); extract(); } });
+        i.addEventListener("input", () => { go.disabled = !valid(); });
+      }
+      const valid = () => +mzIn.value > 0 && +ppmIn.value > 0 && +ppmIn.value <= 1000 && chosen.size > 0;
+
+      // the file list: filter, all / none of those listed, one checkbox per file
+      const filterIn = h("input.eic-filter", { type: "search", placeholder: "Filter files", "aria-label": "Filter files" });
+      const count = h("span.count");
+      const list = h("div.eic-file-list", { role: "group", "aria-label": "Files" });
+      const rows = R.stems.map((s, f) => {
+        const box = h("input", { type: "checkbox", checked: chosen.has(s) });
+        const sw = h("span.eic-sw");
+        const v = g != null && a.m_q ? R.value(g, f) : null;
+        const row = h("label.eic-file", { title: s }, box, sw, h("span.name", s), v != null ? h("span.val", { title: `${R.quant} of the selected feature` }, v > 0 ? sci(v) : "–") : null);
+        box.addEventListener("change", () => setFile(s, box.checked));
+        return { s, row, box, sw };
+      });
+      list.append(...rows.map((r) => r.row));
+      const paint = () => {
+        for (const r of rows) {
+          r.box.checked = chosen.has(r.s);
+          r.sw.style.background = chosen.has(r.s) ? `var(${colorOf(r.s)})` : "transparent";
+        }
+        count.textContent = `${int(chosen.size)} of ${int(R.N)} chosen`;
+        go.disabled = !valid();
+      };
+      const shownRows = () => rows.filter((r) => r.row.style.display !== "none");
+      filterIn.addEventListener("input", () => {
+        const q = filterIn.value.trim().toLowerCase();
+        for (const r of rows) r.row.style.display = !q || r.s.toLowerCase().includes(q) ? "" : "none";
+      });
+      const allBtn = h("button.btn.text.state", { type: "button", title: "Choose every file listed (the filter applies)" }, "All");
+      const noneBtn = h("button.btn.text.state", { type: "button", title: "Clear the files listed (the filter applies)" }, "None");
+      allBtn.addEventListener("click", () => { for (const r of shownRows()) if (!chosen.has(r.s)) { chosen.add(r.s); take(r.s); } paint(); load(); });
+      noneBtn.addEventListener("click", () => { for (const r of shownRows()) { chosen.delete(r.s); slot.delete(r.s); } paint(); load(); });
+      function setFile(s, on) {
+        if (on) { chosen.add(s); take(s); } else { chosen.delete(s); slot.delete(s); }
+        paint();
+        load();
+      }
+
+      // the chart, its zoom controls, legend and status
+      const chartEl = h("div");
+      const empty = h("div.eic-empty", "Enter an m/z, choose files and press Extract.");
+      const readout = h("span.readout");
+      const zbtn = (ic, title, f) => h("button.icon-btn.state", { type: "button", title, "aria-label": title, onclick: () => chart && f() }, icon(ic));
+      const zoomBar = h("div.eic-zoom", zbtn("zoom_in", "Zoom in", () => chart.zoomBy(0.5)), zbtn("zoom_out", "Zoom out", () => chart.zoomBy(2)),
+        zbtn("fit_screen", "Show everything", () => chart.resetZoom()), readout);
+      const legendEl = h("div");
+      const status = h("div.eic-status");
+      const chartCol = h("div.eic-chart-col", zoomBar, empty, chartEl, legendEl, status);
+      const onView = (xd) => { readout.textContent = xd ? `RT ${fixed(xd[0], 1)}–${fixed(xd[1], 1)} s` : "Whole run"; };
+
+      dlg.append(
+        h("div.dialog-head.eic-head", h("div", h("h2.headline-small", "Extracted ion chromatograms"),
+          h("p.body-small.muted", "The most intense centroid within the tolerance in every MS1 scan of each chosen file, over the whole run.")),
+          h("button.icon-btn.state", { type: "button", title: "Close", "aria-label": "Close", onclick: close }, icon("close"))),
+        h("div.eic-controls",
+          h("div.range", { title: "The m/z to extract" }, h("span.range-label", "m/z"), mzIn),
+          h("div.range", { title: "Tolerance around the m/z, in ppm" }, h("span.range-sep", "±"), ppmIn, h("span.range-unit", "ppm")),
+          h("label.eic-check", { title: "Move the m/z by each file's measured m/z offset (from the alignment), as the run did; off: the m/z exactly as typed in every file" },
+            offIn, "Correct each file's m/z offset"),
+          axisSeg, h("span", { style: { flex: "1" } }), go),
+        h("div.eic-main",
+          h("div.eic-files", h("div.eic-files-head", filterIn, h("div.eic-files-tools", allBtn, noneBtn, count)), list),
+          chartCol),
+        h("div.dialog-actions", h("div.body-small.muted", { style: { flex: "1" } }, featMz != null ? `m/z filled in from feature #${a.g_id[g]}` : ""),
+          h("button.btn.text.state", { type: "button", onclick: close }, "Close")));
+      document.body.append(dlg);
+      paint();
+      dlg.showModal();
+      if (+mzIn.value > 0) extract(); else mzIn.focus();
+
+      // ---- data
+      function extract() {
+        if (!(+mzIn.value > 0)) { status.replaceChildren(banner("Enter an m/z above 0.", "error")); return; }
+        if (!(+ppmIn.value > 0 && +ppmIn.value <= 1000)) { status.replaceChildren(banner("The tolerance must lie between 0 and 1000 ppm.", "error")); return; }
+        st.query = { mz: +mzIn.value, ppm: +ppmIn.value, offset: st.offset };
+        eicRetry();                    // Extract asks again for what failed
+        load();
+      }
+      // fetch what the chosen files miss for the current query (two at a time), drawing as they arrive
+      async function load() {
+        const q = st.query;
+        if (!q) return redraw();
+        const my = ++gen;
+        const todo = R.stems.filter((s) => chosen.has(s) && !eicPeek(s, q));
+        const total = todo.length;
+        let done = 0;
+        const note = () => (done < total ? `Extracting… ${int(done)} of ${int(total)} file${total > 1 ? "s" : ""}` : null);
+        redraw(note());
+        await eicLimited(todo, async (s) => { await eicGet(s, q); done++; if (my === gen) redraw(note()); }, () => my === gen);
+      }
+      function redraw(progress) {
+        const q = st.query;
+        const got = q ? R.stems.filter((s) => chosen.has(s)).map((s) => [s, eicPeek(s, q)]).filter(([, c]) => c) : [];
+        const okd = got.filter(([, c]) => !c.error), bad = got.filter(([, c]) => c.error);
+        const native = st.axis === "native";
+        const series = okd.map(([s, c]) => ({ id: s, label: s, x: native ? c.xn : c.x, y: c.y, color: colorOf(s), width: slot.has(s) ? 1.6 : 1.2, alpha: slot.has(s) ? 1 : 0.8, c }));
+        series.sort((p, r) => (slot.has(p.id) ? 1 : 0) - (slot.has(r.id) ? 1 : 0));        // the grey ones underneath
+        empty.style.display = series.length ? "none" : "";
+        chartEl.style.display = series.length ? "" : "none";
+        if (!series.length) {
+          empty.textContent = !q ? "Enter an m/z, choose files and press Extract." : !chosen.size ? "Choose one or more files." :
+            progress ? "Extracting…" : bad.length ? "Nothing to show: see the messages below." : "Nothing extracted yet.";
+        }
+        const sameFeature = featMz != null && q && Math.abs(q.mz - featMz) < 1e-4 && !native;
+        const vlines = sameFeature ? [{ x: 60 * a.g_rt_min[g], color: "--viz-ink-2", dash: [5, 4], width: 1.25 }, { x: 60 * a.g_rt_max[g], color: "--viz-ink-2", dash: [5, 4], width: 1.25 }] : [];
+        const spec = {
+          series, vlines, xLabel: native ? "Raw RT (s)" : "Aligned RT (s)", yLabel: "Intensity",
+          label: (si) => series[si].label,
+          tip: (si, k) => {
+            const sr = series[si], c = sr.c;
+            return `<b>${esc(sr.label)}</b><br>RT ${fixed(sr.x[k], 1)} s · ${sci(sr.y[k])}<br>` +
+              (native ? `aligned RT ${fixed(c.x[k], 1)} s` : `raw RT ${fixed(c.xn[k], 1)} s`);
+          },
+        };
+        if (series.length && !chart) {
+          const height = Math.round(Math.max(300, Math.min(640, window.innerHeight - 440)));     // the dialog's free height
+          chart = P3.plot.line(chartEl, Object.assign({ height, zoom: true, onView, xFmt: (v, d) => fixed(v, Math.min(d, 1)) }, spec));
+        } else if (chart) chart.update(spec);
+        if (chart && series.length) onView(chart.view ? chart.xd : null);
+        const keyed = series.filter((r) => slot.has(r.id)).sort((p, r) => slot.get(p.id) - slot.get(r.id));
+        const grey = series.length - keyed.length;
+        legendEl.replaceChildren(series.length ? P3.plot.legend([
+          ...keyed.map((r) => ({ kind: "line", color: colorOf(r.id), label: r.label })),
+          ...(grey ? [{ kind: "line", color: "--viz-neutral", label: `${int(grey)} more file${grey > 1 ? "s" : ""} (hover to name)` }] : []),
+          ...(vlines.length ? [{ kind: "dash", color: "--viz-ink-2", label: `peak of feature #${a.g_id[g]}` }] : [])]) : "");
+        const parts = [];
+        if (progress) parts.push(h("p", P3.spinner(14), " ", progress));
+        if (q && okd.length) {
+          const offs = okd.map(([, c]) => c.r.offset_ppm).filter((o) => o[0] !== 0 || o[1] !== 0);
+          const lo = Math.min(...okd.map(([, c]) => c.r.offset_ppm[0])), hi = Math.max(...okd.map(([, c]) => c.r.offset_ppm[1]));
+          const sgn = (v) => (v > 0 ? "+" : "") + fixed(v, 1);
+          const fromMzml = okd.filter(([, c]) => c.r.source === "mzML").length;
+          parts.push(h("p", `m/z ${fixed(q.mz, 4)} ± ${fixed(q.ppm, 1)} ppm in ${int(okd.length)} file${okd.length > 1 ? "s" : ""}` +
+            (q.offset ? (offs.length ? `; each file's m/z offset applied (${sgn(lo)} to ${sgn(hi)} ppm)` : "; no m/z offsets measured for these files") : "; m/z as typed in every file") +
+            (fromMzml ? `; ${int(fromMzml)} read from the mzML file${fromMzml > 1 ? "s" : ""} (the point-cloud cache is gone)` : "") + "."));
+        }
+        for (const [s, c] of bad) parts.push(banner(`${s}: ${c.error}`, "error"));
+        status.replaceChildren(...parts);
+      }
     }
 
     // ---------------------------------------------------------------- MS1 at the apex

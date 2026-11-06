@@ -456,6 +456,65 @@ def test_ms1_pattern_through_the_server(processed):
         httpd.server_close()
 
 
+def test_eic_through_the_server(processed, tmp_path):
+    """Extract EIC: the whole-run chromatogram of an m/z in one file, per MS1 scan the most intense centroid within the
+    tolerance, at the file's own m/z (its alignment offset) unless asked for the m/z as typed; read from the
+    point-cloud cache, else from the mzML the run read"""
+    d, out = processed
+    httpd, url = server.make_server("127.0.0.1", 0, root=out.parent, token="t0ken")
+    th = threading.Thread(target=httpd.serve_forever, daemon=True)
+    th.start()
+    c = _Client(url.split("?")[0].rstrip("/"), "t0ken")
+    try:
+        t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
+        row = t[t["iso_offset"] == 0].sort_values("S1", ascending=False).iloc[0]
+        mz = float(row["mz"])
+        code, r = c.json("/api/results/eic", {"path": str(out), "file": "S1", "mz": mz, "ppm": 10})
+        assert code == 200, r
+        cloud = io.Cloud.load_npz(out / ".cache" / "S1.npz")
+        assert r["source"] == "cache" and r["n_scans"] == cloud.n_scans == len(r["rt_s"]) == len(r["rt_native_s"]) == len(r["intensity"])
+        assert np.allclose(r["rt_native_s"], 60 * cloud.rt, atol=1e-3)
+        off = bundle.file_offsets(out).get("S1", 0.0)
+        target = mz / (1 - off * 1e-6)
+        ref = [max([v for m, v in zip(cloud.mz[cloud.off[s]:cloud.off[s + 1]], cloud.inten[cloud.off[s]:cloud.off[s + 1]])
+                    if abs(m - target) <= target * 10e-6], default=0.0) for s in range(cloud.n_scans)]
+        assert np.allclose(r["intensity"], ref, rtol=1e-4)
+        apex = int(np.argmax(r["intensity"]))
+        assert row["rt_min"] * 60 - 1 <= r["rt_s"][apex] <= row["rt_max"] * 60 + 1      # on the aligned axis
+        # the m/z as typed; an m/z with nothing there; the same from the mzML when the cache is gone
+        code, raw = c.json("/api/results/eic", {"path": str(out), "file": "S1", "mz": mz, "ppm": 10, "offset": False})
+        assert code == 200 and raw["offset_ppm"] == [0.0, 0.0] and max(raw["intensity"]) > 0
+        code, none = c.json("/api/results/eic", {"path": str(out), "file": "S0", "mz": 1234.5678, "ppm": 5})
+        assert code == 200 and max(none["intensity"]) == 0
+        again = bundle.extract_eic(out, tmp_path / "gone", "S1", mz, 10.0, off)
+        assert again["source"] == "mzML" and again["intensity"] == r["intensity"] and again["rt_s"] == r["rt_s"]
+        (tmp_path / "o2").mkdir()
+        (tmp_path / "o2" / "params.json").write_text(json.dumps({"input_files": [str(tmp_path / "moved" / "S1.mzML")]}))
+        with pytest.raises(FileNotFoundError, match="no point-cloud cache"):
+            bundle.extract_eic(tmp_path / "o2", tmp_path / "o2" / ".cache", "S1", mz, 10.0)
+        # refused: a file of no output, no number, out of range
+        assert c.json("/api/results/eic", {"path": str(out), "file": "S9", "mz": mz})[0] == 400
+        for bad in ({"mz": "x"}, {"mz": -1}, {"mz": mz, "ppm": 0}, {"mz": mz, "ppm": 5000}, {"mz": float("nan")}):
+            assert c.json("/api/results/eic", {"path": str(out), "file": "S1", **bad})[0] == 400, bad
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_line_chart_zoom_and_eic_button_in_the_scripts():
+    """the front end: the line chart zooms (drag, box, wheel, buttons), a feature's chromatograms use it, and the
+    Features tab offers Extract EIC only with the app's server (opts.eic)"""
+    st = ROOT / "peak3d" / "web" / "static"
+    plot, viewer, app = ((st / f).read_text(encoding="utf-8") for f in ("plot.js", "viewer.js", "app.js"))
+    for k in ("zoomBy(", "resetZoom()", "pathDense(", '"wheel"', "dblclick"):
+        assert k in plot, k
+    assert "opts.eic ?" in viewer and "eicDialog()" in viewer and '"/api/results/eic"' in app
+    # the feature's chromatograms zoom too, and in the app read the whole run on request (shared with Extract EIC)
+    assert viewer.count("zoom: true") >= 2 and '"Whole run")' in viewer and "eicGet(s, whole.q)" in viewer
+    css = (st / "style.css").read_text(encoding="utf-8")
+    assert all(f"--viz-cat-{k}:" in css for k in range(1, 9))
+
+
 def test_identity_search_through_the_server(gui):
     c, root, _ = gui
     out = _ms2_output(root / "res")

@@ -12,6 +12,7 @@ import gzip
 import html
 import ipaddress
 import json
+import math
 import mimetypes
 import os
 import pickle
@@ -540,6 +541,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._identify(body)
             if url.path == "/api/results/ms1":
                 return self._ms1(body)
+            if url.path == "/api/results/eic":
+                return self._eic(body)
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
             if m and m.group(1) in self.app.runs:
                 self.app.runs[m.group(1)].cancel()
@@ -719,6 +722,23 @@ class Handler(BaseHTTPRequestHandler):
                                  bundle.file_offsets(out).get(stem, 0.0))
         res.update(group_id=int(key), files=stems, value=float(row.get(stem) or 0))
         return self._json(res)
+
+    def _eic(self, body):
+        """the full-run chromatogram of an m/z in one file of this output (bundle.extract_eic): {"path", "file", "mz",
+        "ppm", "offset"?}; offset (default true) moves the m/z to the file's own scale by its alignment offset"""
+        out = self._output({"path": [body.get("path") or ""]})
+        header, _ = self.app.table_lines(out / "aligned_feature_table.tsv")
+        stem = body.get("file")
+        if stem not in bundle.table_stems(out, header.rstrip("\r\n").split("\t")):
+            return self._error(400, f"not a file of this output: {stem!r}")
+        try:
+            mz, ppm = float(body.get("mz")), float(10.0 if body.get("ppm") is None else body.get("ppm"))
+        except (TypeError, ValueError):
+            return self._error(400, "m/z and ppm must be numbers")
+        if not (math.isfinite(mz) and 0 < mz < 1e6 and math.isfinite(ppm) and 0 < ppm <= 1000):
+            return self._error(400, "m/z must be above 0 and the tolerance between 0 and 1000 ppm")
+        offset = bundle.file_offsets(out).get(stem, 0.0) if body.get("offset", True) else None
+        return self._json(bundle.extract_eic(out, out / ".cache", stem, mz, ppm, offset))
 
     def _identify(self, body):
         """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify, the

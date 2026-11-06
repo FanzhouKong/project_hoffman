@@ -234,6 +234,58 @@ def ms1_pattern(output, cache_dir, stem: str, mz: float, rt: float, rt_lo: float
     return out
 
 
+@njit(cache=True)
+def eic_scans(off, mz, inten, lo, hi):
+    """per scan s: the most intense centroid with lo[s] <= m/z <= hi[s] (0 where there is none)"""
+    S = len(off) - 1
+    out = np.zeros(S, np.float32)
+    for s in range(S):
+        v = np.float32(0.0)
+        for p in range(_lower_bound(mz, off[s], off[s + 1], lo[s]), off[s + 1]):
+            if mz[p] > hi[s]:
+                break
+            if inten[p] > v:
+                v = inten[p]
+        out[s] = v
+    return out
+
+
+def _source_cloud(output: Path, cache_dir: Path, stem: str) -> tuple[Cloud, str]:
+    """a file's MS1 point cloud: the run's cache, else the mzML the run read (params.json), when it still exists"""
+    npz = cache_dir / f"{stem}.npz"
+    if npz.exists():
+        return Cloud.load_npz(npz), "cache"
+    params = json.loads((output / "params.json").read_text()) if (output / "params.json").exists() else {}
+    for p in map(Path, params.get("input_files") or []):
+        if p.stem == stem and p.suffix.lower() == ".mzml" and p.is_file():
+            from ..io import load_cloud
+            return load_cloud(p, (params.get("options") or {}).get("polarity")), "mzML"
+    raise FileNotFoundError(f"no point-cloud cache for {stem} and its mzML file is not where the run read it")
+
+
+def extract_eic(output, cache_dir, stem: str, mz: float, ppm: float, offset_ppm: float | None = 0.0) -> dict:
+    """the full-run chromatogram of m/z +/- ppm in one file: per MS1 scan the most intense centroid in the window.
+    offset_ppm None: m/z as given; else the target moves to what the file measured, by its m/z offset curve when the
+    alignment wrote one and by offset_ppm (its single offset) otherwise, as for the report's chromatograms.
+    Times in seconds, aligned (the file's RT correction) and native."""
+    output, cache_dir = Path(output), Path(cache_dir)
+    cloud, source = _source_cloud(output, cache_dir, stem)
+    corr, moff = _file_axis(output, stem, cloud)
+    if offset_ppm is None:
+        target = np.full(cloud.n_scans, float(mz))
+    elif moff is not None:
+        target = float(mz) / (1.0 - moff * 1e-6)
+    else:
+        target = np.full(cloud.n_scans, float(mz) / (1.0 - offset_ppm * 1e-6))
+    tol = target * ppm * 1e-6
+    y = eic_scans(cloud.off, cloud.mz, cloud.inten, target - tol, target + tol)
+    shift = target / float(mz) * 1e6 - 1e6
+    return {"file": stem, "mz": float(mz), "ppm": float(ppm), "source": source, "n_scans": int(cloud.n_scans),
+            "offset_ppm": [float(shift.min()), float(shift.max())] if len(shift) else [0.0, 0.0],
+            "rt_s": np.round(60.0 * corr, 3).tolist(), "rt_native_s": np.round(60.0 * cloud.rt, 3).tolist(),
+            "intensity": [float(f"{v:.5g}") for v in y.tolist()]}
+
+
 def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm, budget, max_files, n_pts):
     """corrected-RT chromatograms of the most intense groups in up to max_files files, or (None, reason)"""
     if not cache_dir.is_dir():

@@ -151,12 +151,71 @@
   }
 
   const ident = (v, d) => P3.fixed(v, Math.min(d, 4));
+  const bisect = (x, v) => { let lo = 0, hi = x.length; while (lo < hi) { const m = (lo + hi) >> 1; if (x[m] < v) lo = m + 1; else hi = m; } return lo; };
 
   // ---------------------------------------------------------------- line
+  // spec.zoom: drag across to zoom into an x range (the y axis then fits what is shown), drag a box to zoom both axes,
+  // scroll to zoom around the pointer, shift-drag to pan, double-click to see everything again; zoomBy, resetZoom and
+  // spec.onView(x range or null) let a toolbar drive and follow it. Series x must ascend.
+  const BOX_MIN = 16;      // px of vertical drag before a drag zooms the y axis too
   class Line extends Chart {
-    constructor(el, spec) { super(el, spec); this.hover = null; }
+    constructor(el, spec) {
+      super(el, spec);
+      this.hover = null;
+      this.view = null;
+      this.drag = null;
+      if (!spec.zoom) return;
+      this.canvas.style.touchAction = "none";
+      this.canvas.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || !this.box) return;
+        const [px, py] = this.pos(e), b = this.box;
+        if (px < b.x0 || px > b.x1 || py < b.y0 || py > b.y1) return;
+        this.drag = { a: [px, py], b: [px, py], pan: e.shiftKey, xd: this.xd.slice(), yv: this.view && this.view.y };
+        this.hover = null; this.hoverPt = null; this.hideTip();
+        if (this.canvas.setPointerCapture) this.canvas.setPointerCapture(e.pointerId);
+      });
+      this.canvas.addEventListener("pointerup", () => {
+        const d = this.drag;
+        this.drag = null;
+        if (!d) return;
+        const dx = Math.abs(d.b[0] - d.a[0]), dy = Math.abs(d.b[1] - d.a[1]);
+        if (!d.pan && dx > 6) {
+          const x = [this.ix(Math.min(d.a[0], d.b[0])), this.ix(Math.max(d.a[0], d.b[0]))];
+          return this.setView({ x, y: dy > BOX_MIN ? [this.iy(Math.max(d.a[1], d.b[1])), this.iy(Math.min(d.a[1], d.b[1]))] : null });
+        }
+        this.draw();
+        if (d.pan && this.spec.onView) this.spec.onView(this.view ? this.xd.slice() : null);
+      });
+      this.canvas.addEventListener("dblclick", () => this.resetZoom());
+      this.canvas.addEventListener("wheel", (e) => {
+        if (!this.box) return;
+        const [px] = this.pos(e);
+        if (px < this.box.x0 || px > this.box.x1) return;
+        e.preventDefault();
+        this.zoomBy(e.deltaY > 0 ? 1.25 : 0.8, this.ix(px));
+      }, { passive: false });
+    }
+    // x span f times the current one around x = c (the middle by default); out to everything resets
+    zoomBy(f, c) {
+      const full = this.full, cur = this.xd;
+      if (!full || !cur) return;
+      if (c == null) c = (cur[0] + cur[1]) / 2;
+      let a = c - (c - cur[0]) * f, b = c + (cur[1] - c) * f;
+      const span = full[1] - full[0];
+      if (b - a >= span) return this.resetZoom();
+      if (b - a < span * 1e-5) return;
+      if (a < full[0]) { b += full[0] - a; a = full[0]; }
+      if (b > full[1]) { a -= b - full[1]; b = full[1]; }
+      this.setView({ x: [a, b], y: null });
+    }
+    resetZoom() { this.setView(null); }
+    setView(v) {
+      this.view = v && (v.x || v.y) ? v : null;
+      this.draw();
+      if (this.spec.onView) this.spec.onView(this.view ? this.xd.slice() : null);
+    }
     domains() {
-      const s = this.spec;
+      const s = this.spec, v = this.view;
       let x0 = Infinity, x1 = -Infinity, y0 = s.yZero === false ? Infinity : 0, y1 = -Infinity;
       for (const r of s.series) {
         for (let i = 0; i < r.x.length; i++) {
@@ -167,6 +226,20 @@
       }
       if (!isFinite(x0)) { x0 = 0; x1 = 1; y0 = 0; y1 = 1; }
       if (s.xDomain) [x0, x1] = s.xDomain;
+      this.full = [x0, x1];
+      if (v && v.x) {
+        [x0, x1] = v.x;
+        y0 = s.yZero === false ? Infinity : 0; y1 = -Infinity;          // the y axis fits the points shown
+        for (const r of s.series) {
+          const z = Math.min(r.x.length, bisect(r.x, x1) + 1);
+          for (let i = Math.max(0, bisect(r.x, x0) - 1); i < z; i++) {
+            const y = r.y[i];
+            if (isFinite(y)) { if (y < y0) y0 = y; if (y > y1) y1 = y; }
+          }
+        }
+        if (!isFinite(y1)) { y0 = 0; y1 = 1; }
+      }
+      if (v && v.y) return [[x0, x1], v.y.slice()];
       if (s.yDomain) [y0, y1] = s.yDomain;
       if (y1 <= y0) y1 = y0 + 1;
       const pad = (y1 - y0) * 0.06;
@@ -245,7 +318,22 @@
         } else ctx.arc(X, Y, r, 0, 2 * Math.PI);
         ctx.fill(); ctx.stroke();
       }
+      if (this.drag && !this.drag.pan) {          // the zoom band (across) or box
+        const d = this.drag, l = Math.min(d.a[0], d.b[0]), w = Math.abs(d.b[0] - d.a[0]);
+        const boxed = Math.abs(d.b[1] - d.a[1]) > BOX_MIN, t = boxed ? Math.min(d.a[1], d.b[1]) : b.y0;
+        const ht = boxed ? Math.abs(d.b[1] - d.a[1]) : b.y1 - b.y0;
+        ctx.fillStyle = rgba(P.s1, 0.12);
+        ctx.fillRect(l, t, w, ht);
+        ctx.strokeStyle = rgba(P.s1, 0.5);
+        ctx.lineWidth = 1;
+        ctx.strokeRect(Math.round(l) + 0.5, Math.round(t) + 0.5, Math.round(w), Math.round(ht));
+      }
       ctx.restore();
+      if (s.zoom) {
+        const narrow = this.w < 520;      // one short line on a narrow chart
+        this.hint.textContent = this.view ? (narrow ? "Double-click: all · shift-drag: pan" : "Double-click to see everything · scroll to zoom · shift-drag to pan") :
+          (narrow ? "Drag or scroll to zoom" : "Drag across to zoom (a box zooms intensity too) · scroll to zoom");
+      }
       if (active >= 0 && s.label) {     // direct label on the active series, at its right end
         const r = s.series[active];
         let k = r.x.length - 1;
@@ -273,6 +361,7 @@
     }
     path(r, step) {
       const ctx = this.ctx;
+      if (!step && r.x.length > 4 * (this.box.x1 - this.box.x0)) return this.pathDense(r);
       let pen = false;
       for (let i = 0; i < r.x.length; i++) {
         const y = r.y[i];
@@ -286,6 +375,23 @@
         } else if (!pen) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
         pen = true;
       }
+    }
+    // more points than pixels (a full-run chromatogram): per pixel column the first value, then the lowest and the
+    // highest, over the points in view only; peaks keep their height at any zoom
+    pathDense(r) {
+      const ctx = this.ctx, x = r.x, y = r.y;
+      const z = Math.min(x.length, bisect(x, this.xd[1]) + 1);
+      let col = NaN, mn = 0, mx = 0, first = true;
+      for (let i = Math.max(0, bisect(x, this.xd[0]) - 1); i < z; i++) {
+        const v = y[i];
+        if (!isFinite(v)) continue;
+        const c = Math.round(this.sx(x[i]));
+        if (c === col) { if (v < mn) mn = v; if (v > mx) mx = v; continue; }
+        if (!first) { ctx.lineTo(col, this.sy(mn)); ctx.lineTo(col, this.sy(mx)); }
+        if (first) { ctx.moveTo(c, this.sy(v)); first = false; } else ctx.lineTo(c, this.sy(v));
+        col = c; mn = mx = v;
+      }
+      if (!first) { ctx.lineTo(col, this.sy(mn)); ctx.lineTo(col, this.sy(mx)); }
     }
     nearest(px, py) {
       const s = this.spec, xv = this.ix(px);
@@ -304,6 +410,18 @@
     }
     onMove([px, py]) {
       if (!this.box) return;
+      const d = this.drag;
+      if (d) {
+        d.b = [px, py];
+        if (d.pan) {               // shift-drag: slide the x range, within the data
+          const span = d.xd[1] - d.xd[0], full = this.full;
+          if (span >= full[1] - full[0]) return;
+          let a = d.xd[0] - (px - d.a[0]) / (this.box.x1 - this.box.x0) * span;
+          a = Math.max(full[0], Math.min(a, full[1] - span));
+          this.view = { x: [a, a + span], y: d.yv || null };
+        }
+        return this.draw();
+      }
       const n = this.nearest(px, py);
       const prev = this.hover;
       if (!n) { this.hover = null; this.hoverPt = null; this.hideTip(); if (prev != null) this.draw(); return; }
