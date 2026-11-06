@@ -826,14 +826,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
     def _example(self):
-        """three small synthetic runs (the `peak3d demo` data) in <root>/peak3d_example, for a first try"""
-        from ..__main__ import write_demo
+        """three small synthetic LC-MS/MS runs and a library to search them with (the `peak3d demo` data) in
+        <root>/peak3d_example, for a first try"""
+        from ..demo import LIBRARY, write_demo
         out = self.app.resolve("peak3d_example")
         try:
             data = write_demo(out)
         except OSError as e:
             return self._error(403, f"cannot write example data in {out.parent}: {e.strerror or e}")
-        return self._json({"input": str(data), "output": str(out / "peak3d_out"), "n_mzml": len(_mzml_files(data))})
+        return self._json({"input": str(data), "output": str(out / "peak3d_out"), "n_mzml": len(_mzml_files(data)),
+                           "library": str(out / LIBRARY)})
 
     def _start(self, body):
         a = self.app

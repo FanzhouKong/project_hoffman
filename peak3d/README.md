@@ -125,7 +125,7 @@ Install with `pip install -e .` from the repository root (see the Quick start in
 peak3d process --input DIR --output OUT --cores 8
 peak3d pick FILE.mzML ... --output OUT
 peak3d align --output OUT [--no-rt-correction] [--no-gap-fill]
-peak3d demo --output OUT      # three synthetic runs, to check an installation
+peak3d demo --output OUT      # three synthetic LC-MS/MS runs and a demo library, to check an installation
 ```
 
 Without installing, `PYTHONPATH=<repo> python -m peak3d ...` does the same.

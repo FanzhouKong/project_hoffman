@@ -190,7 +190,7 @@ def test_possible_isotopes():
 
 def test_demo_has_compound_groups(tmp_path):
     """the demo data give the viewer adducts, fragments and a possible isotope to show"""
-    from peak3d.__main__ import write_demo
+    from peak3d.demo import write_demo
     d = write_demo(tmp_path / "demo")
     assert len(list(d.glob("*.mzML"))) == 3
 
@@ -368,6 +368,7 @@ def test_server_run_and_results(gui):
     assert c.json("/api/results/reveal", {"path": str(root.parent)})[0] == 403          # outside --root
     code, ex = c.json("/api/example", {})
     assert code == 200 and ex["n_mzml"] == 3 and Path(ex["input"]).parent == (root / "peak3d_example").resolve()
+    assert Path(ex["library"]) == (root / "peak3d_example" / "demo_library.msp").resolve() and Path(ex["library"]).is_file()
     assert c.json(f"/api/results/bundle?path={quote(str(d))}")[0] == 404
 
 

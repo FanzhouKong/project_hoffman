@@ -133,6 +133,7 @@
     return el;
   }
 
+  let exampleLibrary = null;      // fills the run form's library field with the example data's library
   function fieldFor(f, onAny) {
     const label = LABELS[f.dest] || f.flag.replace(/^--/, "").replace(/-/g, " ");
     const raw = HELP[f.dest] || f.help || "";
@@ -154,6 +155,7 @@
         oninput: (v) => setLib(v.trim()),
       });
       const setLib = (v) => { S.form.library = v || null; P3.storeSet("peak3d-id-library", v || ""); onAny(); };
+      exampleLibrary = (v) => { t.input.value = v; S.form.library = v; onAny(); };     // not remembered as the user's library
       return t.el;
     }
     if (f.kind === "choice") {
@@ -290,8 +292,9 @@
         await setInput(r.input);
         S.output = S.autoOutput = r.output;
         outField.input.value = r.output;
+        if (r.library && exampleLibrary) exampleLibrary(r.library);
         refresh();
-        snack(`Example data ready: ${r.n_mzml} synthetic runs. Press Run Mosa.`);
+        snack(`Example data ready: ${r.n_mzml} synthetic runs with MS2 spectra, and a library to search them. Press Run ${KNAME[S.kernel]}.`);
       } catch (e) {
         snack(e.message);
       } finally {
@@ -301,7 +304,7 @@
     });
     main.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Data")), h("div.form", inField.el, outField.el),
       h("div.row", { style: { marginTop: "16px", gap: "12px", alignItems: "center" } }, exBtn,
-        h("span.body-small.muted", { style: { flex: "1", minWidth: "200px" } }, "No mzML files at hand? This writes three small synthetic LC-MS runs into a peak3d_example folder."))));
+        h("span.body-small.muted", { style: { flex: "1", minWidth: "200px" } }, "No mzML files at hand? This writes three small synthetic LC-MS/MS runs, with MS2 spectra and a spectral library to search them, into a peak3d_example folder."))));
 
     const basic = h("div.form"), adv = h("div.form");
     for (const f of schemaOf(S.kernel)) (BASIC.includes(f.dest) ? basic : adv).appendChild(fieldFor(f, refresh));

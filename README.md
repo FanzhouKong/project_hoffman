@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.1.1](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.1) (all releases:
+[Mosa v1.1.2](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.2) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases); the
 [app-preview](https://github.com/FanzhouKong/project_hoffman/releases/tag/app-preview) pre-release is rebuilt from
 every push and may be ahead of, or less tested than, the versioned one). Nothing else to install.
@@ -73,7 +73,8 @@ pip install -e .            # or pip install -e ".[asari]" to run asari as well 
 ```
 
 This installs the `peak3d` command. Check the installation with the built-in demo, which writes three
-small synthetic runs (60 compounds with RT drift between runs) and processes them:
+small synthetic LC-MS/MS runs (60 compounds with RT drift between runs, DDA MS2 spectra) and a small spectral
+library, processes the runs and searches their MS2 spectra in the library:
 
 ```bash
 peak3d --version

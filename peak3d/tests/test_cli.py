@@ -134,3 +134,14 @@ def test_demo(tmp_path):
     t = pd.read_csv(tmp_path / "peak3d_out/aligned_feature_table.tsv", sep="\t")
     assert ((t["n_detected"] == 3) & (t["iso_offset"] == 0)).sum() >= 54   # 60 injected compounds, found in all runs
     assert "compound_id" in t.columns and (tmp_path / "peak3d_out/.cache").is_dir()   # demo shows groups; cache kept
+    # MS2 mapped to the features and searched: every metabolite named on its own feature, leucine before isoleucine
+    from peak3d.demo import COMPOUNDS
+    assert pd.read_csv(tmp_path / "peak3d_out/ms2_map.tsv", sep="\t")["group_id"].nunique() >= 40
+    ids = pd.read_csv(tmp_path / "peak3d_out/identifications.tsv", sep="\t")
+    best = ids[(ids["spectrum"] == "consensus_denoised") & (ids["rank"] == 1)].set_index("group_id")["name"]
+    for c in COMPOUNDS:
+        g = t.loc[(abs(t["mz"] - c.mz) / c.mz * 1e6 < 10) & (t["iso_offset"] == 0), "group_id"]
+        assert len(g) == 1 and best.get(int(g.iloc[0])) == c.name, c.name
+    assert set(best) == {c.name for c in COMPOUNDS}
+    leu = ids[(ids["spectrum"] == "consensus_denoised") & ids["name"].isin(["L-Leucine", "L-Isoleucine"])]
+    assert leu.sort_values("rank")["name"].tolist() == ["L-Leucine", "L-Isoleucine"]

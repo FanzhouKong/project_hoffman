@@ -7,7 +7,7 @@ pick:     per-file feature tables only
 align:    re-run alignment/grouping/gap-fill from an existing output (features/ + .cache/)
 identify: (re)run the identity search of an existing output against an .msp or .pkl library
 external: run asari or MassCube instead of the peak3d picker, into the same output layout
-demo:     write three small synthetic mzML runs and process them (checks an installation)
+demo:     write three small synthetic LC-MS/MS runs and a library, and process them (checks an installation)
 report:   (re)write report.html for an existing output
 gui:      local web app: choose folders, run, and browse results in the browser
 """
@@ -161,8 +161,8 @@ def build_parser():
     p.add_argument("--no-report", action="store_true", help="do not write report.html")
     identify_opts(p)
 
-    p = sub.add_parser("demo", help="process three synthetic runs (checks an installation)")
-    p.add_argument("--output", type=Path, required=True, help="writes OUT/demo_mzml/ and OUT/peak3d_out/")
+    p = sub.add_parser("demo", help="process three synthetic LC-MS/MS runs and search a demo library (checks an installation)")
+    p.add_argument("--output", type=Path, required=True, help="writes OUT/demo_mzml/, OUT/demo_library.msp and OUT/peak3d_out/")
     p.add_argument("--cores", type=_positive(int), default=1)
 
     p = sub.add_parser("report", help="(re)write report.html for an existing output")
@@ -191,38 +191,6 @@ def build_parser():
     p.add_argument("--allow-host", action="append", default=[], metavar="NAME",
                    help="extra Host name to accept, e.g. a reverse proxy's (repeatable)")
     return ap
-
-
-def write_demo(out: Path) -> Path:
-    """Three synthetic centroid runs: 60 compounds with an M+1 isotope, noise, and RT drift between runs. The twelve
-    strongest compounds also carry a sodium adduct and a water-loss fragment, six of them a fragment with no
-    table relation (shown by its m/z difference), and three a broad co-eluting ion two 13C steps up (a possible
-    isotope: the m/z fits, the peak shape does not), so the compound groups have something to show."""
-    import numpy as np
-
-    from .synth import Peak, make_cloud, write_mzml
-    data = out / "demo_mzml"
-    data.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(0)
-    base = list(zip(rng.uniform(150, 900, 60), rng.uniform(0.6, 3.4, 60), 10 ** rng.uniform(4.5, 6.5, 60)))
-    strongest = sorted(range(60), key=lambda i: -base[i][2])[:12]
-    partners = []                                  # (compound, m/z offset, relative height, FWHM in minutes; 0 = the compound's)
-    for j, i in enumerate(strongest):
-        m, r, hgt = base[i]
-        partners += [(i, 22.9892207 - 1.00727646, 0.35, 0.0), (i, -18.0105647, 0.25, 0.0)]      # [M+Na]+, [M+H-H2O]+
-        if j < 6:
-            partners.append((i, -57.0214637, 0.18, 0.0))                                       # a fragment, unnamed
-        if j < 3:
-            partners.append((i, 2 * 1.0033548, 0.12, 0.25))                                    # M+2 m/z, broad peak
-    for k, shift in enumerate((0.0, 0.05, -0.04)):
-        peaks = [Peak(float(m), float(r + shift + 0.01 * r * k), float(h), 0.05, iso=(0.15,)) for m, r, h in base]
-        for i, dm, rel, w in partners:
-            m, r, hgt = base[i]
-            peaks.append(Peak(float(m + dm), float(r + shift + 0.01 * r * k), float(hgt * rel), w or 0.05, iso=(0.15,) if not w else ()))
-        cloud, _ = make_cloud(peaks, n_scans=800, dt=0.005, thresh=200.0, floor=100.0, n_noise=20000, seed=k,
-                              name=f"demo{k + 1}")
-        write_mzml(cloud, data / f"demo{k + 1}.mzML")
-    return data
 
 
 def _utf8_when_piped() -> None:
@@ -290,10 +258,12 @@ def main(argv=None):
     from . import pipeline
     t0 = time.perf_counter()
     if args.cmd == "demo":
+        from .demo import LIBRARY, write_demo
         data = write_demo(args.output)
-        print(f"[peak3d] demo: 3 synthetic runs in {data}", flush=True)
+        print(f"[peak3d] demo: 3 synthetic LC-MS/MS runs in {data}, library {args.output / LIBRARY}", flush=True)
         args = parser.parse_args(["process", "--input", str(data), "--output", str(args.output / "peak3d_out"),
-                                  "--cores", str(args.cores), "--compounds"])     # the demo data are made to show them
+                                  "--cores", str(args.cores), "--compounds",       # the demo data are made to show them
+                                  "--library", str(args.output / LIBRARY)])
     if args.cmd == "process":
         if not args.input.is_dir():
             sys.exit(f"--input must be a directory of .mzML files: {args.input}")
