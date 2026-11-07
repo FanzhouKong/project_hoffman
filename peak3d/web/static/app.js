@@ -523,7 +523,8 @@
       const annotate = async (group_id, hit) => noted(await post("/api/results/annotate", { path, group_id, hit }));
       const note = async (group_id, parts) => noted(await post("/api/results/note", Object.assign({ path, group_id }, parts)));
       const ms1 = (group_id, file) => post("/api/results/ms1", { path, group_id, file });
-      const eic = (file, mz, ppm, offset) => post("/api/results/eic", { path, file, mz, ppm, offset });
+      const eic = (file, mz, ppm, offset, lo, hi) => post("/api/results/eic", Object.assign({ path, file, mz, ppm, offset },
+        lo != null && hi != null ? { lo_ppm: lo, hi_ppm: hi } : {}));
       S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, identify, annotate, note, ms1, eic, browseLibrary, methods: S.info.methods || {} });
     } catch (e) {
       holder.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "16px" } }, icon("error"), h("div", e.message))));

@@ -51,3 +51,29 @@ def test_defaults_are_the_named_variant():
     assert VARIANT == "GLRS" and {k: getattr(P, k) for k in VARIANT_SETS} == VARIANT_SETS
     assert variant_label() == variant_label({"narrow_rule": "local_median"}) == "GLRS"     # a default is no change
     assert variant_label({"scan_gain": False, "merge_test": "noise"}) == "GLRS + merge_test=noise scan_gain=False"
+
+
+def test_pick_one_estimates_each_file_once(tmp_path, monkeypatch):
+    """the scan-gain step refits on the corrected cloud; the file is estimated once, its gains applied once"""
+    from peak3d import pipeline
+    from peak3d.synth import write_mzml
+    cloud, _ = _study(seed=4, n=80)
+    cloud.name = "S0"
+    write_mzml(cloud, tmp_path / "S0.mzML")
+    calls = {"estimate": 0, "gains": 0}
+    est, gains = pipeline.estimate, pipeline.apply_scan_gains
+
+    def count_est(*a, **k):
+        calls["estimate"] += 1
+        return est(*a, **k)
+
+    def count_gains(*a, **k):
+        calls["gains"] += 1
+        return gains(*a, **k)
+    monkeypatch.setattr(pipeline, "estimate", count_est)
+    monkeypatch.setattr(pipeline, "apply_scan_gains", count_gains)
+    for d in ("features", "cache", "ms2"):
+        (tmp_path / d).mkdir()
+    pipeline._pick_one((str(tmp_path / "S0.mzML"), str(tmp_path / "features"), str(tmp_path / "cache"), None, False,
+                        None, 1, None, {}, str(tmp_path / "ms2")))
+    assert calls == {"estimate": 1, "gains": 1}

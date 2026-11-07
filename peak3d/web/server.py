@@ -725,7 +725,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _eic(self, body):
         """the full-run chromatogram of an m/z in one file of this output (bundle.extract_eic): {"path", "file", "mz",
-        "ppm", "offset"?}; offset (default true) moves the m/z to the file's own scale by its alignment offset"""
+        "ppm", "offset"?, "lo_ppm"?, "hi_ppm"?}; offset (default true) moves the m/z to the file's own scale by its
+        alignment offset; lo_ppm and hi_ppm (together) give an asymmetric window, a feature's stored per-file window"""
         out = self._output({"path": [body.get("path") or ""]})
         header, _ = self.app.table_lines(out / "aligned_feature_table.tsv")
         stem = body.get("file")
@@ -737,8 +738,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "m/z and ppm must be numbers")
         if not (math.isfinite(mz) and 0 < mz < 1e6 and math.isfinite(ppm) and 0 < ppm <= 1000):
             return self._error(400, "m/z must be above 0 and the tolerance between 0 and 1000 ppm")
+        lo, hi = body.get("lo_ppm"), body.get("hi_ppm")
+        if (lo is None) != (hi is None):
+            return self._error(400, "lo_ppm and hi_ppm go together")
+        if lo is not None:
+            try:
+                lo, hi = float(lo), float(hi)
+            except (TypeError, ValueError):
+                return self._error(400, "lo_ppm and hi_ppm must be numbers")
+            if not all(math.isfinite(v) and 0 < v <= 1000 for v in (lo, hi)):
+                return self._error(400, "lo_ppm and hi_ppm must lie between 0 and 1000 ppm")
         offset = bundle.file_offsets(out).get(stem, 0.0) if body.get("offset", True) else None
-        return self._json(bundle.extract_eic(out, out / ".cache", stem, mz, ppm, offset))
+        return self._json(bundle.extract_eic(out, out / ".cache", stem, mz, ppm, offset, lo, hi))
 
     def _identify(self, body):
         """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify, the

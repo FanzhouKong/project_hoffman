@@ -156,6 +156,26 @@ def test_report_contents(processed):
     assert np.median(np.abs(ratio - 1)) < 0.05
     assert len(h["files"]) == 3 and {"n_features", "role", "mz_offset_ppm"} <= set(h["files"][0])
     assert h["residuals"]["n_after"] > 0
+    # each trace's m/z window: at least +/- ppm, and in a file with the feature it holds the span of the centroids the
+    # picker took (per-file mz_min / mz_max), at the file's own m/z scale
+    lo, hi = a["eic_lo"].reshape(e["n"], 3), a["eic_hi"].reshape(e["n"], 3)
+    assert e["window"] == "feature_span" and lo.min() >= e["ppm"] - 1e-4 and hi.min() >= e["ppm"] - 1e-4
+    rows = a["eic_row"]
+    gid = t["group_id"].to_numpy()[rows]
+    offs = {r["stem"]: (r.get("mz_offset_ppm") or 0.0) for r in h["files"]}
+    n_checked = 0
+    for j, s in enumerate(stems):
+        f = pd.read_csv(out / "features" / f"{s}.tsv", sep="\t").drop_duplicates("group_id").set_index("group_id")
+        cloud = io.Cloud.load_npz(out / ".cache" / f"{s}.npz")
+        corr, moff = bundle._file_axis(out, s, cloud)
+        target = bundle._native_mz(t["mz"].to_numpy(float)[rows], t["rt"].to_numpy(float)[rows], cloud, corr, moff,
+                                   offs.get(s, 0.0))
+        has = np.isin(gid, f.index)
+        ff = f.loc[gid[has]]
+        assert np.all(target[has] * (1 - lo[has, j] * 1e-6) <= ff["mz_min"].to_numpy() * (1 + 1e-7))
+        assert np.all(target[has] * (1 + hi[has, j] * 1e-6) >= ff["mz_max"].to_numpy() * (1 - 1e-7))
+        n_checked += int(has.sum())
+    assert n_checked > 50
     # compound groups travel with the bundle: ids, roles (coded), neutral mass, base flag, size
     assert np.array_equal(a["g_cid"], t["compound_id"].to_numpy())
     roles = [h["compounds"]["roles"][k] for k in a["g_role"]]
@@ -173,6 +193,29 @@ def test_report_contents(processed):
     assert (hal[t["iso_offset"] > 0] == "").all() and (hal[(t["iso_offset"] == 0)] != "").all()
     assert (hal == "yes").sum() == 1 and (hal == "maybe").sum() <= 1
     assert h["params"]["stage_times_s"]["halogen_s"] < 20
+
+
+def test_eic_windows_cover_the_feature_span():
+    """a file with the feature: the union of +/- ppm and the feature's own m/z span; without it: the group's median
+    span, at least +/- ppm; nothing known: +/- ppm"""
+    t = np.full(4, 300.0)
+    mn = np.array([300 * (1 - 12e-6), 300 * (1 - 1e-6), np.nan, np.nan])
+    mx = np.array([300 * (1 + 3e-6), 300 * (1 + 20e-6), np.nan, np.nan])
+    lo, hi = bundle.eic_windows(t, mn, mx, np.array([np.nan, np.nan, 8.0, np.nan]), np.array([np.nan, np.nan, 2.0, np.nan]), 5.0)
+    assert np.allclose(lo, [12, 5, 8, 5]) and np.allclose(hi, [5, 20, 5, 5])
+    # a span off-centre (the file's offset not fully removed) still lies inside the window
+    lo, hi = bundle.eic_windows(np.array([300.0]), np.array([300 * (1 + 2e-6)]), np.array([300 * (1 + 9e-6)]),
+                                np.array([np.nan]), np.array([np.nan]), 5.0)
+    assert np.allclose(lo, [5]) and np.allclose(hi, [9])
+
+
+def test_numeric_file_names_stay_text(tmp_path):
+    """IDSL003's file is 003.mzML: its stem must stay "003" in the manifest and the alignment summary, or the report
+    cannot match its files"""
+    (tmp_path / "rt_correction").mkdir()
+    (tmp_path / "rt_correction" / "summary.tsv").write_text("file\tmz_offset_ppm\n003\t1.5\n")
+    assert bundle.file_offsets(tmp_path) == {"003": 1.5}
+    assert bundle._read(tmp_path / "rt_correction" / "summary.tsv")["file"].tolist() == ["003"]
 
 
 def test_possible_isotopes():
@@ -484,6 +527,14 @@ def test_eic_through_the_server(processed, tmp_path):
         # the m/z as typed; an m/z with nothing there; the same from the mzML when the cache is gone
         code, raw = c.json("/api/results/eic", {"path": str(out), "file": "S1", "mz": mz, "ppm": 10, "offset": False})
         assert code == 200 and raw["offset_ppm"] == [0.0, 0.0] and max(raw["intensity"]) > 0
+        # a stored per-file window: asymmetric, from target - lo_ppm to target + hi_ppm
+        code, asym = c.json("/api/results/eic", {"path": str(out), "file": "S1", "mz": mz, "ppm": 5, "lo_ppm": 2, "hi_ppm": 30})
+        assert code == 200 and asym["lo_ppm"] == 2 and asym["hi_ppm"] == 30
+        ref2 = [max([v for m, v in zip(cloud.mz[cloud.off[s]:cloud.off[s + 1]], cloud.inten[cloud.off[s]:cloud.off[s + 1]])
+                     if target * (1 - 2e-6) <= m <= target * (1 + 30e-6)], default=0.0) for s in range(cloud.n_scans)]
+        assert np.allclose(asym["intensity"], ref2, rtol=1e-4)
+        for bad in ({"lo_ppm": 2}, {"lo_ppm": 0, "hi_ppm": 3}, {"lo_ppm": "x", "hi_ppm": 3}, {"lo_ppm": 2, "hi_ppm": 2000}):
+            assert c.json("/api/results/eic", {"path": str(out), "file": "S1", "mz": mz, "ppm": 5, **bad})[0] == 400, bad
         code, none = c.json("/api/results/eic", {"path": str(out), "file": "S0", "mz": 1234.5678, "ppm": 5})
         assert code == 200 and max(none["intensity"]) == 0
         again = bundle.extract_eic(out, tmp_path / "gone", "S1", mz, 10.0, off)
@@ -509,8 +560,9 @@ def test_line_chart_zoom_and_eic_button_in_the_scripts():
     for k in ("zoomBy(", "resetZoom()", "pathDense(", '"wheel"', "dblclick"):
         assert k in plot, k
     assert "opts.eic ?" in viewer and "eicDialog()" in viewer and '"/api/results/eic"' in app
+    assert "a.eic_lo" in viewer and "lo_ppm: lo" in app        # per-file windows reach the traces and Whole run
     # the feature's chromatograms zoom too, and in the app read the whole run on request (shared with Extract EIC)
-    assert viewer.count("zoom: true") >= 2 and '"Whole run")' in viewer and "eicGet(s, whole.q)" in viewer
+    assert viewer.count("zoom: true") >= 2 and '"Whole run")' in viewer and "eicGet(R.stems[t.file], qOf(t))" in viewer
     css = (st / "style.css").read_text(encoding="utf-8")
     assert all(f"--viz-cat-{k}:" in css for k in range(1, 9))
 

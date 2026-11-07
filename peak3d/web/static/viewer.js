@@ -237,7 +237,9 @@
         for (let p = 0; p < P; p++) y[p] = a.eic_q[off + p] * sc;
         // MS1 scans of this file inside the peak window, and those holding the ion (older bundles: unknown)
         const ns = a.eic_ns ? { all: a.eic_ns[(k * F + j) * 2], signal: a.eic_ns[(k * F + j) * 2 + 1] } : null;
-        return { file: f, y, ns };
+        // the m/z window of this file's trace, ppm below / above the feature (older bundles: +/- the run's ppm)
+        const lo = a.eic_lo ? a.eic_lo[k * F + j] : e.ppm, hi = a.eic_hi ? a.eic_hi[k * F + j] : e.ppm;
+        return { file: f, y, ns, lo, hi };
       });
       return { x, traces };
     }
@@ -1150,12 +1152,15 @@
         };
         // the traces: the window the results store around the peak or, once Whole run has read them (the app only),
         // every MS1 scan of the run for the same files, m/z and tolerance
+        // each file at its own stored m/z window (Whole run reads the same window over the whole run)
         const whole = { on: false, q: { mz: +a.g_mz[g].toFixed(5), ppm: R.h.eic.ppm, offset: true } };
+        const qOf = (t) => (a.eic_lo ? Object.assign({}, whole.q, { lo: +t.lo.toFixed(2), hi: +t.hi.toFixed(2) }) : whole.q);
+        const winOf = (t) => (a.eic_lo ? ` (−${fixed(t.lo, 1)} / +${fixed(t.hi, 1)} ppm)` : "");
         const lines = () => {
           const series = e.traces.map((t) => {
-            const w = whole.on ? eicPeek(R.stems[t.file], whole.q) : null;
+            const w = whole.on ? eicPeek(R.stems[t.file], qOf(t)) : null;
             const full = !!(w && w.x);
-            return { id: t.file, label: R.stems[t.file], x: full ? w.x : e.x, y: full ? w.y : t.y, color: colorOf(t.file), width: 1.5, alpha: 0.9, ns: t.ns };
+            return { id: t.file, label: R.stems[t.file] + winOf(t), x: full ? w.x : e.x, y: full ? w.y : t.y, color: colorOf(t.file), width: 1.5, alpha: 0.9, ns: t.ns };
           });
           const dots = [];
           for (const sr of series) {          // each trace's apex inside the peak bounds
@@ -1173,7 +1178,7 @@
         const vlines = [{ x: t0, color: "--viz-ink-2", dash: [5, 4], width: 1.25 }, { x: t1, color: "--viz-ink-2", dash: [5, 4], width: 1.25 },
           ...tic.map((m) => ({ x: m.t, color: "--viz-ms2", dash: [], width: 2.5 }))];
         parts.push(h("div.section-title.first.with-action", h("div", h("h3.title-small", "Chromatograms"),
-          h("p.body-small.muted", `±${R.h.eic.ppm} ppm around the feature, on the aligned RT axis${R.h.eic.files.length < R.N ? `; ${R.h.eic.files.length} of ${R.N} files (evenly spaced)` : ""}. ` +
+          h("p.body-small.muted", `${a.eic_lo ? `Each file over its own m/z span of the feature, at least ±${R.h.eic.ppm} ppm (here up to −${fixed(Math.max(...e.traces.map((t) => t.lo)), 1)} / +${fixed(Math.max(...e.traces.map((t) => t.hi)), 1)} ppm; a file without the feature: the median span)` : `±${R.h.eic.ppm} ppm around the feature`}, on the aligned RT axis${R.h.eic.files.length < R.N ? `; ${R.h.eic.files.length} of ${R.N} files (evenly spaced)` : ""}. ` +
             `Peak ${fixed(t0, 1)}–${fixed(t1, 1)} s (dashed), apex of each trace (dot)` +
             (tic.length ? (one ? "; red line: where the MS2 spectrum was taken" : `; red line: the highest-TIC MS2 spectrum; red stars: the ${int(merged.length)} spectra merged into the consensus, on their file's trace`) : "") +
             ". Hover a trace to name its file."),
@@ -1209,25 +1214,27 @@
         if (wholeBtn) wholeBtn.addEventListener("click", async () => {
           if (whole.on) return c.resetZoom();
           const stems = e.traces.map((t) => R.stems[t.file]);
+          const peek = (t) => eicPeek(R.stems[t.file], qOf(t));
           let done = 0;
           wholeBtn.disabled = true;
           const progress = () => wholeBtn.replaceChildren(P3.spinner(14), `Reading ${int(done)} of ${int(stems.length)}`);
           progress();
           wholeNote.replaceChildren();
-          await eicLimited(stems, async (s) => { await eicGet(s, whole.q); done++; if (shown === g) progress(); }, () => shown === g);
+          await eicLimited(e.traces, async (t) => { await eicGet(R.stems[t.file], qOf(t)); done++; if (shown === g) progress(); }, () => shown === g);
           if (shown !== g) return;
           wholeBtn.disabled = false;
           wholeBtn.replaceChildren(icon("show_chart"), "Whole run");
-          const bad = stems.filter((s) => { const v = eicPeek(s, whole.q); return !v || v.error; });
+          const badT = e.traces.filter((t) => { const v = peek(t); return !v || v.error; });
+          const bad = badT.map((t) => R.stems[t.file]);
           if (bad.length === stems.length) {
             eicRetry();
-            return wholeNote.replaceChildren(banner(`Whole run not available: ${(eicPeek(stems[0], whole.q) || {}).error || "no answer"}`, "error"));
+            return wholeNote.replaceChildren(banner(`Whole run not available: ${(peek(e.traces[0]) || {}).error || "no answer"}`, "error"));
           }
           whole.on = true;
           c.update(lines());
           c.resetZoom();
           wholeNote.replaceChildren(h("p.body-small.muted", `Whole run: every MS1 scan of ${int(stems.length - bad.length)} file${stems.length - bad.length > 1 ? "s" : ""}` +
-            (bad.length ? ` (${int(bad.length)} kept the stored window: ${bad.map((s) => `${s}: ${(eicPeek(s, whole.q) || {}).error || "no answer"}`).join("; ")})` : "") +
+            (bad.length ? ` (${int(bad.length)} kept the stored window: ${badT.map((t) => `${R.stems[t.file]}: ${(peek(t) || {}).error || "no answer"}`).join("; ")})` : "") +
             ". Drag across a peak to zoom in; Peak returns to the window around this feature."));
           if (bad.length) eicRetry();
         });
@@ -1276,13 +1283,13 @@
     // feature's chromatograms (Whole run) and Extract EIC; the oldest are dropped past EIC_KEEP
     const EIC_KEEP = 240;
     const eicStore = new Map();
-    const eicKey = (s, q) => `${s}|${q.mz}|${q.ppm}|${q.offset}`;
+    const eicKey = (s, q) => `${s}|${q.mz}|${q.ppm}|${q.offset}|${q.lo ?? ""}|${q.hi ?? ""}`;
     function eicGet(s, q) {
       const k = eicKey(s, q);
       let it = eicStore.get(k);
       if (!it) {
         it = { v: null };
-        it.p = opts.eic(s, q.mz, q.ppm, q.offset).then(
+        it.p = opts.eic(s, q.mz, q.ppm, q.offset, q.lo, q.hi).then(
           (r) => (it.v = { r, x: Float64Array.from(r.rt_s), xn: Float64Array.from(r.rt_native_s), y: Float64Array.from(r.intensity) }),
           (err) => (it.v = { error: err.message || String(err) }));
         eicStore.set(k, it);
@@ -1321,8 +1328,11 @@
       // the query: m/z, tolerance, offset correction, RT axis
       const mzIn = h("input", { type: "number", step: "any", min: "0", placeholder: "e.g. 166.0863", "aria-label": "m/z",
         value: featMz != null ? String(featMz) : "" });
+      // default tolerance: the selected feature's widest stored window (its own m/z span), else the run's ppm
+      const ev = g != null && R.a.eic_lo ? R.eic(g) : null;
+      const featPpm = ev ? Math.ceil(2 * Math.max(...ev.traces.map((t) => Math.max(t.lo, t.hi)))) / 2 : null;
       const ppmIn = h("input.narrow", { type: "number", step: "any", min: "0", "aria-label": "Tolerance (ppm)",
-        value: String((R.h.eic && R.h.eic.ppm) || 10) });
+        value: String(featPpm || (R.h.eic && R.h.eic.ppm) || 10) });
       const offIn = h("input", { type: "checkbox", checked: true });
       offIn.addEventListener("change", () => { st.offset = offIn.checked; extract(); });
       const axisSeg = h("div.segmented", { role: "group", "aria-label": "RT axis" }, [["aligned", "Aligned RT"], ["native", "Raw RT"]].map(([k, label]) =>

@@ -263,11 +263,13 @@ def _source_cloud(output: Path, cache_dir: Path, stem: str) -> tuple[Cloud, str]
     raise FileNotFoundError(f"no point-cloud cache for {stem} and its mzML file is not where the run read it")
 
 
-def extract_eic(output, cache_dir, stem: str, mz: float, ppm: float, offset_ppm: float | None = 0.0) -> dict:
+def extract_eic(output, cache_dir, stem: str, mz: float, ppm: float, offset_ppm: float | None = 0.0,
+                lo_ppm: float | None = None, hi_ppm: float | None = None) -> dict:
     """the full-run chromatogram of m/z +/- ppm in one file: per MS1 scan the most intense centroid in the window.
     offset_ppm None: m/z as given; else the target moves to what the file measured, by its m/z offset curve when the
     alignment wrote one and by offset_ppm (its single offset) otherwise, as for the report's chromatograms.
-    Times in seconds, aligned (the file's RT correction) and native."""
+    lo_ppm / hi_ppm (both): the window from target - lo_ppm to target + hi_ppm instead (a feature's stored per-file
+    window, eic_windows). Times in seconds, aligned (the file's RT correction) and native."""
     output, cache_dir = Path(output), Path(cache_dir)
     cloud, source = _source_cloud(output, cache_dir, stem)
     corr, moff = _file_axis(output, stem, cloud)
@@ -277,13 +279,67 @@ def extract_eic(output, cache_dir, stem: str, mz: float, ppm: float, offset_ppm:
         target = float(mz) / (1.0 - moff * 1e-6)
     else:
         target = np.full(cloud.n_scans, float(mz) / (1.0 - offset_ppm * 1e-6))
-    tol = target * ppm * 1e-6
-    y = eic_scans(cloud.off, cloud.mz, cloud.inten, target - tol, target + tol)
+    lo_ppm, hi_ppm = (float(ppm), float(ppm)) if lo_ppm is None or hi_ppm is None else (float(lo_ppm), float(hi_ppm))
+    y = eic_scans(cloud.off, cloud.mz, cloud.inten, target * (1.0 - lo_ppm * 1e-6), target * (1.0 + hi_ppm * 1e-6))
     shift = target / float(mz) * 1e6 - 1e6
-    return {"file": stem, "mz": float(mz), "ppm": float(ppm), "source": source, "n_scans": int(cloud.n_scans),
+    return {"file": stem, "mz": float(mz), "ppm": float(ppm), "lo_ppm": lo_ppm, "hi_ppm": hi_ppm, "source": source,
+            "n_scans": int(cloud.n_scans),
             "offset_ppm": [float(shift.min()), float(shift.max())] if len(shift) else [0.0, 0.0],
             "rt_s": np.round(60.0 * corr, 3).tolist(), "rt_native_s": np.round(60.0 * cloud.rt, 3).tolist(),
             "intensity": [float(f"{v:.5g}") for v in y.tolist()]}
+
+
+def eic_windows(target, mz_min, mz_max, med_lo, med_hi, ppm: float):
+    """per group, the m/z window (ppm below, ppm above the target) a file's chromatogram is drawn over: where the file
+    has the feature, the union of target +/- ppm and the m/z span of the centroids the picker took for it (mz_min,
+    mz_max; on QTOF a weak feature's centroids spread well past 5 ppm, and a +/- ppm window cut its peak); where it has
+    none, the group's median span (med_lo, med_hi, ppm from the feature m/z) over the files that have it, at least +/-
+    ppm; NaN spans fall back to +/- ppm"""
+    target = np.asarray(target, float)
+    lo, hi = np.full(len(target), float(ppm)), np.full(len(target), float(ppm))
+    with np.errstate(invalid="ignore"):
+        det = np.isfinite(mz_min) & np.isfinite(mz_max) & (mz_min > 0) & (mz_max >= mz_min)
+        lo[det] = np.maximum(ppm, (target[det] - mz_min[det]) / target[det] * 1e6)
+        hi[det] = np.maximum(ppm, (mz_max[det] - target[det]) / target[det] * 1e6)
+        nd = ~det & np.isfinite(med_lo) & np.isfinite(med_hi)
+        lo[nd] = np.maximum(ppm, med_lo[nd])
+        hi[nd] = np.maximum(ppm, med_hi[nd])
+    return lo, hi
+
+
+def _feature_spans(output: Path, stems, group_ids):
+    """per group x file (stems), the m/z span of the file's own feature of that group (per-file feature tables:
+    mz_min, mz_max, native m/z; NaN where the file has none) and its relative extent below / above the feature m/z
+    (ppm)"""
+    G, F = len(group_ids), len(stems)
+    mz_min, mz_max = np.full((G, F), np.nan), np.full((G, F), np.nan)
+    rel_lo, rel_hi = np.full((G, F), np.nan), np.full((G, F), np.nan)
+    row_of = {int(g): i for i, g in enumerate(group_ids)}
+    for j, s in enumerate(stems):
+        f = Path(output) / "features" / f"{s}.tsv"
+        try:
+            d = pd.read_csv(f, sep="\t", usecols=["group_id", "mz", "mz_min", "mz_max"])
+        except (FileNotFoundError, ValueError):       # no table, or one written before the alignment added group_id
+            continue
+        d = d[np.isfinite(d["group_id"]) & (d["mz"] > 0)]
+        idx = np.array([row_of.get(int(g), -1) for g in d["group_id"]], np.int64)
+        ok = idx >= 0
+        idx, d = idx[ok], d[ok]
+        mz_min[idx, j], mz_max[idx, j] = d["mz_min"].to_numpy(float), d["mz_max"].to_numpy(float)
+        m = d["mz"].to_numpy(float)
+        rel_lo[idx, j] = (m - mz_min[idx, j]) / m * 1e6
+        rel_hi[idx, j] = (mz_max[idx, j] - m) / m * 1e6
+    return mz_min, mz_max, rel_lo, rel_hi
+
+
+def _nanmedian_rows(x):
+    """row medians ignoring NaN; NaN for a row with none"""
+    out = np.full(x.shape[0], np.nan)
+    for i, r in enumerate(x):
+        r = r[np.isfinite(r)]
+        if len(r):
+            out[i] = float(np.median(r))
+    return out
 
 
 def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm, budget, max_files, n_pts):
@@ -311,22 +367,31 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
     traces = np.zeros((n_groups, F, n_pts), np.float32)
     n_scans = np.zeros((n_groups, F, 2), np.uint16)       # MS1 scans inside [rt_min, rt_max] per file, and with signal
     offsets = {r["stem"]: (r.get("mz_offset_ppm") or 0.0) for r in files_info}
+    # each file's window: its own feature's m/z span (at least +/- ppm); the group's median span where it has none
+    span_lo, span_hi, rel_lo, rel_hi = _feature_spans(output, [stems[k] for k in shown], t["group_id"].to_numpy())
+    med_lo, med_hi = _nanmedian_rows(rel_lo), _nanmedian_rows(rel_hi)
+    win_lo = np.zeros((n_groups, F), np.float32)
+    win_hi = np.zeros((n_groups, F), np.float32)
     for j, k in enumerate(shown):
         s = stems[k]
         cloud = Cloud.load_npz(cache_dir / f"{s}.npz")
         corr, moff = _file_axis(output, s, cloud)
         target = _native_mz(mz_c, t["rt"].to_numpy(float), cloud, corr, moff, offsets.get(s, 0.0))
-        traces[:, j, :] = eic_on_grid(cloud.off, cloud.mz, cloud.inten, corr, target, target * ppm * 1e-6, x0, dx, n_pts)
-        n_scans[:, j, :] = np.minimum(scans_in_window(cloud.off, cloud.mz, cloud.inten, corr, target, target * ppm * 1e-6,
-                                                      rt_lo, rt_hi), 65535)
+        lo, hi = eic_windows(target, span_lo[:, j], span_hi[:, j], med_lo, med_hi, ppm)
+        win_lo[:, j], win_hi[:, j] = lo, hi
+        centre, tol = target * (1.0 + 0.5 * (hi - lo) * 1e-6), target * 0.5 * (lo + hi) * 1e-6
+        traces[:, j, :] = eic_on_grid(cloud.off, cloud.mz, cloud.inten, corr, centre, tol, x0, dx, n_pts)
+        n_scans[:, j, :] = np.minimum(scans_in_window(cloud.off, cloud.mz, cloud.inten, corr, centre, tol, rt_lo, rt_hi),
+                                      65535)
     scale = traces.reshape(n_groups, -1).max(axis=1)
     q = np.zeros_like(traces, dtype=np.uint16)
     ok = scale > 0
     q[ok] = np.round(traces[ok] / scale[ok, None, None] * 65535).astype(np.uint16)
     info = {"files": shown, "points": n_pts, "n": n_groups, "ppm": ppm, "of": G,
-            "selection": "most intense groups" if n_groups < G else "all groups"}
+            "selection": "most intense groups" if n_groups < G else "all groups", "window": "feature_span"}
     arrays = {"eic_row": rows.astype(np.int32), "eic_x0": x0.astype(np.float32), "eic_dx": dx.astype(np.float32),
-              "eic_scale": scale.astype(np.float32), "eic_q": q.reshape(-1), "eic_ns": n_scans.reshape(-1)}
+              "eic_scale": scale.astype(np.float32), "eic_q": q.reshape(-1), "eic_ns": n_scans.reshape(-1),
+              "eic_lo": win_lo.reshape(-1), "eic_hi": win_hi.reshape(-1)}
     return (info, arrays), None
 
 
@@ -536,7 +601,8 @@ def possible_isotopes(mz, rt, height, iso_offset, charge, ppm: float, rt_win: fl
 
 
 def _read(path: Path) -> pd.DataFrame | None:
-    return pd.read_csv(path, sep="\t") if path.exists() else None
+    """a TSV of the output, file names (stem, file) kept as text: a file named 003.mzML must not become the number 3"""
+    return pd.read_csv(path, sep="\t", dtype={"stem": str, "file": str}) if path.exists() else None
 
 
 def _hist(values, lim, n_bins=61):

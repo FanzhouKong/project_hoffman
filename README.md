@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.1.3](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.3) (all releases:
+[Mosa v1.1.4](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.4) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
@@ -212,9 +212,14 @@ A feature's **chromatograms** zoom the same way: drag across (a box zooms the in
 pan, double-click or **Peak** to return to the window around the peak. The results store that window only (48
 points per trace); in the app, **Whole run** reads every MS1 scan of the whole run for the same files from the
 point-cloud cache, so zooming out shows the full chromatogram and zooming in shows each scan.
+Each file's trace covers the m/z span of the centroids the picker took for the feature in that file, at least
+±`--ppm` (files without the feature: the median span of those with it); hovering a trace names its window. Since
+1.1.4: on QTOF data a weak feature's centroids spread well past 5 ppm (median ±15 ppm on an Agilent Q-TOF), and the
+earlier fixed ±`--ppm` window cut such peaks short in the plot (the feature itself was not affected).
 
 **Extract EIC** (Features tab, beside Download table) opens the whole-run chromatogram of any m/z (the selected
-feature's, or one typed in) in the files you tick: per MS1 scan the most intense centroid within ±ppm, each file at
+feature's, or one typed in) in the files you tick: per MS1 scan the most intense centroid within ±ppm (preset to the
+selected feature's widest chromatogram window), each file at
 its own measured m/z offset unless you turn that off, on the aligned or the raw RT axis. One colour per file for
 the first eight, grey after that, named on hover. Drag across the chart to zoom into an RT range (a box zooms the
 intensity too), scroll to zoom around the pointer, shift-drag to pan, double-click or the toolbar to zoom out. It

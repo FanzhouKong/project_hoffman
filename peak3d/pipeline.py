@@ -104,18 +104,6 @@ def _pick_one(job):
         P.gain_sd, P.n_gain_scans = g_sd, g_n
         t["scan_gain"] = time.perf_counter() - tic
     tic = time.perf_counter()
-    P = estimate(cloud, overrides=overrides)
-    t["estimate"] = time.perf_counter() - tic
-    if P.scan_gain:
-        # correct the scan-wide gain before anything else, then refit what it changes (floor, noise law) on the
-        # corrected cloud; the cache holds the corrected cloud, so gap filling and alignment see the same intensities
-        tic = time.perf_counter()
-        g, g_sd, g_n = scan_gains(cloud, P)
-        apply_scan_gains(cloud, g)
-        P = refit_after_gains(cloud, P)
-        P.gain_sd, P.n_gain_scans = g_sd, g_n
-        t["scan_gain"] = time.perf_counter() - tic
-    tic = time.perf_counter()
     cloud.save_npz(Path(cache_dir) / f"{stem}.npz")
     t["cache"] = time.perf_counter() - tic
     tic = time.perf_counter()

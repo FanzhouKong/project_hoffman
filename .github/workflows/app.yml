@@ -223,4 +223,10 @@ jobs:
           n=$(ls upload | wc -l)
           if [ "$n" -lt 4 ]; then echo "only $n of 4 downloads built: keeping the current release"; exit 1; fi
           notes="Standalone Mosa app (the peak3d program): download the file for your computer, unzip, double-click (see the README for the one-time security confirmation on macOS and Windows). Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."
-          gh release create "$GITHUB_REF_NAME" upload/* --title "Mosa $GITHUB_REF_NAME" --notes "$notes"
+          # the release's changes: the annotated tag's message, read through the API (none for a lightweight tag)
+          tag_sha=$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME" --jq 'select(.object.type == "tag") | .object.sha' 2>/dev/null || true)
+          changes=""
+          if [ -n "$tag_sha" ]; then changes=$(gh api "repos/$GH_REPO/git/tags/$tag_sha" --jq .message 2>/dev/null || true); fi
+          if [ -n "$changes" ]; then printf '%s\n\n%s\n' "$changes" "$notes" > notes.md; else printf '%s\n' "$notes" > notes.md; fi
+          cat notes.md
+          gh release create "$GITHUB_REF_NAME" upload/* --title "Mosa $GITHUB_REF_NAME" --notes-file notes.md
