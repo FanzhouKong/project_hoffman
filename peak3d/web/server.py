@@ -29,7 +29,7 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .. import __version__
 from ..estimate import VARIANT, VARIANT_SETS
@@ -294,6 +294,14 @@ def _gap_filled_files(out: Path, table: Path, cols) -> dict:
     return {ids[i]: ";".join(names[filled[i]]) for i in np.flatnonzero(filled.any(axis=1))}
 
 
+def _disposition(kind: str, filename: str) -> str:
+    """a Content-Disposition header value for any file name: an ASCII fallback for old browsers and the exact name
+    as RFC 5987 UTF-8 (http.server writes headers as Latin-1, so a results folder named in Chinese or with an
+    accent made the download fail mid-response)"""
+    ascii_name = re.sub(r'[^\x20-\x7e]|["\\]', "_", filename) or "download"
+    return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
 def _remember(cache: dict, key: str, value) -> None:
     """put value in a small most-recent-first cache of CACHED_OUTPUTS entries (bundles are megabytes each)"""
     cache.pop(key, None)
@@ -529,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
                 ctype = ("application/json" if name.endswith(".json") else "text/plain; charset=utf-8"
                          if name.endswith(".msp") else "text/tab-separated-values; charset=utf-8")
                 return self._send(200, (out / name).read_bytes(), ctype,
-                                  {"Content-Disposition": f'attachment; filename="{out.name}_{name}"'})
+                                  {"Content-Disposition": _disposition("attachment", f"{out.name}_{name}")})
             if url.path == "/api/results/report":
                 out = self._output(q)
                 self.app.refresh_now(out, pending_only=True)          # recent annotations first
@@ -538,7 +546,7 @@ class Handler(BaseHTTPRequestHandler):
                     gzip.compress(bundle.build(out), mtime=0), f"Mosa · {out.name}").encode()
                 disp = "attachment" if q.get("download") else "inline"
                 return self._send(200, body, "text/html; charset=utf-8",
-                                  {"Content-Disposition": f'{disp}; filename="mosa_report_{out.name}.html"'})
+                                  {"Content-Disposition": _disposition(disp, f"mosa_report_{out.name}.html")})
             self._error(404, "not found")
         except PermissionError as e:
             self._error(403, str(e))

@@ -96,12 +96,14 @@
   function css(name, el) { return getComputedStyle(el || document.documentElement).getPropertyValue(name).trim(); }
 
   // ---- downloads
+  // the object URL stays valid for a minute (FileSaver.js keeps 40 s, not 2): a browser that asks where to save
+  // may read the blob only after its dialog closes
   function saveBlob(blob, name) {
     const url = URL.createObjectURL(blob);
-    const a = h("a", { href: url, download: name, style: { display: "none" } });
+    const a = h("a", { href: url, download: name, rel: "noopener", style: { display: "none" } });
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 60000);
   }
 
   // ---- snackbar

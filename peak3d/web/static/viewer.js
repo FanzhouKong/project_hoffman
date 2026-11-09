@@ -147,6 +147,7 @@
     comment(g) { const e = this.notes.get(g); return (e && e.comment) || ""; }
     reviewed(g) { const e = this.notes.get(g); return !!(e && e.annotation); }
     hits(g, spec) { return (this.id && this.idsAt[spec].get(g)) || []; }
+    nWithMs2() { return Math.max(this.ms2At.size, this.ms2cAt.size); }
     bestScore(g) { const l = this.hits(g, this.defSpec); return l.length ? this.id.a.id_score[l[0]] : NaN; }
     // the annotation in force: the user's choice, else the best hit on the default copy at or above min_score
     annotation(g) {
@@ -303,6 +304,111 @@
     }
     if (buf.length) parts.push(buf.join("\n") + "\n");
     return new Blob(parts, { type: "text/tab-separated-values" });
+  }
+
+  // the identity-search candidates of the listed features that have MS2, as a JSON array of MassWiki search records
+  // (the "data" of each row of a MassWiki job database): the same keys in the same order, the same value types, ""
+  // and null where MassWiki has no value, and empty lists for the searches Mosa does not run (open, neutral loss,
+  // hybrid, the annotation, experimental and internal libraries). spectrum is the query: the copy the annotations
+  // come from (the consensus or the highest-TIC spectrum) as measured, peaks_clean that cleaned as for scoring
+  // (cleanPeaks), its spectral entropy, the feature's RT in seconds; a feature with an annotation in force carries it
+  // as its name, formula, InChIKey and SMILES (searchmode identity_search), as a MassWiki upload with known spectra
+  // does. reference_library.identity_search: every library spectrum the last search listed on the annotation copy,
+  // best first, at most 100 (MassWiki's cap), entropy_similarity the score there (the search's own similarity,
+  // weighted entropy unless chosen otherwise); id and index the record's position in the library file, db its name.
+  // Returns { blob, n features, k candidates }; one record per line
+  const MW_MAX = 100;
+  const PRECURSOR_MARGIN = 1.6, NOISE = 0.01, MIN_CENTROID_DA = 0.05;     // similarity.py
+  // similarity.clean (as ms_entropy's, which MassWiki builds on): peaks from 1.6 Da below the precursor up dropped,
+  // peaks within max(0.05, 2 x tol) Da merged strongest first, those under 1 % of the strongest dropped, intensities
+  // summing to 1; m/z ascending
+  function cleanPeaks(mz, inten, prec, tol) {
+    const cut = prec > 0 ? prec - PRECURSOR_MARGIN : Infinity;
+    let pk = [];
+    for (let i = 0; i < mz.length; i++) if (inten[i] > 0 && isFinite(inten[i]) && isFinite(mz[i]) && mz[i] < cut) pk.push([+mz[i], +inten[i]]);
+    pk.sort((p, q) => p[0] - q[0]);
+    const d = Math.max(MIN_CENTROID_DA, 2 * tol);
+    while (pk.length > 1 && pk.some((p, i) => i > 0 && p[0] - pk[i - 1][0] <= d)) {
+      const work = pk.map((p) => p[1]), out = [];
+      for (const idx of work.map((_, i) => i).sort((a, b) => work[b] - work[a])) {
+        if (work[idx] <= 0) continue;
+        let lo = idx - 1, hi = idx + 1, s = 0, sw = 0;
+        while (lo >= 0 && pk[idx][0] - pk[lo][0] <= d) lo--;
+        while (hi < pk.length && pk[hi][0] - pk[idx][0] <= d) hi++;
+        for (let j = lo + 1; j < hi; j++) { s += work[j]; sw += work[j] * pk[j][0]; work[j] = 0; }
+        out.push([sw / s, s]);
+      }
+      pk = out.sort((p, q) => p[0] - q[0]);
+    }
+    if (!pk.length) return pk;
+    const top = Math.max(...pk.map((p) => p[1]));
+    pk = pk.filter((p) => p[1] >= NOISE * top);
+    const sum = pk.reduce((s, p) => s + p[1], 0);
+    return pk.map(([m, v]) => [m, v / sum]);
+  }
+  // JSON writes 1.0 as 1, which Python reads back as an int; the fields MassWiki holds as floats keep their ".0"
+  const FLOAT_MARK = "⁣f";
+  const fl = (v) => (Number.isInteger(v) ? FLOAT_MARK + v : v);
+  const FLOAT_RE = new RegExp(`"${FLOAT_MARK}(-?\\d+)"`, "g");
+  function candidatesJson(R, rows) {
+    const a = R.a, ih = R.id.h, ia = R.id.a;
+    const txt = (s) => (s == null ? "" : String(s));
+    const none = (s) => txt(s) || "None";
+    const tol = ih.fragment_tol || 0.02;
+    const pols = new Set([R.opts.polarity, ...R.files.map((f) => f.polarity)].filter(Boolean).map((p) => (/^(pos|\+)/i.test(p) ? 1 : /^(neg|-)/i.test(p) ? -1 : 0)));
+    const runSign = pols.size === 1 ? [...pols][0] : 0;
+    const signOf = (adduct) => (/[+]$/.test(adduct) ? 1 : /-$/.test(adduct) ? -1 : 0);
+    const db = base(ih.library).replace(/\.(msp|pkl)$/i, "");
+    const lines = [];
+    let k = 0;
+    for (const g of rows) {
+      let spec = R.defSpec, which = spec % 2 ? "single" : "consensus", kk = (which === "single" ? R.ms2At : R.ms2cAt).get(g);
+      if (kk == null) {                         // a feature without that copy: the other one
+        spec ^= 1; which = spec % 2 ? "single" : "consensus"; kk = (which === "single" ? R.ms2At : R.ms2cAt).get(g);
+      }
+      if (kk == null) continue;
+      const m = (which === "single" ? R.m2 : R.m2c).a, prec = m[(which === "single" ? "ms2_" : "ms2c_") + "prec"][kk];
+      const sp = R.spectrum(which, kk, false);
+      const clean = cleanPeaks(sp.mz, sp.inten, prec, tol);
+      let entropy = 0;
+      for (const [, v] of clean) if (v > 0) entropy -= v * Math.log(v);
+      const hits = R.hits(g, spec).slice(0, MW_MAX).map((j) => {
+        const b = R.hit(j);
+        return { db, id: String(b.lib), name: txt(b.name), adduct: txt(b.adduct), rt: "", precursor_mz: isFinite(b.prec) ? String(b.prec) : "",
+          smiles: txt(b.smiles), user_name: "", spec_uid: "", predicted_rt_hilic: "", predicted_rt_rp: "", rt_confidence_level_hilic: "",
+          rt_confidence_level_rp: "", anno_delta_rt: "", splash: "", index: b.lib, entropy_similarity: fl(+(+b.score).toFixed(4)),
+          library_wiki_id: "", delta_predicted_rt: null, rt_confidence_level: null, confidence_in_domain: false, confidence_pct: null,
+          ensemble_sd_pct: null };
+      });
+      k += hits.length;
+      const x = R.annotation(g), named = !!(x && !x.unknown && x.name);
+      const role = R.role(g);
+      const sign = runSign || (named ? signOf(txt(x.adduct)) : 0) || (hits.length ? signOf(hits[0].adduct) : 0) || 1;
+      const z = a.g_z[g] > 0 ? a.g_z[g] : 1;
+      const ptype = (named && txt(x.adduct)) || (/^\[.+\]\d*[+-]$/.test(role) ? role : "") ||
+        (z > 1 ? `[M${sign > 0 ? "+" : "-"}${z}H]${z}${sign > 0 ? "+" : "-"}` : sign > 0 ? "[M+H]+" : "[M-H]-");
+      const gid = a.g_id[g], rt = +R.rtS[g].toFixed(2);
+      const rec = {
+        analysis: {
+          reference_library: { identity_search: hits, open_search: [], neutral_loss_search: [], hybrid_search: [] },
+          experimental_library: { similar_spectra: [], cluster_peaks: [] },
+          annotation_library: { identity_search: [], open_search: [], neutral_loss_search: [], hybrid_search: [] },
+          internal_library: { rt_similar: [], ms2_similar: [] },
+        },
+        spectrum: { id: String(gid), name: named ? txt(x.name) : "Unknown", searchmode: named ? "identity_search" : "None",
+          formula: named ? none(x.formula) : "None", inchikey: named ? none(x.inchikey) : "None", smiles: named ? none(x.smiles) : "None",
+          precursor_type: ptype, charge: sign * z, scan: gid, precursor_mz: fl(prec), peaks_clean: clean.map(([u, v]) => [fl(u), fl(v)]),
+          peaks_source: "original", entropy, peaks: Array.from(sp.mz, (u, i) => [fl(u), fl(sp.inten[i])]), rt_normalized: fl(rt), rt: fl(rt),
+          spec_uid: gid },
+        wiki_id: `${R.h.title}/${gid}`,
+        status: "success",
+      };
+      lines.push(JSON.stringify(rec).replace(FLOAT_RE, "$1.0"));
+    }
+    const parts = ["[\n"];
+    for (let i = 0; i < lines.length; i += 2000) parts.push(lines.slice(i, i + 2000).join(",\n") + (i + 2000 < lines.length ? ",\n" : "\n"));
+    parts.push("]\n");
+    return { blob: new Blob(parts, { type: "application/json" }), n: lines.length, k };
   }
 
   // ---------------------------------------------------------------- viewer
@@ -480,6 +586,24 @@
           dl.disabled = false;
         }
       });
+      // the library candidates of the listed features as JSON (candidatesJson), from the viewer's own data: the app and
+      // the report alike
+      const dlc = R.m2 ? h("button.btn.outlined.state", { type: "button", title: "The identity-search candidates of the features listed here " +
+        "(search, filters and sort applied) that have MS2, as a JSON array of MassWiki search records: per feature its MS2 spectrum and RT (s), " +
+        "and every library spectrum the search listed (score above 0.1, best first, at most 100), those below the annotation threshold included" },
+        icon("download"), "Download candidates") : null;
+      if (dlc) dlc.addEventListener("click", () => {
+        if (!R.id) return P3.snack("No identity search yet: choose a spectral library in the Identity search panel.");
+        try {
+          const out = candidatesJson(R, list);
+          if (!out.n) return P3.snack("None of the listed features has an MS2 spectrum.");
+          const name = `${R.h.title}_candidates${out.n < R.nWithMs2() ? "_" + out.n : ""}.json`;
+          P3.saveBlob(out.blob, name);
+          P3.snack(`Downloaded ${int(out.n)} features with ${int(out.k)} candidates as ${name}`);
+        } catch (e) {
+          P3.snack(String(e.message || e));
+        }
+      });
       // the chromatogram of any m/z in chosen files (needs the app's server: a report has no button)
       const eicBtn = opts.eic ? h("button.btn.outlined.state", { type: "button", onclick: () => eicDialog(),
         title: "The whole-run chromatogram of an m/z (the selected feature's, or one you type) in the files you choose; zoom in and out" },
@@ -510,7 +634,7 @@
       const filters = [idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
           R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null,
-          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, eicBtn, dl)];
+          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, eicBtn, dl, dlc)];
       const mini = track(P3.plot.scatter(mapEl, {
         height: 210, x: R.rtS, y: a.g_mz, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
         xLabel: "RT (s)", yLabel: "m/z", xFmt: (v, d) => fixed(v, Math.min(d, 0)), yFmt: (v, d) => fixed(v, Math.min(d, 0)),
@@ -1676,5 +1800,5 @@
     return { results: R, show, destroy: clearCharts };
   }
 
-  P3.viewer = { mount, Results, bundleTable };
+  P3.viewer = { mount, Results, bundleTable, candidatesJson };
 })(window.P3 = window.P3 || {});

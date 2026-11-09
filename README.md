@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.1.4](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.4) (all releases:
+[Mosa v1.1.5](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.1.5) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
@@ -221,6 +221,21 @@ earlier fixed ±`--ppm` window cut such peaks short in the plot (the feature its
 times in seconds and, after `n_filled`, a `gap_filled_files` column: the files whose value was gap-filled rather
 than detected, separated by `;` (from `filled_mask.tsv`; a file gap filling found nothing in keeps 0 and is not
 listed). Results of external kernels have no such column.
+
+**Download candidates** (Features tab, beside Download table; the report has it too) saves the identity-search
+candidates of the listed features that have MS2 as a JSON array of MassWiki search records, the `data` of each row of a
+MassWiki job database: the same keys in the same order and the same value types, so code that reads MassWiki results
+reads it. Per feature: `wiki_id` (`<results folder>/<feature id>`), `spectrum` (the query: the consensus or
+highest-TIC spectrum the annotations come from as measured in `peaks`, cleaned as for scoring in `peaks_clean`
+(precursor region removed, peaks within 0.05 Da merged, under 1 % dropped, summing to 1), its spectral `entropy`,
+`precursor_mz` of the MS2, `rt` the feature's RT in seconds; an annotated feature carries its annotation as name,
+formula, InChIKey and SMILES) and `analysis.reference_library.identity_search`: every library spectrum the last search
+listed on that spectrum, best first, at most 100, with `entropy_similarity` the search's score there (weighted
+entropy unless another similarity was chosen; above 0.1, the near misses below `--min-similarity` included). Mosa
+has no value for MassWiki's predicted RTs, SPLASH, library wiki ids and RT confidences (written as `""` or `null`,
+as MassWiki does when it lacks them); `id` and `index` are the record's position in the library file and `db` the
+file's name. The open, neutral-loss and hybrid searches and the annotation, experimental and internal libraries
+are empty lists: Mosa does not run them.
 
 **Extract EIC** (Features tab, beside Download table) opens the whole-run chromatogram of any m/z (the selected
 feature's, or one typed in) in the files you tick: per MS1 scan the most intense centroid within ±ppm (preset to the

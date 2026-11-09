@@ -437,9 +437,11 @@
     const esc = (e) => { if (e.key === "Escape") close(); };
     btn.addEventListener("click", () => {
       if (menu) return close();
+      // a download link closes the menu only after its click: a link taken out of the page during its own click
+      // is not followed by every browser (the download then silently does not start)
       menu = h("div.menu", { role: "menu" }, items.map((it) => (it === "-" ? h("hr.divider", { style: { margin: "8px 0" } }) :
         h(it.href ? "a.menu-item.state" : "button.menu-item.state", { role: "menuitem", href: it.href, download: it.href ? "" : null, type: it.href ? null : "button",
-          onclick: () => { close(); if (it.run) it.run(); } }, icon(it.icon), h("span", it.label)))));
+          onclick: () => { if (it.href) setTimeout(close, 0); else close(); if (it.run) it.run(); } }, icon(it.icon), h("span", it.label)))));
       document.body.appendChild(menu);
       const r = btn.getBoundingClientRect();
       menu.style.top = r.bottom + 4 + "px";
@@ -592,11 +594,14 @@
     const cancel = h("button.btn.text.state", { type: "button", onclick: () => dlg.close() }, "Cancel");
     dlg.replaceChildren(h("div.dialog-head", h("h2.headline-small", titles[mode]), pathField.el), h("div.dialog-body", list), h("div.divider"), h("div.dialog-actions", status, cancel, ok));
     ok.addEventListener("click", () => { if (mode === "msp" ? file : cur) { dlg.close(); done(mode === "msp" ? join(cur.path, file) : cur.path); } });
+    let seq = 0;                 // the latest listing asked for wins (the start folder's may answer after a typed path's)
     async function load(p) {
+      const my = ++seq;
       list.replaceChildren(h("div.loading", { style: { padding: "32px" } }, P3.spinner()));
       file = null;
       try {
         const r = await api(`/api/ls?path=${enc(p)}${mode === "msp" ? "&ext=msp" : ""}`);
+        if (my !== seq) return;
         cur = r;
         pathField.input.value = r.path;
         pathField.setError(null);
@@ -616,6 +621,7 @@
         else if (mode === "results") { ok.disabled = !r.is_output; status.textContent = r.is_output ? "Mosa results here" : "No Mosa results here"; }
         else { ok.disabled = !r.path || r.writable === false; status.textContent = r.writable === false ? "Not writable" : "Results go in a new subfolder here"; }
       } catch (e) {
+        if (my !== seq) return;
         pathField.setError(e.message);
         list.replaceChildren();
         ok.disabled = true;

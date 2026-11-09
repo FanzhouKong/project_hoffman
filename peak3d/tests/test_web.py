@@ -719,6 +719,36 @@ def test_identity_search_through_the_server(gui):
     assert full["ids"]["n"] >= 1 and full["kernel"] == "peak3d"
 
 
+def test_download_names_outside_latin1(gui):
+    """a results folder named in Chinese (or with an accent) downloads: the header carries an ASCII fallback and the
+    exact name as RFC 5987 UTF-8 (http.server writes headers as Latin-1; the old header failed mid-response)"""
+    v = server._disposition("attachment", '数据 é"x_aligned.tsv')
+    v.encode("latin-1")
+    assert v.startswith('attachment; filename="') and "filename*=UTF-8''%E6%95%B0%E6%8D%AE%20%C3%A9%22x_aligned.tsv" in v
+    assert server._disposition("inline", "a.html") == "inline; filename=\"a.html\"; filename*=UTF-8''a.html"
+    c, root, _ = gui
+    out = _ms2_output(root / "数据 é")
+    q = quote(str(out))
+    code, raw, hdr = c.req(f"/api/results/file?path={q}&name=aligned_feature_table.tsv")
+    assert code == 200 and raw == (out / "aligned_feature_table.tsv").read_bytes()
+    assert hdr["Content-Disposition"].endswith("filename*=UTF-8''" + quote("数据 é_aligned_feature_table.tsv", safe=""))
+    code, page, hdr = c.req(f"/api/results/report?path={q}&download=1")
+    assert code == 200 and b'id="peak3d-data"' in page
+    assert hdr["Content-Disposition"].startswith("attachment;") and quote("mosa_report_数据 é.html", safe="") in hdr["Content-Disposition"]
+
+
+def test_download_buttons_in_the_scripts():
+    """Download table and Download candidates sit in the Features toolbar; the menu's download links stay in the
+    page through their click; a saved blob's URL outlives a save dialog"""
+    st = ROOT / "peak3d" / "web" / "static"
+    viewer, app, core = ((st / f).read_text(encoding="utf-8") for f in ("viewer.js", "app.js", "core.js"))
+    assert "count, eicBtn, dl, dlc)]" in viewer and "candidatesJson(R, list)" in viewer and '"Download candidates")' in viewer
+    assert "reference_library: { identity_search: hits, open_search: [], neutral_loss_search: [], hybrid_search: [] }" in viewer
+    assert 'wiki_id: `${R.h.title}/${gid}`' in viewer and 'status: "success"' in viewer and "MW_MAX = 100" in viewer
+    assert "if (it.href) setTimeout(close, 0)" in app
+    assert "URL.revokeObjectURL(url); a.remove(); }, 60000)" in core
+
+
 def test_kernel_choice(gui):
     c, root, _ = gui
     ext = {f["dest"] for f in c.json("/api/schema?kernel=asari")[1]}

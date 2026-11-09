@@ -116,7 +116,7 @@ jobs:
           path: upload/*
           retention-days: 14
           compression-level: 0
-      - name: Windows double-click (no console, as from Explorer), screenshots
+      - name: Windows double-click (no console, as from Explorer), screenshots, downloads in Edge
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -140,7 +140,7 @@ jobs:
             $win = (Get-Process -Id $p.Id).MainWindowTitle
             $notes.Add("control window title: '$win'")
             $ex = Invoke-RestMethod "$base/api/example" -Method Post -Headers $h -ContentType "application/json" -Body "{}"
-            $body = @{ input = $ex.input; output = "$PWD\check\run"; options = @{ cores = 2 } } | ConvertTo-Json
+            $body = @{ input = $ex.input; output = "$PWD\check\run"; options = @{ cores = 2; library = $ex.library } } | ConvertTo-Json
             $run = Invoke-RestMethod "$base/api/runs" -Method Post -Headers $h -ContentType "application/json" -Body $body
             for ($i = 0; $i -lt 200; $i++) { $st = Invoke-RestMethod "$base/api/runs/$($run.id)" -Headers $h; if ($st.state -ne "running") { break }; Start-Sleep 3 }
             $notes.Add("run: $($st.state) in $([math]::Round($st.elapsed)) s")
@@ -155,7 +155,15 @@ jobs:
             & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --virtual-time-budget=5000 --screenshot="$PWD\check\windows-app.png" "$($s.url)" | Out-Null
             $rep = (Resolve-Path "check\run\report.html").Path.Replace("\", "/")
             & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --virtual-time-budget=5000 --screenshot="$PWD\check\windows-report.png" "file:///$rep" | Out-Null
-            $ok = ($win -eq "Mosa") -and ($st.state -eq "done")
+            # the downloads in Edge, as a user clicks them (Playwright drives the installed browser): Download table and
+            # Download candidates, the Download menu's feature table and report, the report's own Download candidates
+            $ErrorActionPreference = "Continue"
+            python -m pip install -q playwright 2>&1 | Out-Null
+            python packaging\browser_check.py --url $s.url --results "$PWD\check\run" --save "$PWD\check" --channel msedge 2>&1 | ForEach-Object { $notes.Add("  $_") }
+            $dlOk = ($LASTEXITCODE -eq 0)
+            $ErrorActionPreference = "Stop"
+            $notes.Add("downloads in Edge: $(if ($dlOk) { 'ok' } else { 'FAILED' })")
+            $ok = ($win -eq "Mosa") -and ($st.state -eq "done") -and $dlOk
           } catch {
             $notes.Add("ERROR: $($_.Exception.Message)")
           } finally {
