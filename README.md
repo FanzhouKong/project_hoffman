@@ -217,6 +217,11 @@ Each file's trace covers the m/z span of the centroids the picker took for the f
 1.1.4: on QTOF data a weak feature's centroids spread well past 5 ppm (median ±15 ppm on an Agilent Q-TOF), and the
 earlier fixed ±`--ppm` window cut such peaks short in the plot (the feature itself was not affected).
 
+**Download table** (Features tab) saves the listed features (search, filters and sort applied) with retention
+times in seconds and, after `n_filled`, a `gap_filled_files` column: the files whose value was gap-filled rather
+than detected, separated by `;` (from `filled_mask.tsv`; a file gap filling found nothing in keeps 0 and is not
+listed). Results of external kernels have no such column.
+
 **Extract EIC** (Features tab, beside Download table) opens the whole-run chromatogram of any m/z (the selected
 feature's, or one typed in) in the files you tick: per MS1 scan the most intense centroid within ±ppm (preset to the
 selected feature's widest chromatogram window), each file at

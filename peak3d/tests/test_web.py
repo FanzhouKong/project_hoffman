@@ -1,6 +1,7 @@
 """Browser front end: results bundle, report.html and the local GUI server (no browser needed)."""
 import gzip
 import json
+import os
 import pickle
 import subprocess
 import sys
@@ -140,7 +141,8 @@ def test_report_contents(processed):
     dec = np.where(q > 0, 10 ** (m["log10_lo"] + (q - 1) / 65534 * (m["log10_hi"] - m["log10_lo"])), 0)
     V = t[stems].to_numpy(float)
     assert np.allclose(dec, V, rtol=5e-4, atol=0)
-    # detected cells agree with filled_mask (0 = detected)
+    # detected cells agree with filled_mask (0 = detected), and the bundle says its status comes from presence_mask.tsv
+    assert m["presence"] is True
     st = a["m_status"].reshape(len(t), 3)
     fm = pd.read_csv(out / "filled_mask.tsv", sep="\t").set_index("group_id").loc[t["group_id"], stems].to_numpy()
     assert np.array_equal(st == 3, fm == 0)
@@ -272,17 +274,33 @@ def test_not_an_output(tmp_path):
 RT = ("rt", "rt_min", "rt_max", "rt_sd")
 
 
-def _in_seconds(header, line):
-    """what /api/results/table makes of a table line: retention-time columns in seconds (header renamed *_s)"""
+def _in_seconds(header, line, filled=None):
+    """what /api/results/table makes of a table line: retention-time columns in seconds (header renamed *_s); with
+    filled ({group id: files}), the gap_filled_files column after n_filled"""
     cols = header.rstrip("\r\n").split("\t")
     eol = header[len(header.rstrip("\r\n")):]
+    at = cols.index("n_filled") + 1
     if line is None:
-        return "\t".join(c + "_s" if c in RT else c for c in cols) + eol
+        head = [c + "_s" if c in RT else c for c in cols]
+        return "\t".join(head[:at] + (["gap_filled_files"] if filled is not None else []) + head[at:]) + eol
     v = line.rstrip("\r\n").split("\t")
     for i, c in enumerate(cols):
         if c in RT and v[i] not in ("", "nan"):
             v[i] = f"{float(v[i]) * 60:.6g}"
+    if filled is not None:
+        v.insert(at, filled.get(v[0], ""))
     return "\t".join(v) + eol
+
+
+def _filled_from_mask(out: Path, stems):
+    """{group id: "stem;stem"}, read as text: the files filled_mask.tsv marks with 1 where the table holds a value > 0"""
+    def rows(name):
+        lines = (out / name).read_text(encoding="utf-8").splitlines()
+        head = lines[0].split("\t")
+        return {ln.split("\t")[0]: dict(zip(head, ln.split("\t"))) for ln in lines[1:]}
+    table, mask = rows("aligned_feature_table.tsv"), rows("filled_mask.tsv")
+    res = {g: ";".join(s for s in stems if mask[g][s] == "1" and float(r[s]) > 0) for g, r in table.items()}
+    return {g: v for g, v in res.items() if v}
 
 
 def test_schema_and_argv():
@@ -405,14 +423,67 @@ def test_server_run_and_results(gui):
     assert c.req(f"/api/results/file?path={out_q}&name=../../x")[0] == 404
     # the file's own line endings (CRLF where pandas writes os.linesep, i.e. on Windows)
     lines = (root / "o" / "aligned_feature_table.tsv").read_bytes().decode("utf-8").splitlines(keepends=True)
+    filled = _filled_from_mask(root / "o", ["S0", "S1"])
     ids = [int(lines[3].split("\t")[0]), int(lines[1].split("\t")[0]), 999999]
     code, raw, _ = c.req("/api/results/table", {"path": str(root / "o"), "ids": ids})
-    assert code == 200 and raw.decode() == "".join(_in_seconds(lines[0], ln) for ln in (None, lines[3], lines[1]))
+    assert code == 200 and raw.decode() == "".join(_in_seconds(lines[0], ln, filled) for ln in (None, lines[3], lines[1]))
+    if filled:                                  # rows with gap-filled files come out with them
+        g = sorted(filled, key=int)[0]
+        line = next(ln for ln in lines[1:] if ln.split("\t")[0] == g)
+        code, raw, _ = c.req("/api/results/table", {"path": str(root / "o"), "ids": [int(g)]})
+        assert raw.decode().splitlines(keepends=True)[1] == _in_seconds(lines[0], line, filled)
     assert c.json("/api/results/reveal", {"path": str(root.parent)})[0] == 403          # outside --root
     code, ex = c.json("/api/example", {})
     assert code == 200 and ex["n_mzml"] == 3 and Path(ex["input"]).parent == (root / "peak3d_example").resolve()
     assert Path(ex["library"]) == (root / "peak3d_example" / "demo_library.msp").resolve() and Path(ex["library"]).is_file()
     assert c.json(f"/api/results/bundle?path={quote(str(d))}")[0] == 404
+
+
+def test_export_lists_gap_filled_files(gui):
+    """Download table: gap_filled_files after n_filled names the files filled_mask.tsv marks as not detected where the
+    table holds a value (a filled cell that stayed 0 is not listed); file columns matched by name, numeric names kept
+    as text; refreshed when filled_mask.tsv changes; no column without filled_mask.tsv (external kernels)"""
+    c, root, _ = gui
+    out = root / "o"
+    out.mkdir()
+    pd.DataFrame({"group_id": [1, 2, 5], "mz": [180.0634, 300.2, 410.3], "rt": [2.0, 4.0, 5.0], "rt_min": [1.95, 3.95, 4.9],
+                  "rt_max": [2.05, 4.05, 5.1], "n_detected": [1, 3, 1], "n_confirmed": [1, 0, 1], "n_filled": [1, 0, 2],
+                  "mz_ppm_spread": [1.0, 0.5, np.nan], "rt_sd": [0.01, 0.02, np.nan], "iso_offset": [0, 0, 0],
+                  "charge": [1, 1, 1], "A": [2e6, 5e5, 3e4], "B": [1.5e5, 4e5, 9e5], "003": [0.0, 6e5, 7e3]}
+                 ).to_csv(out / "aligned_feature_table.tsv", sep="\t", index=False)
+    (out / "params.json").write_text("{}")
+    mask = pd.DataFrame({"group_id": [9, 5, 2, 1], "003": [1, 1, 0, 1], "B": [0, 0, 0, 1], "A": [1, 1, 0, 0]})
+    mask.to_csv(out / "filled_mask.tsv", sep="\t", index=False)          # another column order, a dropped group 9
+
+    def export(ids):
+        code, raw, _ = c.req("/api/results/table", {"path": str(out), "ids": ids})
+        assert code == 200
+        rows = [ln.split("\t") for ln in raw.decode().splitlines()]
+        return rows[0], [dict(zip(rows[0], r)) for r in rows[1:]]
+
+    head, rows = export([5, 1, 2, 77])
+    assert head[:9] == ["group_id", "mz", "rt_s", "rt_min_s", "rt_max_s", "n_detected", "n_confirmed", "n_filled",
+                        "gap_filled_files"] and head[-3:] == ["A", "B", "003"]
+    assert [(r["group_id"], r["gap_filled_files"]) for r in rows] == [("5", "A;003"), ("1", "B"), ("2", "")]
+    assert float(rows[0]["003"]) == 7000 and float(rows[1]["003"]) == 0 and rows[0]["rt_s"] == "300"
+    # filled_mask.tsv rewritten: the export follows it
+    mask.assign(B=[0, 1, 0, 1]).to_csv(out / "filled_mask.tsv", sep="\t", index=False)
+    t = (out / "filled_mask.tsv").stat().st_mtime + 5
+    os.utime(out / "filled_mask.tsv", (t, t))
+    assert export([5])[1][0]["gap_filled_files"] == "A;B;003"
+    # the report's bundle: status from presence_mask.tsv or not
+    assert bundle.unpack(bundle.build(out))[0]["matrix"]["presence"] is False
+    pd.DataFrame({"group_id": [1, 2, 5], "mz": [180.0634, 300.2, 410.3], "rt": [2.0, 4.0, 5.0], "n_detected": [1, 3, 1],
+                  "n_confirmed": [1, 0, 1], "A": [2, 2, 1], "B": [1, 2, 2], "003": [0, 2, 1]}
+                 ).to_csv(out / "presence_mask.tsv", sep="\t", index=False)
+    h, a = bundle.unpack(bundle.build(out))
+    assert h["matrix"]["presence"] is True and a["m_status"].reshape(3, 3).tolist() == [[3, 2, 0], [3, 3, 3], [2, 3, 2]]
+    # no filled_mask.tsv: no column
+    (out / "filled_mask.tsv").unlink()
+    head, rows = export([5])
+    assert "gap_filled_files" not in head and head[7:9] == ["n_filled", "mz_ppm_spread"] and float(rows[0]["A"]) == 30000
+    viewer = (ROOT / "peak3d" / "web" / "static" / "viewer.js").read_text(encoding="utf-8")
+    assert 'FILLED_COL = "gap_filled_files"' in viewer and "R.h.matrix.presence" in viewer
 
 
 # ------------------------------------------------------------------ MS2, identity search, kernels ----

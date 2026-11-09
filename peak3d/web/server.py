@@ -270,6 +270,30 @@ def _identity_columns(out: Path) -> dict:
     return {"header": EXPORT_ID_COLS, "rows": rows, "empty": ["0", "0", "", "", "no"] + [""] * 8}
 
 
+FILLED_COL = "gap_filled_files"     # export column after n_filled: the files whose value was gap-filled, ";"-separated
+
+
+def _gap_filled_files(out: Path, table: Path, cols) -> dict:
+    """{group_id as written: "stem;stem"} for the groups with gap-filled values in this aligned table: the files
+    filled_mask.tsv marks as not detected where the table holds a value above 0 (a cell gap filling found nothing in
+    stays 0 and is not listed); groups without any are left out"""
+    import numpy as np
+    import pandas as pd
+    mask_path = out / "filled_mask.tsv"
+    with open(mask_path, encoding="utf-8") as fh:
+        in_mask = set(fh.readline().rstrip("\r\n").split("\t"))
+    stems = [s for s in bundle.table_stems(out, cols) if s in in_mask]
+    if not stems:
+        return {}
+    use = dict(usecols=["group_id", *stems], dtype={"group_id": str}, sep="\t")    # ids as written: the table's line keys
+    t = pd.read_csv(table, **use)
+    m = pd.read_csv(mask_path, **use).drop_duplicates("group_id").set_index("group_id").reindex(t["group_id"])
+    filled = (m[stems].fillna(0).to_numpy(np.float64) > 0) & (t[stems].to_numpy(np.float64) > 0)
+    names = np.array(stems, dtype=object)
+    ids = t["group_id"].to_numpy()
+    return {ids[i]: ";".join(names[filled[i]]) for i in np.flatnonzero(filled.any(axis=1))}
+
+
 def _remember(cache: dict, key: str, value) -> None:
     """put value in a small most-recent-first cache of CACHED_OUTPUTS entries (bundles are megabytes each)"""
     cache.pop(key, None)
@@ -291,6 +315,7 @@ class App:
         self._ms2: dict[str, tuple] = {}
         self._searching: dict[str, threading.Lock] = {}     # one identity search per output folder at a time
         self._tables: dict[str, tuple] = {}
+        self._filled: dict[str, tuple] = {}                  # per table: the gap-filled files of each group
         self._refresh: dict[str, threading.Timer] = {}      # report refreshes waiting for a burst of annotations to end
         self.addon_jobs: dict[str, dict] = {}                # add-on installs: name -> {state, log, error}
         self.lock = threading.Lock()
@@ -382,6 +407,19 @@ class App:
             self._tables.clear()
         self._tables[str(path)] = (mtime, (header, rows))
         return header, rows
+
+    def gap_filled(self, output: Path, path: Path, cols) -> dict | None:
+        """_gap_filled_files of an aligned table, kept until the table or filled_mask.tsv changes"""
+        mask = output / "filled_mask.tsv"
+        if not mask.exists():
+            return None
+        key = (path.stat().st_mtime_ns, mask.stat().st_mtime_ns)
+        hit = self._filled.get(str(path))
+        if hit and hit[0] == key:
+            return hit[1]
+        value = _gap_filled_files(output, path, cols)
+        _remember(self._filled, str(path), (key, value))
+        return value
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -678,7 +716,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _table(self, body):
         """the rows of an aligned table for the given group ids, in that order, as in the file except retention times
-        in seconds (columns renamed rt_s, ...), plus the MS2 count and best library hit when the output has them"""
+        in seconds (columns renamed rt_s, ...), the files whose value was gap-filled (gap_filled_files, after n_filled,
+        when the output has filled_mask.tsv), plus the MS2 count and best library hit when the output has them"""
         out = self._output({"path": [body.get("path") or ""]})
         name = body.get("name") or "aligned_feature_table.tsv"
         if name not in RESULT_FILES or not name.startswith("aligned_feature"):
@@ -688,13 +727,20 @@ class Handler(BaseHTTPRequestHandler):
         eol = header[len(header.rstrip("\r\n")):] or "\n"
         rt_at = [i for i, c in enumerate(cols) if c in RT_COLS]
         extra = _identity_columns(out)
-        lines = ["\t".join([f"{c}_s" if c in RT_COLS else c for c in cols] + list(extra["header"])) + eol]
+        filled = self.app.gap_filled(out, out / name, cols)
+        fill_at = cols.index("n_filled") + 1 if "n_filled" in cols else len(cols)
+        head = [f"{c}_s" if c in RT_COLS else c for c in cols]
+        if filled is not None:
+            head.insert(fill_at, FILLED_COL)
+        lines = ["\t".join(head + list(extra["header"])) + eol]
         for k in (str(int(i)) for i in body.get("ids") or []):
             if k not in rows:
                 continue
             v = rows[k].rstrip("\r\n").split("\t")
             for i in rt_at:
                 v[i] = _seconds(v[i])
+            if filled is not None:
+                v.insert(fill_at, filled.get(k, ""))
             lines.append("\t".join(v + extra["rows"].get(int(k), extra["empty"])) + eol)
         self._send(200, "".join(lines).encode("utf-8"), "text/tab-separated-values; charset=utf-8")
 

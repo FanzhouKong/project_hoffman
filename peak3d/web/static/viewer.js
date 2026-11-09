@@ -260,22 +260,34 @@
   const field = (label, control, trail, width) => h("div.field", { style: width ? { width } : null }, h("div.box", control, h("label", label), trail || null));
 
   // the listed features as a tab-separated table, from the values stored in the bundle (rounded to 0.04 %); retention
-  // times in seconds, plus the MS2 count and best library hit when the results have them
+  // times in seconds, the files whose value was gap-filled (after n_filled, when the bundle tells detected cells from
+  // filled ones), plus the MS2 count and best library hit when the results have them
   const TABLE_COLS = ["group_id", "mz", "rt_s", "rt_min_s", "rt_max_s", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
     "rt_sd_s", "iso_offset", "charge"];
   const COMPOUND_COLS = ["compound_id", "role", "neutral_mass", "is_base", "n_members", "possible_isotope"];
   const HAL_COLS = ["possible_halogen", "halogen_pattern"];
+  const FILLED_COL = "gap_filled_files";
   const HAL_TEXT = ["", "no", "maybe", "yes"];
   const MS2_COLS = ["n_ms2", "n_consensus", "annotation", "annotation_source", "reviewed", "annotation_score", "annotation_adduct",
     "annotation_formula", "annotation_inchikey", "best_hit", "best_score", "stars", "comment"];
   function bundleTable(R, rows) {
     const a = R.a, num = (v, d) => (isFinite(v) ? v.toFixed(d) : ""), clean = (t) => String(t || "").replace(/[\t\r\n]+/g, " ");
     const notes = !!(R.m2 || R.notes.size);
-    const parts = [TABLE_COLS.concat(R.cid ? COMPOUND_COLS : [], a.g_hal ? HAL_COLS : [], notes ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
+    // gap-filled: a cell with a value whose status is not "detected" (1 filled, 2 filled with a confirmed peak)
+    const fill = !!(a.m_q && a.m_status && R.h.matrix && R.h.matrix.presence), N = R.N, at = TABLE_COLS.indexOf("n_filled") + 1;
+    const filledFiles = (g) => {
+      const l = [];
+      for (let f = 0; f < N; f++) { const st = a.m_status[g * N + f]; if ((st === 1 || st === 2) && a.m_q[g * N + f]) l.push(R.stems[f]); }
+      return l.join(";");
+    };
+    const head = TABLE_COLS.slice();
+    if (fill) head.splice(at, 0, FILLED_COL);
+    const parts = [head.concat(R.cid ? COMPOUND_COLS : [], a.g_hal ? HAL_COLS : [], notes ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
     let buf = [];
     for (const g of rows) {
       const row = [a.g_id[g], a.g_mz[g].toFixed(6), num(60 * a.g_rt[g], 2), num(60 * a.g_rt_min[g], 2), num(60 * a.g_rt_max[g], 2),
         a.g_ndet[g], a.g_nconf[g], a.g_nfill[g], num(a.g_ppm[g], 3), num(60 * a.g_rtsd[g], 3), a.g_iso[g], a.g_z[g]];
+      if (fill) row.splice(at, 0, filledFiles(g));
       if (R.cid) row.push(a.g_cid[g], R.role(g), num(a.g_nm[g], 6), a.g_base[g], a.g_nmem[g], R.isoq && R.isoq[g] ? `M+${R.isoq[g]}` : "");
       if (a.g_hal) row.push(HAL_TEXT[R.hal(g)] || "", R.halHint(g));
       if (notes) {
@@ -452,8 +464,8 @@
         return b;
       };
       const dl = h("button.btn.outlined.state", { type: "button", title: opts.exportTable ?
-        "The features listed here (search, filters and sort applied), with the values from aligned_feature_table.tsv; retention times in seconds" :
-        "The features listed here (search, filters and sort applied); retention times in seconds. Values are rounded to 0.04 %; the exact table is aligned_feature_table.tsv in the output folder (minutes)." },
+        "The features listed here (search, filters and sort applied), with the values from aligned_feature_table.tsv; retention times in seconds; gap_filled_files names the files whose value was gap-filled" :
+        "The features listed here (search, filters and sort applied); retention times in seconds; gap_filled_files names the files whose value was gap-filled. Values are rounded to 0.04 %; the exact table is aligned_feature_table.tsv in the output folder (minutes)." },
         icon("download"), "Download table");
       dl.addEventListener("click", async () => {
         const name = `${R.h.title}_features${list.length < R.G ? "_" + list.length : ""}.tsv`;

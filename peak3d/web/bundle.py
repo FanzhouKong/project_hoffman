@@ -697,12 +697,15 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
             qv = np.where(V > 0, 1 + np.round((np.log10(np.maximum(V, 1e-30)) - lo) / (hi - lo) * 65534), 0)
         status = np.where(V > 0, 1, 0).astype(np.uint8)
         pres = _read(output / "presence_mask.tsv")
-        if pres is not None and all(s in pres for s in stems):
+        from_mask = pres is not None and all(s in pres for s in stems)
+        if from_mask:
             p = pres.set_index("group_id").reindex(arrays["g_id"])[stems].fillna(0).to_numpy(np.int8)
             status = np.where(p == 2, 3, np.where(p == 1, 2, status)).astype(np.uint8)
         arrays["m_q"] = qv.astype(np.uint16).reshape(-1)
         arrays["m_status"] = status.reshape(-1)
-        matrix = {"log10_lo": lo, "log10_hi": hi}
+        # presence: the status tells detected cells (3) from gap-filled ones (1, 2); without presence_mask.tsv
+        # (external kernels) every cell with a value is 1
+        matrix = {"log10_lo": lo, "log10_hi": hi, "presence": bool(from_mask)}
     matrix_note = None if matrix or not G * N else f"{G} groups x {N} files is above the {max_cells:,} cell limit"
 
     # RT correction: per-file shift curves (downsampled) and anchor residuals
