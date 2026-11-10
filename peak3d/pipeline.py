@@ -24,6 +24,7 @@ from .features import COLUMNS, MZ_TEXT, build_features, precise_mz, write_featur
 from .estimate import apply_scan_gains, estimate, parse_overrides, refit_after_gains, scan_gains, variant_label
 from .gapfill import fill_file
 from .grouping import consensus, group_features, merge_complementary
+from .isomers import clip_windows, proven_pairs, territories
 from .compounds import cluster_compounds, group_iso_parent as _group_iso_parent, write_compounds
 from .io import Cloud, load_cloud
 from .ms2 import Collector, from_collected, save as save_ms2
@@ -349,6 +350,28 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     stage_times["group_s"] = round(time.perf_counter() - tic, 3)
     log(f"grouped {len(A)} features from {N} files into {G} groups ({stage_times['group_s']} s)")
 
+    # isomer rows: groups at the same m/z that the table proves to be different compounds (picked as separate peaks in
+    # the same injections, in a consistent order) gap-fill only from their own side of the midpoint between them, so a
+    # missing isomer is not filled with its neighbour's peak (peak3d/isomers.py); other groups are filled as before
+    iso_lo, iso_hi = np.full(G, -np.inf), np.full(G, np.inf)
+    if N > 1 and not args.no_gap_fill and not getattr(args, "no_isomer_fill", False):
+        tic = time.perf_counter()
+        half_fill = np.maximum(res.rt_tol, 0.5 * (cons["rt_max"] - cons["rt_min"]))
+        pairs = proven_pairs(gid, A["file"].values, A["rt"].values, cons["mz"], cons["rt"], half_fill, res.ppm_tol,
+                             res.rt_tol, min_codetected=int(getattr(args, "isomer_min_codetected", 3)),
+                             min_share=float(getattr(args, "isomer_min_share", 0.5)))
+        iso_lo, iso_hi, iso_pos = territories(pairs, gid, A["file"].values, A["rt"].values, G)
+        a_, b_ = pairs["a"].to_numpy(np.int64), pairs["b"].to_numpy(np.int64)
+        write_tsv(pd.DataFrame({"group_a": a_, "group_b": b_, "mz": cons["mz"][a_], "rt_a": cons["rt"][a_],
+                                "rt_b": cons["rt"][b_], "position_a": iso_pos[a_], "position_b": iso_pos[b_],
+                                "boundary": 0.5 * (iso_pos[a_] + iso_pos[b_]), "n_codetected": pairs["n_codetected"].values,
+                                "share_codetected": pairs["share"].values, "gap_s": pairs["gap_s"].values}),
+                  output / "isomer_pairs.tsv", "%.6g", text_formats=MZ_TEXT)
+        stage_times["isomer_s"] = round(time.perf_counter() - tic, 3)
+        stage_times["isomer_pairs"] = int(len(pairs))
+        log(f"isomer pairs: {len(pairs)} proven, {int(np.isfinite(iso_pos).sum())} groups gap-fill only from their own "
+            f"side ({stage_times['isomer_s']} s)")
+
     # matrices
     H = np.zeros((G, N), np.float32)
     AR = np.zeros((G, N), np.float32)
@@ -365,6 +388,7 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     if not args.no_gap_fill and N > 0:
         tic = time.perf_counter()
         half = np.maximum(res.rt_tol, 0.5 * (cons["rt_max"] - cons["rt_min"]))
+        fill_rt, half, _ = clip_windows(cons["rt"], half, iso_lo, iso_hi)     # isomer rows: their own side only
         # per group: reference height (strongest member) and that member's cell noise
         order_h = np.argsort(A["height"].values)
         g_h = np.zeros(G)
@@ -379,9 +403,9 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
             if len(miss) == 0:
                 continue
             fa = res.files[s]
-            native = np.interp(cons["rt"][miss], fa.warp.corr, fa.warp.native)
+            native = np.interp(fill_rt[miss], fa.warp.corr, fa.warp.native)
             own_mz = cons["mz"][miss] / (1.0 - fa.mz_offset_at(native) * 1e-6)    # on this file's own scale
-            jobs.append((s, str(cache_dir), fa.warp.native, fa.warp.corr, own_mz, cons["rt"][miss],
+            jobs.append((s, str(cache_dir), fa.warp.native, fa.warp.corr, own_mz, fill_rt[miss],
                          half[miss], res.ppm_tol, miss, threads, g_noise[miss], g_h[miss], fwhm_scans.get(s, 0.0)))
         if n_workers == 1 or len(jobs) <= 1:
             out = [_fill_one(j) for j in jobs]

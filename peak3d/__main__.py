@@ -68,6 +68,15 @@ def build_parser():
         p.add_argument("--min-presence", type=_positive(int), default=2,
                        help="a group must be detected, or confirmed by a peak in its gap-filled chromatogram, in at least "
                             "this many files (capped at the number of files; 1 = off; default 2)")
+        p.add_argument("--no-isomer-fill", action="store_true",
+                       help="gap-fill isomer groups like any other: by default two groups at the same m/z proven to be "
+                            "different compounds (picked as separate peaks in the same injections) gap-fill only from "
+                            "their own side of the midpoint between them (isomer_pairs.tsv lists the pairs)")
+        p.add_argument("--isomer-min-codetected", type=_positive(int), default=3,
+                       help="a proven isomer pair is picked apart in at least this many injections (default 3)")
+        p.add_argument("--isomer-min-share", type=float, default=0.5,
+                       help="... and in at least this share of the injections where the rarer of the two is picked "
+                            "(default 0.5)")
         p.add_argument("--holdout", action="store_true", help="held-out anchor check per file")
         p.add_argument("--mz-static", action="store_true",
                        help="one m/z offset per file, no jump handling (the default before 2026-10-31); by default the "

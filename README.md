@@ -134,6 +134,7 @@ reuse the compiled code.
 | `compound_pairs.tsv` | with `--compounds`: every co-eluting pair that was tested: shape correlation, intensity correlation, mass relation, joined or not |
 | `aligned_feature_area.tsv` | the same table with peak areas |
 | `filled_mask.tsv` | 1 where a value was gap-filled rather than detected |
+| `isomer_pairs.tsv` | features at the same m/z proven to be different compounds (isomers): both picked as separate peaks in the same files, in a consistent order; each gap-fills only from its own side of `boundary` (min), so a missing isomer is not filled with its neighbour's peak |
 | `features/<file>.tsv` | every feature of each file, with shape, S/N and quality descriptors |
 | `rt_correction/` | per-file RT warps and a summary of the correction |
 | `qc/` | RT drift curves, residual histograms, presence histogram |
@@ -281,6 +282,9 @@ to be used as they are. The options you are most likely to need:
 | `--ppm X` | 5 | m/z tolerance for aligning runs |
 | `--no-rt-correction` | off | group runs on their native RT |
 | `--no-gap-fill` | off | leave undetected cells empty (0) |
+| `--no-isomer-fill` | off | gap-fill isomer features like any other (by default each gap-fills only from its own side of the midpoint to its proven isomer; see `isomer_pairs.tsv`) |
+| `--isomer-min-codetected N` | 3 | an isomer pair is proven only if both are picked as separate peaks in at least N files ... |
+| `--isomer-min-share X` | 0.5 | ... and in at least this share of the files where the rarer of the two is picked; lower values also treat a compound the picker split into two peaks in a few files as two isomers, which cost dilution-series values on the PR002464 truth |
 | `--compounds` | off | group the features of one compound (adducts, fragments, isotopes; see Compound groups) |
 | `--no-keep-cache` | off | delete the point-cloud cache (`.cache/`, about the size of the mzML files) at the end; it is kept by default for Show MS1, Extract EIC and `peak3d align` |
 | `--compound-veto` | auto | intensity veto in compound grouping: `auto` rejects co-eluting pairs whose heights do not correlate across files (12+ files) or whose height ratio is unstable across files (3 to 11 files), `off` tests every co-eluting pair on peak shape, `ratio` uses the ratio rule at any study size; on the PR002464 spike truth `off` gains recall in one study but triples the unlabelled members per compound in all three |
