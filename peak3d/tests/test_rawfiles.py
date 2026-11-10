@@ -23,7 +23,8 @@ from peak3d.synth import Peak, make_cloud, write_mzml
 ROOT = Path(__file__).resolve().parents[2]
 
 # stands in for ThermoRawFileParser: takes its -option=value arguments, "converts" a .raw file holding mzML text by
-# copying it, logs each conversion, fails on a file starting with FAIL as the real one does (message, exit 1)
+# copying it, logs each conversion (one file per call: appends from parallel calls to one file can collide on Windows),
+# fails on a file starting with FAIL as the real one does (message, exit 1)
 FAKE = r'''
 import os, pathlib, shutil, sys
 if "--version" in sys.argv:
@@ -33,8 +34,9 @@ opts = dict(a.split("=", 1) for a in sys.argv[1:] if a.startswith("-") and "=" i
 raw, out = pathlib.Path(opts["-i"]), pathlib.Path(opts["-o"])
 assert opts["-f"] == "2" and out.is_dir(), sys.argv
 if os.environ.get("FAKE_TRFP_LOG"):
-    with open(os.environ["FAKE_TRFP_LOG"], "a") as fh:
-        fh.write(raw.name + "\n")
+    log = pathlib.Path(os.environ["FAKE_TRFP_LOG"])
+    log.mkdir(exist_ok=True)
+    (log / f"{raw.name}__{os.getpid()}_{len(list(log.iterdir()))}").touch()
 if raw.read_bytes().startswith(b"FAIL"):
     print("2026-11-09 ERROR Cannot read " + raw.name + ": not a RAW file")
     sys.exit(1)
@@ -65,11 +67,10 @@ def _folder(d: Path, raw=("S0", "S1"), mzml=("S2",)) -> Path:
 def fake_trfp(tmp_path, monkeypatch):
     script = tmp_path / "fake_trfp.py"
     script.write_text(FAKE)
-    log = tmp_path / "trfp_calls.txt"
+    log = tmp_path / "trfp_calls"
     monkeypatch.setenv("PEAK3D_TRFP", f"{sys.executable} {script}")
     monkeypatch.setenv("FAKE_TRFP_LOG", str(log))
-    calls = lambda: log.read_text().split() if log.exists() else []
-    return calls
+    return lambda: sorted(p.name.split("__")[0] for p in log.iterdir()) if log.exists() else []
 
 
 def _quiet(msg):
