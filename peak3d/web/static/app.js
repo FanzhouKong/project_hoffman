@@ -206,9 +206,9 @@
 
   // ---------------------------------------------------------------- run page
   const INTRO = {
-    peak3d: "Choose a folder of centroided .mzML files. Mosa picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library.",
-    asari: "Choose a folder of centroided .mzML files. asari detects and aligns the features with its own defaults; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
-    masscube: "Choose a folder of centroided .mzML files. MassCube runs its default untargeted workflow; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
+    peak3d: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). Mosa picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library.",
+    asari: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). asari detects and aligns the features with its own defaults; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
+    masscube: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). MassCube runs its default untargeted workflow; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
   };
   function runPage() {
     setTitle("New run");
@@ -237,18 +237,19 @@
     const sumIn = h("dd"), sumOut = h("dd", { style: { fontFamily: "var(--mono)", fontSize: "12px" } }), sumCores = h("dd");
     const refresh = () => {
       cmd.textContent = argvPreview();
-      const n = S.inputInfo && S.inputInfo.n_mzml;
-      sumIn.textContent = n ? `${int(n)} mzML file${n > 1 ? "s" : ""}` : "No folder chosen";
+      const n = S.inputInfo && S.inputInfo.n_inputs;
+      sumIn.textContent = n ? filesText(S.inputInfo) : "No folder chosen";
       sumIn.style.color = n ? "" : "var(--ink-3)";
+      const needsReader = !!(n && S.inputInfo.n_raw_pending && !S.info.raw_converter);
       sumOut.textContent = S.output ? basename(S.output) : "–";
       sumOut.title = S.output || "";
       sumCores.textContent = S.form.cores != null ? String(S.form.cores) : "–";
-      const bad = !n || !S.output || !kst.available || schemaOf(S.kernel).some((f) => S.formErrors[f.dest]);
+      const bad = !n || needsReader || !S.output || !kst.available || schemaOf(S.kernel).some((f) => S.formErrors[f.dest]);
       runBtn.disabled = bad;
     };
 
-    const inField = textField("mzML folder", S.input, {
-      lead: "folder", help: "The folder that holds your .mzML files",
+    const inField = textField("Data folder", S.input, {
+      lead: "folder", help: "The folder that holds your .mzML or Thermo .raw files",
       trail: h("button.icon-btn.state", { type: "button", title: "Browse", "aria-label": "Browse for the input folder", onclick: () => browse("input", S.input, (p) => { inField.input.value = p; setInput(p); }) }, icon("folder_open")),
       onchange: (v) => setInput(v.trim()),
     });
@@ -263,20 +264,22 @@
       S.input = p;
       P3.storeSet("peak3d-last-input", p);
       const my = ++seq;
-      if (!p) { S.inputInfo = null; inField.setError(null); refresh(); return; }
+      if (!p) { S.inputInfo = null; inField.setError(null); rawBox.replaceChildren(); refresh(); return; }
       try {
         const info = await api(`/api/ls?path=${enc(p)}`);
         if (my !== seq) return;
         S.inputInfo = info;
-        if (!info.n_mzml) inField.setError("No .mzML files in this folder");
+        rawBox.replaceChildren(...rawReaderNote(info));
+        if (!info.n_inputs) inField.setError("No .mzML or Thermo .raw files in this folder");
         else {
           inField.setError(null);
-          inField.setHelp(`${int(info.n_mzml)} mzML file${info.n_mzml > 1 ? "s" : ""}: ${info.mzml.slice(0, 3).join(", ")}${info.n_mzml > 3 ? ", …" : ""}`);
+          inField.setHelp(`${filesText(info)}: ${info.inputs.slice(0, 3).join(", ")}${info.n_inputs > 3 ? ", …" : ""}`);
           if (!S.output || S.autoOutput === S.output) { S.output = S.autoOutput = join(info.path, "mosa_" + stamp()); outField.input.value = S.output; }
         }
       } catch (e) {
         if (my !== seq) return;
         S.inputInfo = null;
+        rawBox.replaceChildren();
         inField.setError(e.message);
       }
       refresh();
@@ -302,7 +305,8 @@
         exBtn.replaceChildren(icon("science"), "Create example data");
       }
     });
-    main.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Data")), h("div.form", inField.el, outField.el),
+    const rawBox = h("div");
+    main.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Data")), h("div.form", inField.el, outField.el), rawBox,
       h("div.row", { style: { marginTop: "16px", gap: "12px", alignItems: "center" } }, exBtn,
         h("span.body-small.muted", { style: { flex: "1", minWidth: "200px" } }, "No mzML files at hand? This writes three small synthetic LC-MS/MS runs, with MS2 spectra and a spectral library to search them, into a peak3d_example folder."))));
 
@@ -354,10 +358,12 @@
 
   // ---------------------------------------------------------------- runs
   const STEPS = [["compile", "Compile"], ["pick", "Pick files"], ["align", "Align"], ["group", "Group"], ["fill", "Gap-fill"], ["report", "Report"]];
-  const stepsOf = (k) => (!k || k === "peak3d" ? STEPS : [["pick", "Run " + KNAME[k]], ["group", "Convert"], ["fill", "Chromatograms & MS2"], ["report", "Report"]]);
+  const stepsOf = (k, nConvert) => [...(nConvert ? [["convert", "Convert .raw"]] : []),
+    ...(!k || k === "peak3d" ? STEPS : [["pick", "Run " + KNAME[k]], ["group", "Convert"], ["fill", "Chromatograms & MS2"], ["report", "Report"]])];
   const EXTERNAL_TEXT = { compile: () => "Starting…", pick: (k) => `Running ${KNAME[k]} (its own progress is in the log)…`, group: () => "Converting the feature table…",
     fill: () => "Reading the files for chromatograms and MS2…" };
   const STAGE_TEXT = {
+    convert: "Converting the Thermo .raw files to mzML (once: later runs on this folder reuse them)…",
     compile: "Compiling the picker (the first run on a machine takes about a minute)…", pick: "Picking features in each file…",
     align: "Aligning retention times…", group: "Grouping features across files…", fill: "Filling gaps from the chromatograms…",
     write: "Writing tables and QC figures…", report: "Writing the report…", done: "Finished", failed: "Failed", cancelled: "Cancelled",
@@ -372,7 +378,7 @@
   function runCard(R) {
     const s = R.status;
     const running = s.state === "running";
-    const steps0 = stepsOf(s.kernel);
+    const steps0 = stepsOf(s.kernel, s.n_convert);
     const stIdx = Math.max(0, steps0.findIndex(([k]) => k === (s.stage === "write" ? "fill" : s.stage)));
     const head = h("div.row", { style: { alignItems: "flex-start" } },
       h("div", { style: { flex: 1, minWidth: 0 } }, h("div.title-small", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
@@ -383,7 +389,8 @@
     const steps = h("div.steps", steps0.map(([k, label], i) => {
       const done = s.state === "done" || i < stIdx, active = running && i === stIdx;
       return h("span.step" + (done ? ".done" : active ? ".active" : ""), done ? icon("check") : h("span.dot"),
-        k === "pick" && s.picked != null && running && i === stIdx ? `${label} ${s.picked}/${s.n_files}` : label);
+        k === "pick" && s.picked != null && running && i === stIdx ? `${label} ${s.picked}/${s.n_files}` :
+          k === "convert" && running && i === stIdx ? `${label} ${s.converted || 0}/${s.n_convert}` : label);
     }));
     const ext = s.kernel && s.kernel !== "peak3d" && EXTERNAL_TEXT[s.stage];
     const text = h("p.body-small.muted", s.state === "done" ? `Finished in ${duration(s.elapsed)}` : ext ? ext(s.kernel) : STAGE_TEXT[s.stage] || s.stage);
@@ -533,6 +540,61 @@
     }
   }
 
+  // ---------------------------------------------------------------- Thermo .raw files
+  // "3 Thermo .raw + 2 mzML files": a folder listing's inputs (/api/ls)
+  function filesText(r) {
+    const n = r.n_inputs || 0, raw = r.n_raw || 0, mz = n - raw;
+    if (!raw) return `${int(n)} mzML file${n > 1 ? "s" : ""}`;
+    return `${int(raw)} Thermo .raw${mz ? ` + ${int(mz)} mzML` : ""} file${n > 1 ? "s" : ""}`;
+  }
+  // under the Data fields: what happens to the folder's .raw files, or the converter to install first
+  function rawReaderNote(info) {
+    if (!info || !info.n_raw) return [];
+    const ad = (S.info.addons || {}).thermo;
+    const pend = info.n_raw_pending || 0;
+    if (S.info.raw_converter) {
+      const how = S.info.raw_converter === "add-on" && ad ? `${ad.tool} ${ad.installed_version || ad.version}` : `ThermoRawFileParser (${S.info.raw_converter})`;
+      const what = pend ? `${int(pend)} .raw file${pend > 1 ? "s are" : " is"} converted to mzML with ${how} before the run, into mzml_converted/ in this folder (or in the output folder when this one is not writable); later runs reuse them.`
+        : `The .raw files were converted before (mzml_converted/ in this folder); the run reuses those mzML files.`;
+      const out = [h("p.body-small.muted", { style: { margin: "12px 0 0" } }, what)];
+      if (ad && ad.installed && ad.notice) out.push(h("p.body-small.muted", { style: { margin: "4px 0 0" } }, ad.notice));
+      return out;
+    }
+    if (!pend) return [h("p.body-small.muted", { style: { margin: "12px 0 0" } }, "The .raw files were converted before (mzml_converted/ in this folder); the run reuses those mzML files.")];
+    if (!ad || !ad.supported) return [h("div.banner.error", { style: { marginTop: "12px" } }, icon("error"),
+      h("div.body-medium", "This folder has Thermo .raw files, and the Thermo .raw reader (ThermoRawFileParser) has no build for this computer. Convert them to mzML elsewhere (ThermoRawFileParser or ProteoWizard msconvert), or set PEAK3D_TRFP to a ThermoRawFileParser command.")) ];
+    return [thermoCard(ad, pend)];
+  }
+  function thermoCard(ad, pend) {
+    const job = ad.job;
+    const running = job && job.state === "running";
+    const btn = h("button.btn.filled.state", { type: "button", disabled: running || null }, icon("download"), "Download and install the Thermo .raw reader");
+    const log = h("pre.log", { style: { display: job ? "" : "none" } }, job ? job.log.slice(-10).join("\n") : "");
+    const status = h("p.body-medium", { style: { margin: "10px 0 0" } });
+    if (running) status.replaceChildren(P3.spinner(16), ` Installing ${ad.tool} (started ${job.started}) …`);
+    else if (job && job.state === "failed") status.replaceChildren(h("span", { style: { color: "var(--danger)" } }, `Installation failed: ${job.error}`));
+    btn.addEventListener("click", async () => {
+      const ok = await confirmDialog(`Install ${ad.tool} ${ad.version}?`,
+        `${ad.tool} (CompOmics, Apache 2.0) reads .raw files with Thermo's RawFileReader libraries. By installing it you accept Thermo's RawFileReader licence (${ad.licence_url}): ` +
+        `free to use, not to be redistributed or used commercially. Mosa downloads the self-contained build for this computer from the ${ad.tool} release on GitHub ` +
+        `(about ${ad.size_mb} MB on disk, nothing installed system-wide) into ${ad.location}; your data stay on this computer.`,
+        "Accept and install");
+      if (!ok) return;
+      try {
+        await post("/api/addons/install", { name: ad.name, accept_licence: true });
+        await pollAddon(ad.name);
+      } catch (e) { snack(e.message); }
+    });
+    if (running) S.addonTimer = setTimeout(() => pollAddon(ad.name), 1500);
+    return h("div.banner.info.addon-card", { style: { marginTop: "12px", display: "block" } },
+      h("p.body-medium", { style: { margin: "0 0 10px" } }, `This folder has ${int(pend)} Thermo .raw file${pend > 1 ? "s" : ""} to convert to mzML first. ` +
+        `The converter, ${ad.tool}, is not part of the app download (Thermo's licence does not let us redistribute its libraries); Mosa can download it for you once.`),
+      h("div.row.wrap", { style: { gap: "12px", alignItems: "center" } }, btn,
+        h("a.body-small", { href: ad.licence_url, target: "_blank", rel: "noopener" }, "Thermo licence"),
+        h("a.body-small", { href: ad.homepage, target: "_blank", rel: "noopener" }, `About ${ad.tool}`)),
+      status, log);
+  }
+
   // ---------------------------------------------------------------- optional feature finders (MassCube)
   // not bundled (non-commercial licence, its own numpy); the app installs it on request into a private Python
   function addonCard(ad) {
@@ -568,7 +630,7 @@
     clearTimeout(S.addonTimer);
     S.info = await api("/api/info");
     const ad = S.info.addons[name];
-    if (S.page !== "run" || S.kernel !== name) return;
+    if (S.page !== "run" || (name !== "thermo" && S.kernel !== name)) return;
     if (ad.job && ad.job.state === "done") snack(`${ad.label} ${ad.version} is installed`);
     go("run");
   }
@@ -584,7 +646,7 @@
   // ---------------------------------------------------------------- dialogs
   function browse(mode, start, done) {
     const dlg = document.getElementById("browse");
-    const titles = { input: "Choose the mzML folder", output: "Choose where to write results", results: "Choose a results folder", msp: "Choose a spectral library (.msp or MassCube .pkl)" };
+    const titles = { input: "Choose the data folder (.mzML or Thermo .raw)", output: "Choose where to write results", results: "Choose a results folder", msp: "Choose a spectral library (.msp or MassCube .pkl)" };
     let cur = null, file = null;
     const pathField = textField("Folder", start || "", { lead: "folder_open", onchange: (v) => load(v.trim()) });
     pathField.input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); load(pathField.input.value.trim()); } });
@@ -617,7 +679,7 @@
         if (!r.dirs.length && !(mode === "msp" && (r.files || []).length)) items.push(h("div.list-item", h("div.text.muted", mode === "msp" ? "No subfolders or library files" : "No subfolders")));
         list.replaceChildren(...items);
         if (mode === "msp") { ok.disabled = true; status.textContent = (r.files || []).length ? `${int(r.files.length)} library file${r.files.length > 1 ? "s" : ""} here: pick one` : "No .msp or .pkl files here"; }
-        else if (mode === "input") { ok.disabled = !r.n_mzml; status.textContent = r.n_mzml ? `${int(r.n_mzml)} mzML files here` : "No mzML files here"; }
+        else if (mode === "input") { ok.disabled = !r.n_inputs; status.textContent = r.n_inputs ? `${filesText(r)} here` : "No .mzML or Thermo .raw files here"; }
         else if (mode === "results") { ok.disabled = !r.is_output; status.textContent = r.is_output ? "Mosa results here" : "No Mosa results here"; }
         else { ok.disabled = !r.path || r.writable === false; status.textContent = r.writable === false ? "Not writable" : "Results go in a new subfolder here"; }
       } catch (e) {

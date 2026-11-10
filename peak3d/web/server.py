@@ -42,7 +42,7 @@ COOKIE = "peak3d_token"
 # how to start `peak3d ...`: inside the standalone app the program itself is the command line
 PEAK3D_CMD = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "peak3d"]
 # set: picker overrides stay on the command line, so a GUI run is always the variant the bar shows
-SKIP_OPTIONS = {"help", "input", "output", "cache_dir", "set", "kernel"}
+SKIP_OPTIONS = {"help", "input", "output", "cache_dir", "set", "kernel", "mzml_dir"}
 KERNELS = ("peak3d", "asari", "masscube")      # peak3d runs `process`; the others `external --kernel NAME`
 VARIANT_NOTE = " ".join(f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in VARIANT_SETS.items())
 # output files the viewer may download (by name, from a peak3d output folder)
@@ -54,7 +54,8 @@ REFRESH_DELAY = 3.0     # s after the last annotation before report.html is rewr
 RT_COLS = ("rt", "rt_min", "rt_max", "rt_sd")    # minutes in the tables; the GUI shows and exports seconds
 
 # stage markers in the pipeline log -> (stage, progress fraction when reached)
-STAGES = [("JIT warm-up", "pick", 0.05), ("picked ", "align", 0.80), ("alignment:", "group", 0.84),
+STAGES = [("Thermo .raw file(s) to mzML", "convert", 0.01), ("raw files converted:", "compile", 0.02),
+          ("JIT warm-up", "pick", 0.05), ("picked ", "align", 0.80), ("alignment:", "group", 0.84),
           ("grouped ", "fill", 0.88), ("gap-filled", "write", 0.93), ("presence rule", "write", 0.95),
           ("report", "report", 0.97),
           # external kernels (peak3d external): the tool's own run, then conversion, chromatograms and MS2
@@ -142,11 +143,20 @@ def validate_argv(argv: list[str]) -> str | None:
 
 
 # ------------------------------------------------------------------ runs ----
-def _mzml_files(folder: Path) -> list[Path]:
+def _raw_converter() -> str | None:
+    """where the Thermo .raw converter comes from ("add-on", "PATH", "PEAK3D_TRFP"), None when there is none"""
     try:
-        return sorted(p for p in folder.iterdir() if p.suffix.lower() == ".mzml" and p.is_file())
-    except OSError:
-        return []
+        from ..rawfiles import converter
+        c = converter()
+    except Exception:
+        return None
+    return c["source"] if c else None
+
+
+def _input_files(folder: Path) -> list[Path]:
+    """the run's inputs in a folder: .mzML and Thermo .raw files (rawfiles.input_files)"""
+    from ..rawfiles import input_files
+    return input_files(folder)
 
 
 def command_args(kernel: str) -> list[str]:
@@ -155,12 +165,14 @@ def command_args(kernel: str) -> list[str]:
 
 
 class Run:
-    def __init__(self, rid: str, input_dir: Path, output: Path, argv: list[str], n_files: int, kernel: str = "peak3d"):
+    def __init__(self, rid: str, input_dir: Path, output: Path, argv: list[str], n_files: int, kernel: str = "peak3d",
+                 n_convert: int = 0):
         self.id, self.input, self.output, self.argv, self.n_files = rid, input_dir, output, argv, n_files
         self.kernel = kernel
+        self.n_convert, self.converted = n_convert, 0        # Thermo .raw files to convert first, and done so far
         self.cmd = [*PEAK3D_CMD, *command_args(kernel), "--input", str(input_dir), "--output", str(output), *argv]
         self.lines: list[str] = []
-        self.state, self.stage, self.base = "running", "compile", 0.0
+        self.state, self.stage, self.base = "running", "convert" if n_convert else "compile", 0.0
         self.t0, self.t1, self.returncode, self.proc = time.time(), None, None, None
         self.cancelled = False
 
@@ -172,13 +184,18 @@ class Run:
                                      encoding="utf-8", errors="replace", bufsize=1, env=env, **kw)
         threading.Thread(target=self._follow, daemon=True).start()
 
+    def _take(self, line: str) -> None:
+        """one line of the run's output: kept for the log, and the stage it marks"""
+        self.lines.append(line)
+        if line.startswith("[peak3d] converted "):
+            self.converted += 1
+        for marker, stage, frac in STAGES:
+            if marker in line and line.startswith("[peak3d]") and frac > self.base:
+                self.stage, self.base = stage, frac
+
     def _follow(self):
         for line in self.proc.stdout:
-            line = line.rstrip("\n")
-            self.lines.append(line)
-            for marker, stage, frac in STAGES:
-                if marker in line and line.startswith("[peak3d]") and frac > self.base:
-                    self.stage, self.base = stage, frac
+            self._take(line.rstrip("\n"))
         self.returncode = self.proc.wait()
         self.t1 = time.time()
         try:
@@ -205,6 +222,10 @@ class Run:
     def progress(self) -> float:
         if self.state == "done":
             return 1.0
+        # with .raw files to convert, conversion takes the first quarter of the bar and picking starts after it
+        lo = 0.25 if self.n_convert else 0.05
+        if self.stage == "convert" and self.n_convert:
+            return 0.01 + 0.24 * min(self.converted, self.n_convert) / self.n_convert
         if self.stage == "pick" and self.n_files and self.kernel == "peak3d":
             fd = self.output / "features"
             try:
@@ -213,8 +234,8 @@ class Run:
             except OSError:
                 k = 0
             self.picked = min(k, self.n_files)
-            return 0.05 + 0.75 * self.picked / self.n_files
-        return self.base
+            return lo + (0.80 - lo) * self.picked / self.n_files
+        return max(self.base, lo) if self.n_convert and self.stage in ("compile", "pick") else self.base
 
     def status(self, since: int = 0) -> dict:
         p = self.progress()
@@ -222,6 +243,7 @@ class Run:
                 "command": " ".join(["peak3d", *command_args(self.kernel), "--input", _q(self.input), "--output",
                                      _q(self.output), *map(_q, self.argv)]),
                 "state": self.state, "stage": self.stage, "progress": round(p, 4), "n_files": self.n_files,
+                "n_convert": self.n_convert, "converted": self.converted,
                 "picked": getattr(self, "picked", None), "started": self.t0,
                 "elapsed": (self.t1 or time.time()) - self.t0, "returncode": self.returncode,
                 "log": self.lines[since:], "log_len": len(self.lines)}
@@ -636,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
         except ImportError:
             addons = {}
         return {"version": __version__, "variant": VARIANT, "variant_sets": VARIANT_SETS, "kernels": kernels,
-                "methods": METHODS, "addons": addons,
+                "methods": METHODS, "addons": addons, "raw_converter": _raw_converter(),
                 "platform": platform.system(), "python": platform.python_version(),
                 "cpu_count": os.cpu_count() or 1, "root": str(a.root) if a.root else None,
                 "start": str(a.root or Path.home()), "sep": os.sep}
@@ -658,7 +680,8 @@ class Handler(BaseHTTPRequestHandler):
             if job and job["state"] == "running":
                 return self._error(409, f"{ADDONS[name]['label']} is being installed")
             if action == "remove":
-                if any(r.state == "running" and r.kernel == name for r in self.app.runs.values()):
+                if any(r.state == "running" and (r.kernel == name or (name == "thermo" and r.n_convert))
+                       for r in self.app.runs.values()):
                     return self._error(409, f"a {ADDONS[name]['label']} run is in progress")
             elif body.get("accept_licence") is not True:
                 return self._error(400, f"{ADDONS[name]['label']} is licensed {ADDONS[name]['licence']}: accept it to install")
@@ -687,7 +710,8 @@ class Handler(BaseHTTPRequestHandler):
         a = self.app
         if os.name == "nt" and p == "::drives" and a.root is None:
             drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-            return {"path": "", "parent": None, "dirs": drives, "n_mzml": 0, "mzml": [], "is_output": False, "files": []}
+            return {"path": "", "parent": None, "dirs": drives, "n_mzml": 0, "mzml": [], "n_raw": 0, "n_raw_pending": 0,
+                    "n_inputs": 0, "inputs": [], "is_output": False, "files": []}
         path = a.resolve(p)
         if not path.is_dir():
             raise FileNotFoundError(f"not a folder: {path}")
@@ -705,7 +729,11 @@ class Handler(BaseHTTPRequestHandler):
             pass
         dirs.sort(key=str.lower)
         files.sort(key=str.lower)
-        mz = _mzml_files(path)
+        from ..rawfiles import CONVERTED, is_raw, reusable
+        inputs = _input_files(path)
+        mz = [f for f in inputs if not is_raw(f)]
+        raw = [f for f in inputs if is_raw(f)]
+        pending = sum(reusable(f, path / CONVERTED) is None for f in raw)       # not yet converted next to them
         if a.root is not None and path == a.root:
             parent = None
         elif path.parent == path:
@@ -713,6 +741,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             parent = str(path.parent)
         return {"path": str(path), "parent": parent, "dirs": dirs, "n_mzml": len(mz), "mzml": [f.name for f in mz[:8]],
+                "n_raw": len(raw), "n_raw_pending": int(pending), "n_inputs": len(inputs),
+                "inputs": [f.name for f in inputs[:8]],
                 "is_output": (path / "aligned_feature_table.tsv").exists(), "has_report": (path / "report.html").exists(),
                 "writable": os.access(path, os.W_OK), "files": files[:2000]}
 
@@ -919,7 +949,7 @@ class Handler(BaseHTTPRequestHandler):
             data = write_demo(out)
         except OSError as e:
             return self._error(403, f"cannot write example data in {out.parent}: {e.strerror or e}")
-        return self._json({"input": str(data), "output": str(out / "peak3d_out"), "n_mzml": len(_mzml_files(data)),
+        return self._json({"input": str(data), "output": str(out / "peak3d_out"), "n_mzml": len(_input_files(data)),
                            "library": str(out / LIBRARY)})
 
     def _start(self, body):
@@ -931,13 +961,17 @@ class Handler(BaseHTTPRequestHandler):
             st = self._info()["kernels"].get(kernel) or {}
             if not st.get("available"):
                 return self._error(400, f"{kernel} is not available here. {st.get('note') or ''}".strip())
+        from ..rawfiles import INSTALL_HINT, converter, no_inputs_message, pending
         inp = a.resolve(body.get("input") or "")
-        files = _mzml_files(inp)
+        files = _input_files(inp)
         if not files:
-            return self._error(400, f"no .mzML files in {inp}")
+            return self._error(400, no_inputs_message(inp))
         if not body.get("output"):
             return self._error(400, "choose an output folder")
         out = a.resolve(body["output"])
+        n_convert = len(pending(files, out))
+        if n_convert and converter() is None:
+            return self._error(400, f"{n_convert} Thermo .raw file(s) need converting to mzML first: {INSTALL_HINT}")
         if any(r.state == "running" and r.output == out for r in a.runs.values()):
             return self._error(409, "a run is already writing to this folder")
         if (out / "aligned_feature_table.tsv").exists() and not body.get("overwrite"):
@@ -948,7 +982,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, msg)
         with a.lock:
             rid = f"r{len(a.runs) + 1}"
-            run = Run(rid, inp, out, argv, len(files), kernel)
+            run = Run(rid, inp, out, argv, len(files), kernel, n_convert)
             a.runs[rid] = run
         run.start()
         self._json(run.status(), 201)

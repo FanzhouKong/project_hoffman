@@ -120,8 +120,11 @@ def build_parser():
                             "from the feature m/z alone; off = raw spectra only")
 
     p = sub.add_parser("process", help="pick + align + group + gap-fill")
-    p.add_argument("--input", type=Path, required=True, help="directory of .mzML files")
+    p.add_argument("--input", type=Path, required=True, help="directory of .mzML or Thermo .raw files")
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--mzml-dir", type=Path, default=None,
+                   help="where Thermo .raw files are converted to mzML (default: mzml_converted/ next to them, or in "
+                        "--output when that folder is not writable); a file converted there earlier is reused")
     p.add_argument("--cache-dir", type=Path, default=None, help="where per-file point clouds are cached (default <output>/.cache)")
     p.add_argument("--no-keep-cache", action="store_true", help=NO_KEEP_CACHE)
     p.add_argument("--keep-cache", action="store_true", help=argparse.SUPPRESS)       # the default since 1.1.1
@@ -131,8 +134,11 @@ def build_parser():
     identify_opts(p)
 
     p = sub.add_parser("pick", help="per-file feature tables only")
-    p.add_argument("files", nargs="+", type=Path)
+    p.add_argument("files", nargs="+", type=Path, help=".mzML or Thermo .raw files")
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--mzml-dir", type=Path, default=None,
+                   help="where Thermo .raw files are converted to mzML (default: mzml_converted/ next to them, or in "
+                        "--output when that folder is not writable); a file converted there earlier is reused")
     p.add_argument("--cache-dir", type=Path, default=None)
     common(p)
 
@@ -151,8 +157,11 @@ def build_parser():
 
     p = sub.add_parser("external", help="run asari or MassCube instead of the peak3d picker (same output layout)")
     p.add_argument("--kernel", choices=["asari", "masscube"], required=True)
-    p.add_argument("--input", type=Path, required=True, help="directory of .mzML files")
+    p.add_argument("--input", type=Path, required=True, help="directory of .mzML or Thermo .raw files")
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--mzml-dir", type=Path, default=None,
+                   help="where Thermo .raw files are converted to mzML (default: mzml_converted/ next to them, or in "
+                        "--output when that folder is not writable); a file converted there earlier is reused")
     p.add_argument("--cores", type=_positive(int), default=1, help="worker processes (default 1)")
     p.add_argument("--polarity", choices=["pos", "neg"], default=None,
                    help="ion mode (default: read from the first file)")
@@ -160,6 +169,14 @@ def build_parser():
     p.add_argument("--keep-cache", action="store_true", help=argparse.SUPPRESS)       # the default since 1.1.1
     p.add_argument("--no-report", action="store_true", help="do not write report.html")
     identify_opts(p)
+
+    p = sub.add_parser("convert", help="convert Thermo .raw files to mzML (as process does first) and check that "
+                                        "peak3d reads them")
+    p.add_argument("inputs", nargs="+", type=Path, help=".raw files, or folders of them")
+    p.add_argument("--mzml-dir", type=Path, default=None,
+                   help="where the mzML files go (default: mzml_converted/ next to the .raw files, or in the current "
+                        "folder when that one is not writable); a file converted there earlier is reused")
+    p.add_argument("--cores", type=_positive(int), default=1, help="conversions at a time (default 1)")
 
     p = sub.add_parser("demo", help="process three synthetic LC-MS/MS runs and search a demo library (checks an installation)")
     p.add_argument("--output", type=Path, required=True, help="writes OUT/demo_mzml/, OUT/demo_library.msp and OUT/peak3d_out/")
@@ -174,11 +191,13 @@ def build_parser():
                    help="chromatogram values to store (default 3,000,000; more = larger file, more features)")
     p.add_argument("--eic-files", type=_positive(int), default=None, help="files per chromatogram plot (default 16)")
 
-    p = sub.add_parser("addon", help="install or remove an optional feature finder (MassCube) in a private Python")
+    p = sub.add_parser("addon", help="install or remove an optional tool: MassCube (in a private Python) or the "
+                                      "Thermo .raw reader (ThermoRawFileParser)")
     p.add_argument("action", choices=["install", "remove", "status"])
-    p.add_argument("name", choices=["masscube"])
+    p.add_argument("name", choices=["masscube", "thermo"])
     p.add_argument("--accept-licence", action="store_true",
-                   help="accept the tool's licence (MassCube: CC BY-NC 4.0, non-commercial use only); install needs it")
+                   help="accept the tool's licence (MassCube: CC BY-NC 4.0, non-commercial use only; thermo: Thermo's "
+                        "RawFileReader licence, no redistribution); install needs it")
 
     p = sub.add_parser("gui", help="local web app: run peak3d and browse results in the browser")
     p.add_argument("--host", default="127.0.0.1", help="interface to listen on (default 127.0.0.1: this computer only)")
@@ -203,6 +222,54 @@ def _utf8_when_piped() -> None:
                 f.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, OSError, ValueError):
             pass
+
+
+def _converted(files, args):
+    """the files with Thermo .raw files converted to mzML (rawfiles.prepare), or exit with its message"""
+    from .rawfiles import prepare
+    try:
+        return prepare(files, args.output, getattr(args, "cores", 1), args.mzml_dir)
+    except RuntimeError as e:
+        sys.exit(str(e))
+
+
+def _convert_command(args):
+    """`peak3d convert`: the .raw files given (or in the folders given) to mzML, then each mzML read once as a run
+    reads it, with a one-line summary per file"""
+    from .io import load_cloud
+    from .ms2 import Collector
+    from .rawfiles import is_raw, prepare
+    raws = []
+    for p in args.inputs:
+        if p.is_dir():
+            raws += sorted(f for f in p.iterdir() if is_raw(f) and f.is_file())
+        elif is_raw(p) and p.is_file():
+            raws.append(p)
+        else:
+            sys.exit(f"not a Thermo .raw file or a folder: {p}")
+    if not raws:
+        sys.exit("no Thermo .raw files given")
+    args.output = Path.cwd()
+    files, _ = _converted(raws, args)
+    bad = 0
+    for f in files:
+        spectra = Collector()
+        try:
+            try:
+                cloud = load_cloud(f, None, spectra)
+            except ValueError as e:
+                if "both polarities" not in str(e):
+                    raise
+                spectra = Collector()
+                cloud = load_cloud(f, "pos", spectra)
+                print(f"[peak3d] {f.name}: both polarities; positive mode shown", flush=True)
+            print(f"[peak3d] {f}: {cloud.n_scans} MS1 scans, {cloud.n_points} centroids, {len(spectra)} MS2 spectra"
+                  f"{', ' + cloud.polarity if cloud.polarity else ''}", flush=True)
+        except Exception as e:
+            bad += 1
+            print(f"[peak3d] {f}: not readable: {e}", flush=True)
+    if bad:
+        sys.exit(f"{bad} of {len(files)} converted files could not be read")
 
 
 def main(argv=None):
@@ -239,6 +306,8 @@ def main(argv=None):
             print("[peak3d] report.html updated", flush=True)
         print(f"[peak3d] done in {time.perf_counter() - t0:.1f} s", flush=True)
         return
+    if args.cmd == "convert":
+        return _convert_command(args)
     if args.cmd == "addon":
         from . import addons
         if args.action == "status":
@@ -264,25 +333,23 @@ def main(argv=None):
         args = parser.parse_args(["process", "--input", str(data), "--output", str(args.output / "peak3d_out"),
                                   "--cores", str(args.cores), "--compounds",       # the demo data are made to show them
                                   "--library", str(args.output / LIBRARY)])
-    if args.cmd == "process":
+    if args.cmd in ("process", "external"):
+        from .rawfiles import input_files, no_inputs_message
         if not args.input.is_dir():
-            sys.exit(f"--input must be a directory of .mzML files: {args.input}")
-        files = sorted(p for p in args.input.iterdir() if p.suffix.lower() == ".mzml")
+            sys.exit(f"--input must be a directory of .mzML or Thermo .raw files: {args.input}")
+        files = input_files(args.input)
         if not files:
-            sys.exit(f"no .mzML files in {args.input}")
-        pipeline.process(files, args)
-        print(f"[peak3d] {len(files)} files -> {args.output / 'aligned_feature_table.tsv'}", flush=True)
-    elif args.cmd == "external":
-        from .external import run_external
-        if not args.input.is_dir():
-            sys.exit(f"--input must be a directory of .mzML files: {args.input}")
-        files = sorted(p for p in args.input.iterdir() if p.suffix.lower() == ".mzml")
-        if not files:
-            sys.exit(f"no .mzML files in {args.input}")
-        run_external(files, args)
+            sys.exit(no_inputs_message(args.input))
+        files, raw = _converted(files, args)
+        if args.cmd == "process":
+            pipeline.process(files, args, raw_files=raw)
+        else:
+            from .external import run_external
+            run_external(files, args, raw_files=raw)
         print(f"[peak3d] {len(files)} files -> {args.output / 'aligned_feature_table.tsv'}", flush=True)
     elif args.cmd == "pick":
-        pipeline.pick_files(args.files, args.output, args)
+        files, _ = _converted(args.files, args)
+        pipeline.pick_files(files, args.output, args)
     elif args.cmd == "align":
         pipeline.align_existing(args)
     print(f"[peak3d] done in {time.perf_counter() - t0:.1f} s", flush=True)

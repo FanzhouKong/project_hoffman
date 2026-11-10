@@ -208,6 +208,31 @@ def run_asari_main(argv) -> None:
     main()
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    try:
+        dst.symlink_to(Path(src).resolve())
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _one_folder(files, output: Path) -> Path:
+    """a folder holding exactly these mzML files, for a tool that reads a whole folder (asari): their own folder
+    when it holds nothing else, else <output>/asari_input with links to them (files converted from .raw next to
+    mzML files, a folder of converted files with more in it)"""
+    files = [Path(f).resolve() for f in files]
+    parent = files[0].parent
+    if all(f.parent == parent for f in files):
+        present = {p.resolve() for p in parent.iterdir() if p.suffix.lower() == ".mzml" and p.is_file()}
+        if present == set(files):
+            return parent
+    folder = output / "asari_input"
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True)
+    for f in files:
+        _link_or_copy(f, folder / f.name)
+    return folder
+
+
 def _run_asari(py, input_dir: Path, output: Path, polarity: str, cores: int) -> Path:
     t0 = time.time()
     launcher = [*_self_command(), "_asari"] if py == SELF else [py, "-m", "asari.main"]
@@ -226,11 +251,7 @@ def _run_masscube(py, files, output: Path, cores: int) -> Path:
     shutil.rmtree(work, ignore_errors=True)          # MassCube reuses what it finds in its project folder
     (work / "data").mkdir(parents=True)
     for f in files:
-        dst = work / "data" / Path(f).name
-        try:
-            dst.symlink_to(Path(f).resolve())
-        except OSError:
-            shutil.copy2(f, dst)
+        _link_or_copy(Path(f), work / "data" / Path(f).name)
     if py == SELF:
         py = sys.executable
         if getattr(sys, "frozen", False):
@@ -263,7 +284,8 @@ def _read_one(job):
                 n_ms2=len(spectra), parse_s=round(time.perf_counter() - tic, 3))
 
 
-def finish(files, args, table: pd.DataFrame, kernel: str, version: str, stage: dict, polarity: str | None) -> None:
+def finish(files, args, table: pd.DataFrame, kernel: str, version: str, stage: dict, polarity: str | None,
+           raw_files: dict | None = None) -> None:
     """everything after the kernel: the aligned table, peak3d's own read of every file (chromatogram cache, MS2),
     MS2 mapping, identity search, params.json, report.html"""
     from .features import MZ_TEXT
@@ -301,14 +323,17 @@ def finish(files, args, table: pd.DataFrame, kernel: str, version: str, stage: d
     p = dict(kernel=kernel, kernel_label=k["label"], kernel_version=version, peak3d_version=__version__,
              command=" ".join(sys.argv), options=options, input_files=[str(f) for f in files], stage_times_s=stage,
              n_files=len(files), alignment=f"by {k['label']}", n_features_total=int(man["n_features"].sum()))
+    if raw_files:
+        p["raw_files"] = raw_files
     (output / "params.json").write_text(json.dumps(p, indent=1, default=str))
     _write_report(output, cache_dir, args)
     if getattr(args, "no_keep_cache", False):
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
-def run_external(files, args) -> None:
-    """``peak3d external``: run the kernel on --input, then finish() into --output"""
+def run_external(files, args, raw_files: dict | None = None) -> None:
+    """``peak3d external``: run the kernel on these mzML files (from --input; raw_files: {stem: .raw path} of the
+    ones converted from Thermo .raw files), then finish() into --output"""
     from .pipeline import check_library, log
     check_library(args)
     kernel = args.kernel
@@ -327,7 +352,7 @@ def run_external(files, args) -> None:
     log(f"kernel: running {k['label']} {st['version']} on {len(files)} files ({polarity} mode)")
     tic = time.perf_counter()
     if kernel == "asari":
-        src = _run_asari(st["python"], files[0].parent, output, polarity, args.cores)
+        src = _run_asari(st["python"], _one_folder(files, output), output, polarity, args.cores)
     else:
         src = _run_masscube(st["python"], files, output, args.cores)
     stage["kernel_s"] = round(time.perf_counter() - tic, 3)
@@ -335,4 +360,4 @@ def run_external(files, args) -> None:
     log(f"kernel: converting {k['label']} output ({src.relative_to(output) if output in src.parents else src})")
     table = convert_asari(src, stems) if kernel == "asari" else convert_masscube(src, stems)
     log(f"kernel: {len(table)} features")
-    finish(files, args, table, kernel, st["version"], stage, polarity)
+    finish(files, args, table, kernel, st["version"], stage, polarity, raw_files)

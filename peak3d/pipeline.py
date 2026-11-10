@@ -572,7 +572,9 @@ def _reidentify(output: Path, stage: dict, cores: int = 1) -> None:
     ms2_and_identify(output, args, stage)
 
 
-def process(files, args):
+def process(files, args, raw_files: dict | None = None):
+    """the full run on these mzML files; raw_files: {stem: .raw path} of the ones converted from Thermo .raw files
+    (recorded in params.json)"""
     check_library(args)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -590,8 +592,10 @@ def process(files, args):
         log(f"qc plots skipped: {e!r}")
     stage["qc_s"] = round(time.perf_counter() - tic, 3)
     ms2_and_identify(output, args, stage)
-    _write_params(output, args, res, stage, files, extra=dict(n_files=len(files),
-                                                                n_features_total=int(sum(r["n_features"] for r in results))))
+    extra = dict(n_files=len(files), n_features_total=int(sum(r["n_features"] for r in results)))
+    if raw_files:
+        extra["raw_files"] = raw_files
+    _write_params(output, args, res, stage, files, extra=extra)
     _write_report(output, cache_dir, args)
     if getattr(args, "no_keep_cache", False) and cache_dir == output / ".cache":
         shutil.rmtree(cache_dir, ignore_errors=True)

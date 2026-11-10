@@ -37,6 +37,15 @@ press **Create example data** to try it with three small synthetic runs, then **
 results**. The first run compiles Mosa (about a minute); later runs start at once. Your data stay on your
 computer.
 
+**Thermo .raw files** work as they are: choose their folder and Mosa first converts them to centroided mzML with
+ThermoRawFileParser, into `mzml_converted/` in that folder, where later runs find and reuse them. ThermoRawFileParser
+is not part of the app download, because Thermo's licence for the RawFileReader libraries it uses does not let us
+redistribute them: when the folder has .raw files, the Data card offers **Download and install the Thermo .raw
+reader** (the self-contained build for your computer from the ThermoRawFileParser release, about 110 MB, nothing
+installed system-wide; you accept Thermo's licence). From the command line:
+`peak3d addon install thermo --accept-licence`. Waters .raw folders, Agilent .d and SCIEX .wiff data still need
+converting to mzML with ProteoWizard msconvert.
+
 The app is not yet signed with an Apple or Microsoft certificate, so the first start asks you to confirm:
 
 - **macOS**: double-click peak3d; when macOS says it cannot verify it, click **Done**, open **System Settings >
@@ -81,10 +90,19 @@ peak3d demo --output peak3d_demo        # -> peak3d_demo/peak3d_out/aligned_feat
 
 ### 2. Prepare your files
 
-peak3d reads **centroided MS1 mzML** (`.mzML` or `.mzml`). Put all runs of one study (samples, QCs,
-blanks) in one folder: they are processed together, aligned to each other and reported in one table.
+peak3d reads **centroided MS1 mzML** (`.mzML` or `.mzml`) and **Thermo .raw** files. Put all runs of one study
+(samples, QCs, blanks) in one folder: they are processed together, aligned to each other and reported in one table.
 
-Convert vendor files first, with centroiding on:
+Thermo .raw files are converted to centroided, indexed mzML on the way (ThermoRawFileParser with Thermo's peak
+picking, every MS level), into `mzml_converted/` next to them (`--output`/mzml_converted when that folder is not
+writable; `--mzml-dir DIR` to choose). A conversion is reused while its .raw file is unchanged, and an mzML file
+next to a .raw file of the same name is used instead of converting it. The converter, in this order:
+`PEAK3D_TRFP` (a command, e.g. `apptainer exec trfp.sif ThermoRawFileParser`), the add-on
+(`peak3d addon install thermo --accept-licence`: ThermoRawFileParser 2.0.0-dev, self-contained, no Mono or .NET
+needed), or `ThermoRawFileParser` on the PATH. `peak3d convert FOLDER` only converts (and reads each file back once
+as a check).
+
+Other vendor files are converted first, with centroiding on:
 
 ```bash
 # ProteoWizard msconvert (all vendors)
@@ -175,7 +193,7 @@ kept apart from the search results, and used in the report and the exported tabl
 peak3d gui                      # opens http://127.0.0.1:8765/?token=... in your browser
 ```
 
-The GUI picks the mzML folder and output folder, sets the options (the same as the command line, with the
+The GUI picks the data folder (mzML or Thermo .raw) and output folder, sets the options (the same as the command line, with the
 equivalent command shown), runs peak3d with live progress, and opens the results in the same viewer as
 `report.html`. It runs on your computer: data never leave it, and the browser is only the window. Runs are
 ordinary `peak3d process` subprocesses, so results are identical to the command line. `peak3d report OUT`
@@ -269,8 +287,9 @@ to be used as they are. The options you are most likely to need:
 | `--compound-shape weighted\|median\|pooled` | weighted | peak-shape score of a co-eluting pair: per-file EIC correlations averaged with the weaker ion's log height as weight, their median, or one correlation pooled over every scan of every shared file |
 | `--compound-shape-files N` | 0 | shared files per pair for the shape score (0 = all; N = the strongest N); the median over the 5 strongest was the earlier default and scores 0 to 2 points lower on the spike truth |
 
-Other commands: `peak3d pick FILE.mzML ... --output OUT` (per-file tables only) and
-`peak3d align --output OUT` (re-run alignment on an existing output with other options).
+Other commands: `peak3d pick FILE.mzML ... --output OUT` (per-file tables only),
+`peak3d align --output OUT` (re-run alignment on an existing output with other options) and
+`peak3d convert FOLDER` (Thermo .raw files to mzML only).
 `peak3d <command> --help` lists everything.
 
 ### On a Slurm cluster
@@ -299,7 +318,9 @@ pytest peak3d/tests -m "not perf"
 
 ### Troubleshooting
 
-- `no .mzML files in ...`: `--input` must be the folder that directly contains the files.
+- `no .mzML or Thermo .raw files in ...`: `--input` must be the folder that directly contains the files.
+- `ThermoRawFileParser is not available`: install the Thermo .raw reader (`peak3d addon install thermo
+  --accept-licence`, or the button in the app's Data card), or set `PEAK3D_TRFP`.
 - `both polarities present`: add `--polarity pos` or `--polarity neg`.
 - `MS1 spectra are profile mode`: reconvert with centroiding (step 2).
 - numba `cannot cache function` errors when peak3d is installed in a read-only location: set

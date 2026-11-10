@@ -19,3 +19,9 @@ in its metadata folder inside the app (`_internal/<package>-<version>.dist-info/
 MassCube is not part of the app. Its licence (CC BY-NC 4.0) allows non-commercial use only; the app installs it
 only when you ask for it and accept that licence, into a separate folder, with its own Python
 (python-build-standalone, https://github.com/astral-sh/python-build-standalone).
+
+ThermoRawFileParser (CompOmics, Apache 2.0, https://github.com/compomics/ThermoRawFileParser) is not part of the app
+either. It reads Thermo .raw files with Thermo's RawFileReader libraries, whose licence does not allow redistributing
+them without further obligations; the app downloads ThermoRawFileParser's own release for your system only when you
+ask for it and accept that licence ("RawFileReader reading tool. Copyright © 2016 by Thermo Fisher Scientific, Inc.
+All rights reserved."), into the same add-on folder.
