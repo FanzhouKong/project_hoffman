@@ -4,8 +4,7 @@ name: app
 # only a v* tag publishes them, as the release "Mosa vX.Y.Z". Since 1.1.3 there is no preview release.
 on:
   push:
-    # raw-input: TEMPORARY, to check the Thermo .raw reader on all four apps before merging; remove it before the merge
-    branches: [main, gui-prototype, raw-input]
+    branches: [main, gui-prototype]
     tags: ["v*"]
   workflow_dispatch:
 
