@@ -21,7 +21,8 @@ import pandas as pd
 from . import __version__
 from .align import AlignParams, AlignResult, FileAlignment, align_run, anchors_table, summary_table
 from .features import COLUMNS, MZ_TEXT, build_features, precise_mz, write_features
-from .estimate import apply_scan_gains, estimate, parse_overrides, refit_after_gains, scan_gains, variant_label
+from .estimate import (apply_scan_gains, estimate, parse_overrides, refit_after_gains, scan_gains, sigma_ppm,
+                       variant_label)
 from .gapfill import fill_file
 from .grouping import consensus, group_features, merge_complementary
 from .isomers import clip_windows, proven_pairs, territories
@@ -318,7 +319,8 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
                                    "mz_native": df["mz"].values, "scan_lo": df["scan_min"].values.astype(np.int64),
                                    "scan_hi": df["scan_max"].values.astype(np.int64),
                                    "scan_apex": df["scan_apex"].values.astype(np.int64),
-                                   "sig": np.sqrt(a_ ** 2 + b_ ** 2 / np.maximum(df["height"].values, 1e-9))}))
+                                   "sig": sigma_ppm(a_, b_, np.maximum(df["height"].values, 1e-9),
+                                                    fp.get("sat_lg_top", 0.0), fp.get("sat_f") or [])}))
     A = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     N = len(stems)
     fwhm_study = float(np.median(fwhms)) if fwhms else float("nan")

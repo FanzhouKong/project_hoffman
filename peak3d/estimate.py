@@ -11,13 +11,22 @@ from .io import Cloud
 
 SEED_PPM = 20.0        # EIC width used only for the strongest ions during estimation
 SEED_MIN_SEP_PPM = 20.0
+SAT_PPM = 60.0         # ... and for the saturation measurement: a saturated centroid sits tens of ppm off its ion
+SAT_BINS = 4           # quarter-decade bins over the top decade of intensity
+SAT_MIN_POINTS, SAT_MIN_TRACES = 10, 5   # a bin's factor needs this many centroids from this many ions (two each: the
+#                        top quarter-decade of a file holds some ten ions with two to four centroids each, and one
+#                        of three injections of the same sample fell short of 20 while the other two measured 5.7, 5.9)
+SAT_SAME_ION = 3.0     # a trace's calm centroids are one ion when each lies within this many sd of the others (the
+#                        tolerance, in sd of a difference, beyond which the picker itself refuses a link)
 
 
 # the benchmark name of the Params defaults (manifest/peak3d_variants.tsv) and the switches that make it on top of the
-# base picker: G scan_gain, L link_da 2 mDa, R narrow_rule local_median, S min_scans_rule local. The GUI shows it and
-# params.json records it; rename it whenever a default change moves the picker's output
-VARIANT = "GLRS"
-VARIANT_SETS = {"scan_gain": True, "link_da": 0.002, "narrow_rule": "local_median", "min_scans_rule": "local"}
+# base picker: G scan_gain, L link_da 2 mDa, R narrow_rule local_median, S min_scans_rule local, Z sigma_sat (the m/z
+# error model's saturation factor). The GUI shows it and params.json records it; rename it whenever a default change
+# moves the picker's output
+VARIANT = "GLRSZ"
+VARIANT_SETS = {"scan_gain": True, "link_da": 0.002, "narrow_rule": "local_median", "min_scans_rule": "local",
+                "sigma_sat": True}
 
 
 @dataclass
@@ -33,6 +42,25 @@ class Params:
     n_seeds: int = 0
     n_fwhm_seeds: int = 0
     n_sigma_points: int = 0
+    # sigma_sat: near the detector's ceiling a centroid's m/z error grows again (saturation, gain switching), which
+    # a^2 + b^2 / I cannot follow: the top of a strong peak then sits tens of ppm from its flanks and the trace breaks
+    # there. With sigma_sat the error model is multiplied, in each quarter-decade of intensity within one decade of the
+    # file's strongest centroid (sat_lg_top = its log10), by the factor the file shows there (sat_f, bin 0 = the top
+    # quarter-decade; 1 where the file shows none): how many times more the strongest ions' centroids of that
+    # intensity scatter around their own trace's m/z than those one decade further down do (fit_saturation). Nothing
+    # below the top decade changes. sat_n: centroids per bin; sat_base: the reference scatter / model one decade down.
+    # Bounds: a factor never makes a centroid's sd larger than SAT_PPM / 3 (3 sd = the window the scatter was measured
+    # in), and where a file has factors a centroid's search for its neighbours in other scans reaches its factor x
+    # tol_max_ppm, SAT_PPM at most (the file-wide cap, 30 ppm at most, stops a saturated top 35-50 ppm from its flank
+    # whatever its sd says; pick.point_cap_factor).
+    # Default on since 2026-11-11 (variant GLRSZ, Mosa 1.2.4: on six Agilent Q-TOF files the features above 3e6 counts
+    # left with a piece cut off went from 12 to 1 and phenylalanine's area agreed over three QC injections, CV 0.048,
+    # where it had no whole peak before; every truth score of the 22 benchmark runs unchanged, + 1 % CPU)
+    sigma_sat: bool = True
+    sat_lg_top: float = 0.0
+    sat_f: list = field(default_factory=list)
+    sat_n: list = field(default_factory=list)
+    sat_base: float = float("nan")
     # derived
     tol_max_ppm: float = 10.0
     K: int = 2
@@ -156,11 +184,31 @@ class Params:
     noise_cell_min_points: int = 50
 
     def sig_ppm(self, inten):
-        return np.sqrt(self.sig_a ** 2 + self.sig_b ** 2 / np.asarray(inten, dtype=np.float64))
+        return sigma_ppm(self.sig_a, self.sig_b, inten, self.sat_lg_top, self.sat_f)
 
     def to_dict(self):
         d = asdict(self)
         return {k: (v.item() if hasattr(v, "item") else v) for k, v in d.items()}
+
+
+def sat_factor(inten, lg_top: float, f):
+    """the saturation factor of the m/z error model at intensities ``inten``: f[k] in the k-th quarter-decade below
+    10^lg_top (k = 0 also for anything above it), 1 below the bins f covers or when f is empty"""
+    I = np.asarray(inten, dtype=np.float64)
+    if f is None or len(f) == 0:
+        return np.ones(I.shape)
+    f = np.asarray(f, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        k = np.floor((lg_top - np.log10(np.maximum(I, 1e-300))) * SAT_BINS)
+    k = np.where(np.isfinite(k), k, len(f)).astype(np.int64)
+    return np.where(k < len(f), f[np.clip(k, 0, len(f) - 1)], 1.0)
+
+
+def sigma_ppm(a: float, b: float, inten, lg_top: float = 0.0, f=None):
+    """the m/z error model: sd_ppm(I) = sqrt(a^2 + b^2 / I) x the saturation factor (sat_factor; 1 without one)"""
+    I = np.asarray(inten, dtype=np.float64)
+    base = np.sqrt(a ** 2 + b ** 2 / I)
+    return base if f is None or len(f) == 0 else base * sat_factor(I, lg_top, f)
 
 
 def strongest_distinct(cloud: Cloud, n: int = 2000, min_sep_ppm: float = SEED_MIN_SEP_PPM,
@@ -291,6 +339,109 @@ def fit_sigma(cloud: Cloud, seed_idx: np.ndarray, scan_of_seed: np.ndarray, reac
     a2 = max(coef[0], a_floor ** 2)
     b2 = max(coef[1], 0.0)
     return float(np.sqrt(a2)), float(np.sqrt(b2)), n
+
+
+def fit_saturation(cloud: Cloud, seed_idx: np.ndarray, scan_of_seed: np.ndarray, reach_scans: np.ndarray, a: float,
+                   b: float, ppm: float = SAT_PPM):
+    """How much more a centroid's m/z scatters near the detector's ceiling than a^2 + b^2 / I says, per quarter-decade
+    of intensity within one decade of the file's strongest centroid.
+    Each strong ion's trace is followed in a wide window (+/- ppm around its apex centroid, the contiguous scans; a
+    saturated top lies tens of ppm from its flanks, outside the +/- SEED_PPM the a, b fit looks at). A trace counts
+    once: a seed that is not the strongest centroid of its own window (a side peak of a stronger ion, an isotope
+    neighbour) would follow that ion's trace a second time, and so would a second seed on the same apex; seeds
+    weaker than 1 % of the strongest centroid are not followed at all (none of their centroids is counted). Its calm
+    centroids are those below the top decade and above 1 % of its apex: the part of the trace the ceiling does not
+    touch. A centroid is compared with the median m/z of the trace's calm centroids other than itself (at least 3),
+    in units of the sd the model expects for that difference: its own sd and the median's (pi / 2 x the mean variance
+    of those centroids / their number), so that a centroid in the top decade and one in the decade below are measured
+    alike, each against centroids it is not part of.
+    Same ion: the top centroids of a trace count only when its calm centroids are one ion, each within SAT_SAME_ION
+    sd of the others. Where two ions lie inside the window (or closer than the instrument resolves: a lipid and the
+    M+2 of its neighbour with one more double bond, 12 ppm apart at m/z 760, give one centroid that slides from one
+    to the other as their ratio changes), the calm centroids are the other ion's while this one is weak, and the top
+    then sits a fixed distance from their median with no saturation at all (that gave factors up to 45 on Orbitrap
+    files). Such a trace shows two calm populations; a saturated ion's calm centroids agree with each other.
+    Per bin: r = 1.4826 x the median |deviation / sd| (1 when the model is right); the reference bin is the decade
+    below the top one, over every trace (a median: the few centroids of a second ion do not move it). A top bin with
+    SAT_MIN_POINTS centroids from SAT_MIN_TRACES ions gets the factor r / r_reference when that exceeds 1 by 3
+    standard errors of such a ratio (1.17 / sqrt(n) for a median-based sd), else 1; a factor is at most what makes
+    the bin's sd ppm / 3 (nothing further than ppm from a trace was looked at, so no tolerance beyond it is measured).
+    Returns (log10 of the strongest centroid, factors (bin 0 = top), centroids per bin, r_reference); the factors are
+    empty when the reference bin has too few centroids or no bin shows an excess."""
+    S = cloud.n_scans
+    if cloud.n_points == 0:
+        return 0.0, [], [], float("nan")
+    lg_top = float(np.log10(cloud.inten.max()))
+    cut = 10.0 ** (lg_top - 1.0)
+    low = 10.0 ** (lg_top - 2.0)              # a seed below the reference decade has no centroid of its own that counts
+    #                                           (its window could only add the flank of a stronger ion a second time)
+    zs, ks, tr = [], [], []
+    seen = set()
+    for i, (p, s, reach) in enumerate(zip(seed_idx, scan_of_seed, reach_scans)):
+        if cloud.inten[p] < low:
+            continue
+        m0 = cloud.mz[p]
+        s0, s1 = max(0, int(s) - int(reach)), min(S, int(s) + int(reach) + 1)
+        idx = cloud.eic_argmax(m0, ppm, s0, s1)
+        k = int(s) - s0
+        if idx[k] != p:                       # a stronger ion's window: that ion has (or is) its own seed
+            continue
+        lo = k
+        while lo - 1 >= 0 and idx[lo - 1] >= 0:
+            lo -= 1
+        hi = k
+        while hi + 1 < len(idx) and idx[hi + 1] >= 0:
+            hi += 1
+        idx = idx[lo:hi + 1]
+        mzs, I = cloud.mz[idx].astype(np.float64), cloud.inten[idx].astype(np.float64)
+        apex = int(idx[int(np.argmax(I))])
+        if apex in seen:
+            continue
+        seen.add(apex)
+        calm = np.flatnonzero((I < cut) & (I >= 0.01 * I.max()))
+        nc = len(calm)
+        if nc < 3:
+            continue
+        var = a * a + b * b / I
+        z = np.full(len(I), np.nan)
+        zc = np.empty(nc)                     # each calm centroid against the median of the other calm ones
+        for j in range(nc):
+            rest = np.delete(calm, j)
+            ref = float(np.median(mzs[rest]))
+            q = calm[j]
+            zc[j] = (mzs[q] - ref) / ref * 1e6 / np.sqrt(var[q] + 0.5 * np.pi * var[rest].mean() / (nc - 1))
+        if nc >= 4:
+            z[calm] = zc
+        top = np.flatnonzero(I >= cut)
+        if len(top) and np.abs(zc).max() <= SAT_SAME_ION:
+            ref = float(np.median(mzs[calm]))
+            z[top] = (mzs[top] - ref) / ref * 1e6 / np.sqrt(var[top] + 0.5 * np.pi * var[calm].mean() / nc)
+        kb = np.floor((lg_top - np.log10(I)) * SAT_BINS).astype(np.int64)      # 0..SAT_BINS-1 top decade, then the reference
+        use = np.isfinite(z) & (kb < 2 * SAT_BINS)
+        zs.append(z[use])
+        ks.append(np.maximum(kb[use], 0))
+        tr.append(np.full(int(use.sum()), i))
+    if not zs:
+        return lg_top, [], [], float("nan")
+    z, kb, tr = np.concatenate(zs), np.concatenate(ks), np.concatenate(tr)
+    base = kb >= SAT_BINS
+    n = [int((kb == k).sum()) for k in range(SAT_BINS)]
+    if base.sum() < SAT_MIN_POINTS:
+        return lg_top, [], n, float("nan")
+    r0 = 1.4826 * float(np.median(np.abs(z[base])))
+    f = []
+    for k in range(SAT_BINS):
+        m = kb == k
+        fk = 1.0
+        if n[k] >= SAT_MIN_POINTS and len(np.unique(tr[m])) >= SAT_MIN_TRACES and r0 > 0:
+            r = 1.4826 * float(np.median(np.abs(z[m]))) / r0
+            if r > 1.0 + 3.0 * 1.17 / np.sqrt(n[k]):
+                sd_lo = float(np.sqrt(a * a + b * b / 10.0 ** (lg_top - (k + 1) / SAT_BINS)))    # the bin's largest model sd
+                fk = max(1.0, min(r, ppm / 3.0 / sd_lo))
+        f.append(float(fk))
+    if max(f) <= 1.0:
+        f = []
+    return lg_top, f, n, r0
 
 
 def fit_intensity_noise(cloud: Cloud, seed_idx: np.ndarray, scan_of_seed: np.ndarray, reach_scans: np.ndarray,
@@ -600,6 +751,8 @@ def estimate(cloud: Cloud, n_seeds: int = 2000, overrides: dict | None = None) -
     traces = trace_deviations(cloud, seeds, scan_of, reach)
     P.sig_a, P.sig_b, P.n_sigma_points = fit_sigma(cloud, seeds, scan_of, reach, traces=traces)
     P.noise_s0, P.noise_c, P.noise_r, P.n_noise_pts, P.n_noise_bins = fit_intensity_noise(cloud, seeds, scan_of, reach)
+    if P.sigma_sat:
+        P.sat_lg_top, P.sat_f, P.sat_n, P.sat_base = fit_saturation(cloud, seeds, scan_of, reach, P.sig_a, P.sig_b)
     P.tol_max_ppm = float(np.clip(4 * P.sig_ppm(P.floor), 5.0, 30.0))
     P.K = int(np.clip(round(0.5 * P.fwhm_scans), 1, 3))
     P.min_scans = 3 if P.width_rule in ("scans", "time") else int(np.clip(round(0.5 * P.fwhm_scans), 3, 5))

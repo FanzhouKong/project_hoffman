@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import kernels as K
-from .estimate import Params, estimate
+from .estimate import SAT_BINS, SAT_PPM, Params, estimate
 from .io import Cloud
 
 MAX_WIDTH_FWHM = 6.0   # bounds walk stops this many median FWHMs from the apex
@@ -75,6 +75,25 @@ def _merge(P, nbr, lab, eff, smooth, apex_int, apex_scan, apex_mz, apex_sig, off
     return lab2, len(surv), surv, persistence, len(es), shoulder[surv]
 
 
+def point_sigma(inten, P) -> np.ndarray:
+    """every centroid's m/z sd (ppm, float32) under the file's error model, saturation factor included"""
+    sig = K.per_point_sigma(inten, P.sig_a, P.sig_b)
+    if len(P.sat_f):
+        K.apply_sat_factor(sig, inten, P.sat_lg_top, np.asarray(P.sat_f, np.float64), SAT_BINS)
+    return sig
+
+
+def point_cap_factor(inten, P):
+    """per centroid, the factor on the neighbour search cap in a file with saturation factors (Params.sigma_sat): its
+    own factor, the search reaching SAT_PPM at most (further than that no trace was looked at when the factors were
+    measured); None without factors"""
+    if not len(P.sat_f):
+        return None
+    f = np.ones(len(inten), np.float32)
+    K.apply_sat_factor(f, inten, P.sat_lg_top, np.asarray(P.sat_f, np.float64), SAT_BINS)
+    return np.minimum(f, np.float32(max(1.0, SAT_PPM / P.tol_max_ppm)))
+
+
 def pick_cloud(cloud: Cloud, params: Params | None = None) -> Basins:
     t = {}
     tic = time.perf_counter()
@@ -85,9 +104,9 @@ def pick_cloud(cloud: Cloud, params: Params | None = None) -> Basins:
     N = cloud.n_points
 
     tic = time.perf_counter()
-    sig = K.per_point_sigma(inten, P.sig_a, P.sig_b)
+    sig = point_sigma(inten, P)
     nbr = K.find_neighbors(off, mz, inten, sig, P.K, P.tol_max_ppm, P.same_scan_k, P.same_scan_floor_ppm,
-                           P.link_da)
+                           P.link_da, point_cap_factor(inten, P))
     t["neighbors"] = time.perf_counter() - tic
 
     tic = time.perf_counter()

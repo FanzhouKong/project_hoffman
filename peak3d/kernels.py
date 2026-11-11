@@ -33,6 +33,19 @@ def per_point_sigma(inten, a, b):
 
 
 @njit(cache=True)
+def apply_sat_factor(sig, inten, lg_top, f, bins_per_decade):
+    """multiply sig in place by the saturation factor of each centroid's intensity (estimate.sat_factor): f[k] in the
+    k-th bin (bins_per_decade per decade) below 10^lg_top, k = 0 also above it, 1 below the bins f covers"""
+    n = len(f)
+    for p in range(len(inten)):
+        k = int(np.floor((lg_top - np.log10(inten[p])) * bins_per_decade))
+        if k < 0:
+            k = 0
+        if k < n:
+            sig[p] *= f[k]
+
+
+@njit(cache=True)
 def _best_in_scan(off, mz, inten, sig, t, m, sp, cap, jptr):
     """most intense centroid of scan t within the pair tolerance of (m, sp), using the sweep
     pointer jptr (returned updated; it only moves forward as m increases). Returns (q, jptr),
@@ -69,7 +82,8 @@ def _best_in_scan(off, mz, inten, sig, t, m, sp, cap, jptr):
 
 
 @njit(cache=True, parallel=True)
-def find_neighbors(off, mz, inten, sig, K, tol_max_ppm, same_scan_k, same_scan_floor_ppm, same_scan_floor_da=0.0):
+def find_neighbors(off, mz, inten, sig, K, tol_max_ppm, same_scan_k, same_scan_floor_ppm, same_scan_floor_da=0.0,
+                   capf=None):
     """int32[N, 4] neighbour indices (-1 = none): same-scan m/z neighbours (split pieces of one
     centroid) within same_scan_k x the pair tolerance 3*sqrt(sig_p^2 + sig_q^2) or within
     max(same_scan_floor_ppm, same_scan_floor_da in Da), whichever is larger (the Da floor governs
@@ -77,7 +91,9 @@ def find_neighbors(off, mz, inten, sig, K, tol_max_ppm, same_scan_k, same_scan_f
     precision does not explain (the floor absorbs a 2 ppm sliver of a strong centroid), while a
     factor above 1 on the pair tolerance let a weak piece's large sigma reach a second ion 10-20
     ppm away; on each side the most intense centroid within the pair tolerance of the nearest scan
-    (up to K away) that has one."""
+    (up to K away) that has one. capf (per centroid, optional): the search for those neighbours in other scans reaches
+    capf x tol_max_ppm from the centroid (a saturated centroid sits further from its ion's trace than the file-wide
+    cap; the same-scan test keeps the plain cap)."""
     S = len(off) - 1
     N = len(mz)
     nbr = np.full((N, 4), -1, np.int32)
@@ -107,6 +123,8 @@ def find_neighbors(off, mz, inten, sig, K, tol_max_ppm, same_scan_k, same_scan_f
                 tol = same_scan_k * 3.0 * np.sqrt(sp * sp + sig[q] * sig[q]) * m * 1e-6
                 if mz[q] - m <= max(min(tol, same_scan_k * cap), floor):
                     nbr[p, NB_SAME_R] = q
+            if capf is not None:
+                cap = cap * capf[p]
             # left: nearest scan with a centroid within tolerance
             for d in range(K):
                 t = s - d - 1

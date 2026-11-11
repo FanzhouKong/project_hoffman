@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.2.3](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.3) (all releases:
+[Mosa v1.2.4](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.4) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
@@ -279,7 +279,11 @@ node; the access token in the link keeps other users out.
 ### Options
 
 All parameters (peak width, noise, m/z error) are estimated from each file, so the defaults are meant
-to be used as they are. The options you are most likely to need:
+to be used as they are. Since 1.2.4 the m/z error includes detector saturation: where a file's strongest ions show
+centroids that scatter more than the rest (within one decade of its strongest centroid), the m/z tolerance grows by
+the factor measured there, so the top of a saturated peak stays with its flanks instead of being cut off as a
+separate piece (`sat_f` in each file's `features/*.params.json`; `--set sigma_sat=false` gives the earlier
+behaviour). The options you are most likely to need:
 
 | option | default | meaning |
 |---|---|---|

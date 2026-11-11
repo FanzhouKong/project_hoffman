@@ -49,7 +49,7 @@ def test_kernel_status_reports_missing_interpreters(monkeypatch):
         st = external.kernel_status()
     finally:
         external.kernel_status.cache_clear()
-    assert st["peak3d"]["available"] and st["peak3d"]["variant"] == "GLRS"
+    assert st["peak3d"]["available"] and st["peak3d"]["variant"] == "GLRSZ"
     assert not st["asari"]["available"] and "PEAK3D_ASARI_PYTHON" in st["asari"]["note"]
     has_mc = __import__("importlib").util.find_spec("masscube") is not None
     assert st["masscube"]["available"] == has_mc
