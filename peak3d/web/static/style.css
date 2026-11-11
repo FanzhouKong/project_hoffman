@@ -557,6 +557,10 @@ td.ident.unknown .id-name { font-style: italic; color: var(--ink-3); }
 .filters { display: flex; flex-direction: column; gap: 0; min-width: 0; }
 .filters .toolbar { margin: 0 0 8px; }
 .filters .toolbar .field { width: 200px; }
+.skip-files { gap: 6px 14px; }
+.skip-check { display: inline-flex; align-items: center; gap: 6px; font: 400 12.5px/1.25 var(--font); color: var(--ink-2); cursor: pointer; }
+.skip-check input { accent-color: var(--accent); margin: 0; }
+.page > .banner + .tiles { margin-top: 12px; }
 .filters .id-card { margin: 0 0 10px; }
 .filters .id-form { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 10px; }
 .filters .id-form > .field:first-child { grid-column: 1 / -1; }

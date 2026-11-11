@@ -508,3 +508,50 @@ def test_loo_median_and_scale_factor_match_brute_force():
         best = np.abs(d[None, :] + lam_grid[:, None] * sh[None, :]).sum(1).min()
         assert np.abs(d + lam * sh).sum() <= best + 1e-9
         assert 0.0 <= lam <= 1.0 and gain >= -1e-12
+
+
+def test_flag_rt_residual_rule():
+    """rt_residual_high: applied held-out deviation >= 4 x the study median and >= 2 scans, with >= 8 files checked;
+    the medoid and files without do-no-harm numbers are not judged; the warning comes first in the flag"""
+    from peak3d.align import FileAlignment, flag_rt_residual
+    from peak3d.warp import TableWarp
+
+    def files(devs):
+        fs = {"m": FileAlignment("m", TableWarp.identity(GRID), role="medoid", gate={"dev_gated_s": 9.0})}
+        for i, d in enumerate(devs):
+            fs[f"f{i}"] = FileAlignment(f"f{i}", TableWarp.identity(GRID), gate=None if d is None else {"dev_gated_s": d})
+        return fs
+
+    fs = files([0.2] * 8 + [0.9, None])
+    assert flag_rt_residual(fs, list(fs), "m", 0.0036) == ["f8"]
+    assert fs["f8"].flag.split(";")[0] == "rt_residual_high" and not fs["m"].flags and not fs["f9"].flags
+    assert flag_rt_residual(fs, list(fs), "m", 0.0036) == ["f8"] and fs["f8"].flags.count("rt_residual_high") == 1
+    fs = files([0.2] * 8 + [0.7])                                      # 3.5 x the median
+    assert flag_rt_residual(fs, list(fs), "m", 0.0036) == []
+    fs = files([0.2] * 6 + [2.0])                                      # 7 files checked: too few
+    assert flag_rt_residual(fs, list(fs), "m", 0.0036) == []
+    fs = files([0.05] * 8 + [0.5])                                     # 10 x the median but under 2 scans (0.6 s)
+    assert flag_rt_residual(fs, list(fs), "m", 0.005) == []
+
+
+def test_rt_residual_high_flags_compound_specific_shifts():
+    """a file whose compounds between 1 and 4 min each moved by their own amount (+-4.8 s; no function of RT can follow,
+    as in the first injection after a HILIC column sat idle) keeps its held-out features far from the other files
+    after correction: flagged rt_residual_high and named in the notes; the files that only drifted are not"""
+    truth = _truth(800, seed=7)
+    own = dict(zip(truth["rt"].values.round(9), np.random.default_rng(3).uniform(-0.08, 0.08, len(truth))))
+
+    def scrambled(t):
+        d = np.array([own[x] for x in np.round(t, 9)])
+        return t + np.where((t > 1.0) & (t < 4.0), d, 0.0)
+
+    W = {f"f{k}": (lambda t, k=k: t + 0.004 * k - 0.002 * k * t / T) for k in range(9)}
+    W["bad"] = scrambled
+    feats = {k: _file(truth, w, n_decoy=60, seed=i) for i, (k, w) in enumerate(W.items())}
+    res = align_run({k: f.copy() for k, f in feats.items()}, {k: GRID for k in W}, AlignParams())
+    flagged = [k for k, fa in res.files.items() if "rt_residual_high" in fa.flags]
+    assert flagged == ["bad"], {k: fa.gate and fa.gate["dev_gated_s"] for k, fa in res.files.items()}
+    assert any(n.startswith("rt_residual_high: 1 file") for n in res.notes)
+    assert summary_table(res).set_index("file").loc["bad", "flag"].startswith("rt_residual_high")
+    off = align_run({k: f.copy() for k, f in feats.items()}, {k: GRID for k in W}, AlignParams(gate=False))
+    assert not any("rt_residual_high" in fa.flags for fa in off.files.values())

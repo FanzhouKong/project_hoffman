@@ -480,22 +480,26 @@
     setTitle("Results", path);
     const actions = document.getElementById("bar-actions");
     const reveal = { Darwin: "Show in Finder", Windows: "Show in File Explorer" }[S.info.platform] || "Open the output folder";
+    // the kinds of flagged files the user left out (Features tab): the feature tables and the report go without them
+    S.skipBy = S.skipBy || {};
+    const skipQ = () => ((S.skipBy[path] || []).length ? `&skip=${enc(S.skipBy[path].join(","))}` : "");
     const fileUrl = (name) => `/api/results/file?path=${enc(path)}&name=${name}`;
     const addActions = (quant, hd) => {
       const other = quant === "area" ? "height" : "area";
+      const without = skipQ() ? ", without the flagged files" : "";
       hd = hd || {};
       actions.replaceChildren(
-        h("a.icon-btn.state", { href: `/api/results/report?path=${enc(path)}`, target: "_blank", rel: "noopener", title: "Open report.html in a new tab", "aria-label": "Open report" }, icon("open_in_new")),
+        h("a.icon-btn.state", { href: `/api/results/report?path=${enc(path)}${skipQ()}`, target: "_blank", rel: "noopener", title: `Open report.html in a new tab${without}`, "aria-label": "Open report" }, icon("open_in_new")),
         menuButton("download", "Download", [
-          { icon: "table_rows", label: `Feature table (${quant}s)`, href: fileUrl("aligned_feature_table.tsv") },
-          ...(!hd.kernel || hd.kernel === "peak3d" ? [{ icon: "table_rows", label: `Feature table (${other}s)`, href: fileUrl(`aligned_feature_${other}.tsv`) }] : []),
+          { icon: "table_rows", label: `Feature table (${quant}s${without})`, href: fileUrl("aligned_feature_table.tsv") + skipQ() },
+          ...(!hd.kernel || hd.kernel === "peak3d" ? [{ icon: "table_rows", label: `Feature table (${other}s${without})`, href: fileUrl(`aligned_feature_${other}.tsv`) + skipQ() }] : []),
           ...(hd.ms2c ? [{ icon: "bar_chart", label: "Consensus MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_consensus.msp") }] : []),
           ...(hd.ms2 ? [{ icon: "bar_chart", label: "Highest-TIC MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_spectra.msp") }] : []),
           ...(hd.ms2c && hd.ms2c.denoised ? [{ icon: "bar_chart", label: "Denoised consensus MS2 spectra (.msp)", href: fileUrl("ms2_consensus_denoised.msp") }] : []),
           ...(hd.ms2 && hd.ms2.denoised ? [{ icon: "bar_chart", label: "Denoised highest-TIC MS2 spectra (.msp)", href: fileUrl("ms2_spectra_denoised.msp") }] : []),
           ...(hd.ids ? [{ icon: "table_rows", label: "Library hits, all spectra (identifications.tsv)", href: fileUrl("identifications.tsv") }] : []),
           ...(hd.ids || hd.ann ? [{ icon: "table_rows", label: "Annotations (feature_annotations.tsv)", href: fileUrl("feature_annotations.tsv") }] : []),
-          { icon: "description", label: "Report (one HTML file to share)", href: `/api/results/report?path=${enc(path)}&download=1` },
+          { icon: "description", label: `Report (one HTML file to share${without})`, href: `/api/results/report?path=${enc(path)}&download=1${skipQ()}` },
           "-",
           { icon: "folder", label: reveal, run: () => post("/api/results/reveal", { path }).catch((e) => snack(e.message)) },
         ]),
@@ -519,7 +523,8 @@
       const quant = b.header.quant === "area" ? "area" : "height";
       let cur = b.header;              // the header parts the download menu reflects (a search updates them)
       addActions(quant, cur);
-      const exportTable = async (ids) => new Blob([await api("/api/results/table", { method: "POST", body: JSON.stringify({ path, ids }) })], { type: "text/tab-separated-values" });
+      const exportTable = async (ids, skip) => new Blob([await api("/api/results/table", { method: "POST", body: JSON.stringify({ path, ids, skip: skip || [] }) })], { type: "text/tab-separated-values" });
+      const onSkip = (kinds) => { S.skipBy[path] = kinds; addActions(quant, cur); };
       const identify = async (params) => {
         await post("/api/results/identify", Object.assign({ path }, params));
         const m = await ms2();
@@ -534,7 +539,7 @@
       const ms1 = (group_id, file) => post("/api/results/ms1", { path, group_id, file });
       const eic = (file, mz, ppm, offset, lo, hi) => post("/api/results/eic", Object.assign({ path, file, mz, ppm, offset },
         lo != null && hi != null ? { lo_ppm: lo, hi_ppm: hi } : {}));
-      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, identify, annotate, note, ms1, eic, browseLibrary, methods: S.info.methods || {} });
+      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, skip: S.skipBy[path] || [], onSkip, identify, annotate, note, ms1, eic, browseLibrary, methods: S.info.methods || {} });
     } catch (e) {
       holder.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "16px" } }, icon("error"), h("div", e.message))));
     }

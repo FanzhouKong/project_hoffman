@@ -271,6 +271,13 @@
   const HAL_TEXT = ["", "no", "maybe", "yes"];
   const MS2_COLS = ["n_ms2", "n_consensus", "annotation", "annotation_source", "reviewed", "annotation_score", "annotation_adduct",
     "annotation_formula", "annotation_inchikey", "best_hit", "best_score", "stars", "comment"];
+  // the RT correction's warnings a file can carry (its flag in rt_correction/summary.tsv): the app lets the user leave
+  // such files out of the downloaded tables and the report
+  const FILE_WARN = [
+    ["few_anchors_matched", "few anchors matched", "matched fewer than 80 % of the typical file's RT anchors, so their RT correction rests on little evidence"],
+    ["rt_residual_high", "RT not corrected", "still have features far from the other files after RT correction (at least 4 x the study's median): their retention changed in a way the correction could not follow"],
+  ];
+  const hasFlag = (f, k) => String((f && f.flag) || "").split(";").includes(k);
   function bundleTable(R, rows) {
     const a = R.a, num = (v, d) => (isFinite(v) ? v.toFixed(d) : ""), clean = (t) => String(t || "").replace(/[\t\r\n]+/g, " ");
     const notes = !!(R.m2 || R.notes.size);
@@ -418,7 +425,7 @@
     const charts = [];
     const state = { tab: "overview", sel: null, sortKey: "max", sortDir: -1, query: "", mono: false, all: false, withEic: false, ppm: 10,
       mzLo: "", mzHi: "", rtLo: "", rtHi: "", withMs2: false, identified: false, halogen: false, hit: null, autoSearched: false, copy: null,
-      starF: { red: false, blue: false, yellow: false }, cidF: null };
+      starF: { red: false, blue: false, yellow: false }, cidF: null, skip: new Set(opts.skip || []) };
     let detailRefs = null, repaintRows = null;    // the Features page's detail parts and table, while it is shown
     let showSiblingsOf = null, clearCidF = null;  // the Features page's compound filter (list one compound's features)
     const track = (c) => { charts.push(c); return c; };
@@ -455,6 +462,16 @@
       const mf = R.medianFeatures();
       const res = R.h.residuals;
       const total = STAGE_KEYS.reduce((s, [k]) => s + (st[k] || 0), 0);
+      // a report the app built without the flagged files the user left out
+      const ex = R.h.excluded;
+      if (ex && ex.files && ex.files.length) {
+        const kinds = FILE_WARN.filter(([k]) => ex.files.some((f) => hasFlag(f, k))).map(([, label]) => label);
+        const names = ex.files.slice(0, 10).map((f) => f.stem).join(", ") + (ex.files.length > 10 ? ` and ${int(ex.files.length - 10)} more` : "");
+        const gone = Math.max(0, ex.n_groups_before - R.G);
+        body.append(banner(`${int(ex.files.length)} file${ex.files.length > 1 ? "s" : ""} left out of this report` +
+          `${kinds.length ? " (" + kinds.join(", ") + ")" : ""}: ${names}. Their columns${gone ? ` and the ${int(gone)} feature${gone > 1 ? "s" : ""} only they held` : ""} ` +
+          `are not here; detection counts are over the other ${int(R.N)} files.`));
+      }
       body.append(h("div.tiles",
         tile("Files", int(R.N), R.params.input_files ? "centroided MS1 mzML" : null),
         tile("Aligned features", int(R.G), st.n_groups_all ? `${int(st.n_groups_all)} groups before the presence rule` : null),
@@ -574,12 +591,15 @@
         "The features listed here (search, filters and sort applied); retention times in seconds; gap_filled_files names the files whose value was gap-filled. Values are rounded to 0.04 %; the exact table is aligned_feature_table.tsv in the output folder (minutes)." },
         icon("download"), "Download table");
       dl.addEventListener("click", async () => {
-        const name = `${R.h.title}_features${list.length < R.G ? "_" + list.length : ""}.tsv`;
+        const skip = opts.exportTable ? [...state.skip] : [];
+        const name = `${R.h.title}_features${list.length < R.G ? "_" + list.length : ""}${skip.length ? "_without_flagged_files" : ""}.tsv`;
         dl.disabled = true;
         try {
-          const blob = opts.exportTable ? await opts.exportTable(list.map((g) => R.a.g_id[g])) : bundleTable(R, list);
+          const blob = opts.exportTable ? await opts.exportTable(list.map((g) => R.a.g_id[g]), skip) : bundleTable(R, list);
           P3.saveBlob(blob, name);
-          P3.snack(`Downloaded ${int(list.length)} features as ${name}`);
+          // with files left out, a feature only they held is not in the table
+          const n = skip.length ? Math.max(0, (await blob.text()).split("\n").filter(Boolean).length - 1) : list.length;
+          P3.snack(`Downloaded ${int(n)} features as ${name}` + (n < list.length ? ` (${int(list.length - n)} held only by the files left out)` : ""));
         } catch (e) {
           P3.snack(String(e.message || e));
         } finally {
@@ -608,6 +628,21 @@
       const eicBtn = opts.eic ? h("button.btn.outlined.state", { type: "button", onclick: () => eicDialog(),
         title: "The whole-run chromatogram of an m/z (the selected feature's, or one you type) in the files you choose; zoom in and out" },
         icon("show_chart"), "Extract EIC") : null;
+      // the app only: whether the files the RT correction flagged go into the downloaded tables and the report
+      // (Download table here; the feature tables and the report in the Download menu, and Open report)
+      const skipBoxes = opts.exportTable ? FILE_WARN.map(([k, label, why]) => {
+        const n = R.files.filter((f) => hasFlag(f, k)).length;
+        if (!n) return null;
+        const box = h("input", { type: "checkbox", checked: !state.skip.has(k) });
+        box.addEventListener("change", () => {
+          if (box.checked) state.skip.delete(k); else state.skip.add(k);
+          if (opts.onSkip) opts.onSkip([...state.skip]);
+        });
+        return h("label.skip-check", { title: `${int(n)} file${n > 1 ? "s" : ""} ${why} (Alignment tab). Untick to leave them out of ` +
+          "the downloaded tables and the report: their columns go, and so do the features only they held; detection counts are over the other files. " +
+          "This list keeps every file." }, box, `${int(n)} file${n > 1 ? "s" : ""} with ${label}`);
+      }).filter(Boolean) : [];
+      const skipRow = skipBoxes.length ? h("div.toolbar.skip-files", h("span.body-small.muted", "In downloaded tables and the report, include"), ...skipBoxes) : null;
       // m/z and retention-time windows (either end may stay open); the mini map's box fills them too
       const rangeIn = {};
       const range = (label, lo, hi, unit) => {
@@ -634,7 +669,7 @@
       const filters = [idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
           R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null,
-          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, eicBtn, dl, dlc)];
+          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, eicBtn, dl, dlc), skipRow];
       const mini = track(P3.plot.scatter(mapEl, {
         height: 210, x: R.rtS, y: a.g_mz, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
         xLabel: "RT (s)", yLabel: "m/z", xFmt: (v, d) => fixed(v, Math.min(d, 0)), yFmt: (v, d) => fixed(v, Math.min(d, 0)),

@@ -22,7 +22,10 @@ GATE_MAX_SEG = 12          # do-no-harm segments per file, at most
 MZ_SEARCH_PPM = 50.0       # how far the coarse m/z offset search looks, either side (ppm)
 PROBE_BINS, PROBE_PER_BIN = 50, 40   # mz_probe_features: the run in equal RT bins, the tallest per bin
 ANCHOR_MATCH_MIN = 0.8     # a file matching fewer anchors than this share of the median file's is flagged
-WARN_FLAGS = ("few_anchors_matched",)    # shown first in FileAlignment.flag, so the report marks the file
+RT_RESIDUAL_RATIO = 4.0    # a file whose held-out features stay this many times the study's median deviation from the
+                           # other files after correction is flagged rt_residual_high (benchmark studies: <= 1.8 x)
+RT_RESIDUAL_MIN_FILES = 8  # ... when at least this many files were checked (the median of a few means little)
+WARN_FLAGS = ("few_anchors_matched", "rt_residual_high")   # shown first in FileAlignment.flag, so the report marks the file
 
 
 @dataclass
@@ -536,6 +539,23 @@ def _do_no_harm(files, features, stems, medoid, P: AlignParams, dt_med, n_rounds
             files[s].warp, files[s].warp_fit = w, full[s]
 
 
+def flag_rt_residual(files, stems, medoid, dt_med) -> list:
+    """Flag rt_residual_high on the files whose held-out features (the do-no-harm step's validation set) still sit
+    >= RT_RESIDUAL_RATIO x the study's median deviation from the other files after correction, and >= 2 scans: their
+    retention changed in a way the warp could not follow (in MX831181, compound-specific shifts of 1.5-4.6 s in the
+    first injections after the column sat idle, which a function of RT alone cannot undo). Needs the do-no-harm numbers
+    of >= RT_RESIDUAL_MIN_FILES files. Returns the flagged stems."""
+    dev = {s: files[s].gate["dev_gated_s"] for s in stems if s != medoid and files[s].gate}
+    if len(dev) < RT_RESIDUAL_MIN_FILES:
+        return []
+    cut = max(RT_RESIDUAL_RATIO * float(np.median(list(dev.values()))), 2 * 60 * dt_med)
+    out = [s for s, d in dev.items() if np.isfinite(d) and d >= cut]
+    for s in out:
+        if "rt_residual_high" not in files[s].flags:
+            files[s].flags.append("rt_residual_high")
+    return out
+
+
 def align_run(features: dict, scan_rt: dict, P: AlignParams | None = None) -> AlignResult:
     """features: stem -> per-file feature table (picker columns); scan_rt: stem -> MS1 grid (min)."""
     P = P or AlignParams()
@@ -672,6 +692,10 @@ def align_run(features: dict, scan_rt: dict, P: AlignParams | None = None) -> Al
             files[s].match_ratio = files[s].diag.n / typical
             if files[s].match_ratio < ANCHOR_MATCH_MIN:
                 files[s].flags.append("few_anchors_matched")
+    high = flag_rt_residual(files, stems, medoid, dt_med) if P.gate else []
+    if high:
+        notes.append(f"rt_residual_high: {len(high)} file(s) whose features stay far from the other files after RT "
+                     f"correction: {', '.join(high[:5])}{' ...' if len(high) > 5 else ''}")
     sd = np.concatenate([features[s]["mz_sd_ppm"].values[files[s].anchor_idx] for s in stems])
     ppm_tol = float(np.clip(max(P.ppm, 3 * np.median(sd)) if len(sd) else P.ppm, 5.0, 15.0))
     if P.holdout:

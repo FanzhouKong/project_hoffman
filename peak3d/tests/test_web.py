@@ -742,7 +742,7 @@ def test_download_buttons_in_the_scripts():
     page through their click; a saved blob's URL outlives a save dialog"""
     st = ROOT / "peak3d" / "web" / "static"
     viewer, app, core = ((st / f).read_text(encoding="utf-8") for f in ("viewer.js", "app.js", "core.js"))
-    assert "count, eicBtn, dl, dlc)]" in viewer and "candidatesJson(R, list)" in viewer and '"Download candidates")' in viewer
+    assert "count, eicBtn, dl, dlc), skipRow]" in viewer and "candidatesJson(R, list)" in viewer and '"Download candidates")' in viewer
     assert "reference_library: { identity_search: hits, open_search: [], neutral_loss_search: [], hybrid_search: [] }" in viewer
     assert 'wiki_id: `${R.h.title}/${gid}`' in viewer and 'status: "success"' in viewer and "MW_MAX = 100" in viewer
     assert "if (it.href) setTimeout(close, 0)" in app
@@ -761,3 +761,74 @@ def test_kernel_choice(gui):
         code, err = c.json("/api/runs", {"kernel": "asari", "input": str(d), "output": str(root / "k")})
         assert code == 400 and "not available" in err["error"]
     assert server.command_args("masscube") == ["external", "--kernel", "masscube"] and server.command_args("peak3d") == ["process"]
+
+
+def _flagged_output(out: Path):
+    """four files A-D: C flagged few_anchors_matched, D rt_residual_high; four groups whose detection depends on them"""
+    out.mkdir()
+    vals = {"A": [1e5, 0.0, 2e5, 3e5], "B": [1e5, 4e4, 0.0, 5e4], "C": [1e5, 3e4, 6e4, 0.0], "D": [8e4, 9e5, 7e5, 2e4]}
+    pd.DataFrame({"group_id": [1, 2, 3, 4], "mz": [180.0634, 200.1, 300.2, 400.3], "rt": [1.0, 2.0, 3.0, 4.0],
+                  "rt_min": [0.95, 1.95, 2.95, 3.95], "rt_max": [1.05, 2.05, 3.05, 4.05], "n_detected": [3, 1, 2, 1],
+                  "n_confirmed": [0, 1, 1, 1], "n_filled": [1, 2, 1, 2], "mz_ppm_spread": [1.0] * 4, "rt_sd": [0.01] * 4,
+                  "iso_offset": [0] * 4, "charge": [1] * 4, **vals}).to_csv(out / "aligned_feature_table.tsv", sep="\t", index=False)
+    (out / "params.json").write_text(json.dumps({"options": {"min_presence": 2}}))
+    pd.DataFrame({"group_id": [1, 2, 3, 4], "mz": [180.0634, 200.1, 300.2, 400.3], "rt": [1.0, 2.0, 3.0, 4.0],
+                  "n_detected": [3, 1, 2, 1], "n_confirmed": [0, 1, 1, 1], "A": [2, 0, 2, 2], "B": [2, 1, 0, 0],
+                  "C": [2, 0, 1, 0], "D": [0, 2, 2, 1]}).to_csv(out / "presence_mask.tsv", sep="\t", index=False)
+    pd.DataFrame({"group_id": [1, 2, 3, 4], "A": [0, 1, 0, 0], "B": [0, 1, 1, 1], "C": [0, 1, 1, 1], "D": [1, 0, 0, 1]}
+                 ).to_csv(out / "filled_mask.tsv", sep="\t", index=False)
+    (out / "rt_correction").mkdir()
+    pd.DataFrame({"file": ["A", "B", "C", "D"], "role": ["medoid", "other", "other", "other"],
+                  "flag": ["medoid", "ok", "few_anchors_matched;ok", "rt_residual_high;ok"]}
+                 ).to_csv(out / "rt_correction" / "summary.tsv", sep="\t", index=False)
+    return out
+
+
+def test_leave_flagged_files_out(gui):
+    """the app's choice to leave the files the RT correction flagged out of the downloads: their columns go, n_detected,
+    n_confirmed and n_filled are over the other files, a feature none of them detected or that fails the presence rule
+    over them is left out; the report is built without them and names them; unknown kinds change nothing"""
+    from peak3d.web import subset
+    c, root, _ = gui
+    out = _flagged_output(root / "o")
+    assert subset.flagged(out) == {"few_anchors_matched": ["C"], "rt_residual_high": ["D"]}
+    assert subset.to_drop(out, "rt_residual_high,nonsense") == ["D"] and subset.to_drop(out, []) == []
+
+    def export(ids, skip):
+        code, raw, _ = c.req("/api/results/table", {"path": str(out), "ids": ids, "skip": skip})
+        assert code == 200
+        rows = [ln.split("\t") for ln in raw.decode().splitlines()]
+        return rows[0], [dict(zip(rows[0], r)) for r in rows[1:]]
+
+    head, rows = export([4, 3, 2, 1], ["rt_residual_high"])
+    assert head[-3:] == ["A", "B", "C"] and "D" not in head
+    assert [(r["group_id"], r["n_detected"], r["n_confirmed"], r["n_filled"], r["gap_filled_files"]) for r in rows] == \
+        [("3", "1", "1", "1", "C"), ("1", "3", "0", "0", "")]
+    assert rows[0]["rt_s"] == "180"
+    head, rows = export([4, 3, 2, 1], ["few_anchors_matched", "rt_residual_high"])
+    assert head[-2:] == ["A", "B"] and [(r["group_id"], r["n_detected"]) for r in rows] == [("1", "2")]
+    head, rows = export([4, 3, 2, 1], ["nonsense"])
+    assert head[-1] == "D" and [r["n_detected"] for r in rows] == ["1", "2", "1", "3"]
+    # the whole table as written (minutes), in file order
+    oq = quote(str(out))
+    code, raw, hdr = c.req(f"/api/results/file?path={oq}&name=aligned_feature_table.tsv&skip=rt_residual_high")
+    lines = raw.decode().splitlines()
+    assert code == 200 and "without_1_files" in hdr["Content-Disposition"]
+    assert lines[0].split("\t")[-3:] == ["A", "B", "C"] and [ln.split("\t")[0] for ln in lines[1:]] == ["1", "3"]
+    assert lines[2].split("\t")[2] == "3.0" and lines[2].split("\t")[5:8] == ["1", "1", "1"]
+    code, raw, _ = c.req(f"/api/results/file?path={oq}&name=aligned_feature_table.tsv&skip=nonsense")
+    assert raw == (out / "aligned_feature_table.tsv").read_bytes()
+    # the report: built without D, which it names
+    code, page, hdr = c.req(f"/api/results/report?path={oq}&skip=rt_residual_high&download=1")
+    assert code == 200 and "without_1_files" in hdr["Content-Disposition"] and b"without 1 files" in page
+    blob = report.DATA_RE.search(page).group(1)
+    h, a = bundle.unpack(gzip.decompress(__import__("base64").b64decode(b"".join(blob.split()))))
+    assert h["stems"] == ["A", "B", "C"] and h["n_groups"] == 2 and a["g_id"].tolist() == [1, 3]
+    assert a["g_ndet"].tolist() == [3, 1] and a["g_nfill"].tolist() == [0, 1]
+    assert h["excluded"] == {"files": [{"stem": "D", "flag": "rt_residual_high;ok"}], "n_groups_before": 4}
+    assert [f["stem"] for f in h["files"]] == ["A", "B", "C"]
+    assert bundle.unpack(bundle.build(out))[0]["excluded"] is None
+    viewer = (ROOT / "peak3d" / "web" / "static" / "viewer.js").read_text(encoding="utf-8")
+    app = (ROOT / "peak3d" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    assert '"rt_residual_high", "RT not corrected"' in viewer and "label.skip-check" in viewer and "R.h.excluded" in viewer
+    assert "skip: skip || []" in app and "&skip=" in app and "onSkip" in app

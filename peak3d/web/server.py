@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from .. import __version__
 from ..estimate import VARIANT, VARIANT_SETS
 from ..library import LIBRARY_SUFFIXES
-from . import bundle, report
+from . import bundle, report, subset
 
 STATIC = report.STATIC
 APP_SCRIPTS = (*report.SCRIPTS, "app.js")
@@ -316,6 +316,14 @@ def _gap_filled_files(out: Path, table: Path, cols) -> dict:
     return {ids[i]: ";".join(names[filled[i]]) for i in np.flatnonzero(filled.any(axis=1))}
 
 
+def _without(cols, dropset):
+    """for a table header without the columns dropset: the kept column indices, the kept names, and (index among the
+    kept, position in subset.COUNTS) of each count column"""
+    keep_at = [i for i, c in enumerate(cols) if c not in dropset]
+    kcols = [cols[i] for i in keep_at]
+    return keep_at, kcols, [(kcols.index(c), j) for j, c in enumerate(subset.COUNTS) if c in kcols]
+
+
 def _disposition(kind: str, filename: str) -> str:
     """a Content-Disposition header value for any file name: an ASCII fallback for old browsers and the exact name
     as RFC 5987 UTF-8 (http.server writes headers as Latin-1, so a results folder named in Chinese or with an
@@ -346,6 +354,8 @@ class App:
         self._searching: dict[str, threading.Lock] = {}     # one identity search per output folder at a time
         self._tables: dict[str, tuple] = {}
         self._filled: dict[str, tuple] = {}                  # per table: the gap-filled files of each group
+        self._recounts: dict[str, tuple] = {}                # per table and left-out files: counts and rows kept
+        self._subsets: dict[str, tuple] = {}                 # per output and left-out files: the report's bundle
         self._refresh: dict[str, threading.Timer] = {}      # report refreshes waiting for a burst of annotations to end
         self.addon_jobs: dict[str, dict] = {}                # add-on installs: name -> {state, log, error}
         self.lock = threading.Lock()
@@ -450,6 +460,34 @@ class App:
         value = _gap_filled_files(output, path, cols)
         _remember(self._filled, str(path), (key, value))
         return value
+
+    def recount(self, output: Path, path: Path, cols, drop) -> dict:
+        """subset.recount of an aligned table without the files drop, as {group_id as written: (n_detected, n_confirmed,
+        n_filled)} of the rows kept; kept until the table or a mask changes"""
+        key = tuple((output / n).stat().st_mtime_ns if (output / n).exists() else 0
+                    for n in (path.name, "presence_mask.tsv", "filled_mask.tsv"))
+        ck = f"{path}|{';'.join(drop)}"
+        hit = self._recounts.get(ck)
+        if hit and hit[0] == key:
+            return hit[1]
+        rc = subset.recount(output, path, bundle.table_stems(output, cols), drop)
+        rc = rc[rc["keep"]]
+        value = {str(g): (str(a), str(b), str(c)) for g, a, b, c in
+                 zip(rc.index, rc["n_detected"], rc["n_confirmed"], rc["n_filled"])}
+        _remember(self._recounts, ck, (key, value))
+        return value
+
+    def subset_bundle(self, output: Path, drop) -> bytes:
+        """gzip'd bundle without the files drop (bundle.build exclude), kept until the table changes"""
+        key = tuple((output / n).stat().st_mtime_ns if (output / n).exists() else 0     # report.html: after a search
+                    for n in ("aligned_feature_table.tsv", "report.html", "user_annotations.json"))  # or annotation
+        ck = f"{output}|{';'.join(drop)}"
+        hit = self._subsets.get(ck)
+        if hit and hit[0] == key:
+            return hit[1]
+        blob = gzip.compress(bundle.build(output, exclude=drop), compresslevel=6, mtime=0)
+        _remember(self._subsets, ck, (key, blob))
+        return blob
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -558,17 +596,28 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(404, f"no file {name!r} in {out}")
                 ctype = ("application/json" if name.endswith(".json") else "text/plain; charset=utf-8"
                          if name.endswith(".msp") else "text/tab-separated-values; charset=utf-8")
+                # skip: kinds of flagged files the user left out of the aligned tables (subset)
+                drop = subset.to_drop(out, q.get("skip", [""])[0]) if name.startswith("aligned_feature") else []
+                if drop:
+                    return self._send(200, self._table_without(out, name, drop), ctype, {"Content-Disposition":
+                                      _disposition("attachment", f"{out.name}_{name[:-4]}_without_{len(drop)}_files.tsv")})
                 return self._send(200, (out / name).read_bytes(), ctype,
                                   {"Content-Disposition": _disposition("attachment", f"{out.name}_{name}")})
             if url.path == "/api/results/report":
                 out = self._output(q)
                 self.app.refresh_now(out, pending_only=True)          # recent annotations first
+                drop = subset.to_drop(out, q.get("skip", [""])[0])
                 rep = out / "report.html"
-                body = rep.read_bytes() if rep.exists() else report.render(
-                    gzip.compress(bundle.build(out), mtime=0), f"Mosa · {out.name}").encode()
+                if drop:                                               # built now, without the left-out files
+                    body = report.render(self.app.subset_bundle(out, drop),
+                                         f"Mosa · {out.name} · without {len(drop)} files").encode()
+                else:
+                    body = rep.read_bytes() if rep.exists() else report.render(
+                        gzip.compress(bundle.build(out), mtime=0), f"Mosa · {out.name}").encode()
                 disp = "attachment" if q.get("download") else "inline"
+                name = f"mosa_report_{out.name}{f'_without_{len(drop)}_files' if drop else ''}.html"
                 return self._send(200, body, "text/html; charset=utf-8",
-                                  {"Content-Disposition": _disposition(disp, f"mosa_report_{out.name}.html")})
+                                  {"Content-Disposition": _disposition(disp, name)})
             self._error(404, "not found")
         except PermissionError as e:
             self._error(403, str(e))
@@ -755,7 +804,9 @@ class Handler(BaseHTTPRequestHandler):
     def _table(self, body):
         """the rows of an aligned table for the given group ids, in that order, as in the file except retention times
         in seconds (columns renamed rt_s, ...), the files whose value was gap-filled (gap_filled_files, after n_filled,
-        when the output has filled_mask.tsv), plus the MS2 count and best library hit when the output has them"""
+        when the output has filled_mask.tsv), plus the MS2 count and best library hit when the output has them. "skip":
+        kinds of flagged files left out (subset): their columns go, the counts are over the other files, and a feature
+        only the left-out files held is not listed"""
         out = self._output({"path": [body.get("path") or ""]})
         name = body.get("name") or "aligned_feature_table.tsv"
         if name not in RESULT_FILES or not name.startswith("aligned_feature"):
@@ -763,24 +814,54 @@ class Handler(BaseHTTPRequestHandler):
         header, rows = self.app.table_lines(out / name)
         cols = header.rstrip("\r\n").split("\t")
         eol = header[len(header.rstrip("\r\n")):] or "\n"
-        rt_at = [i for i, c in enumerate(cols) if c in RT_COLS]
+        drop = [s for s in subset.to_drop(out, body.get("skip")) if s in cols]
+        dropset = set(drop)
+        keep_at, kcols, cnt_at = _without(cols, dropset)
+        counts = self.app.recount(out, out / name, cols, drop) if drop else None
+        rt_at = [i for i, c in enumerate(kcols) if c in RT_COLS]
         extra = _identity_columns(out)
         filled = self.app.gap_filled(out, out / name, cols)
-        fill_at = cols.index("n_filled") + 1 if "n_filled" in cols else len(cols)
-        head = [f"{c}_s" if c in RT_COLS else c for c in cols]
+        fill_at = kcols.index("n_filled") + 1 if "n_filled" in kcols else len(kcols)
+        head = [f"{c}_s" if c in RT_COLS else c for c in kcols]
         if filled is not None:
             head.insert(fill_at, FILLED_COL)
         lines = ["\t".join(head + list(extra["header"])) + eol]
         for k in (str(int(i)) for i in body.get("ids") or []):
-            if k not in rows:
+            if k not in rows or (counts is not None and k not in counts):
                 continue
             v = rows[k].rstrip("\r\n").split("\t")
+            if counts is not None:
+                v = [v[i] for i in keep_at]
+                for i, j in cnt_at:
+                    v[i] = counts[k][j]
             for i in rt_at:
                 v[i] = _seconds(v[i])
             if filled is not None:
-                v.insert(fill_at, filled.get(k, ""))
+                f = filled.get(k, "")
+                v.insert(fill_at, ";".join(x for x in f.split(";") if x not in dropset) if dropset and f else f)
             lines.append("\t".join(v + extra["rows"].get(int(k), extra["empty"])) + eol)
         self._send(200, "".join(lines).encode("utf-8"), "text/tab-separated-values; charset=utf-8")
+
+    def _table_without(self, out: Path, name: str, drop) -> bytes:
+        """an aligned table file as written (minutes), without the file columns drop: the counts over the other files,
+        the features only the left-out files held left out (subset.recount)"""
+        header, rows = self.app.table_lines(out / name)
+        cols = header.rstrip("\r\n").split("\t")
+        eol = header[len(header.rstrip("\r\n")):] or "\n"
+        drop = [s for s in drop if s in cols]
+        keep_at, kcols, cnt_at = _without(cols, set(drop))
+        counts = self.app.recount(out, out / name, cols, drop)
+        parts = ["\t".join(kcols) + eol]
+        for k, line in rows.items():
+            c = counts.get(k)
+            if c is None:
+                continue
+            v = line.rstrip("\r\n").split("\t")
+            v = [v[i] for i in keep_at]
+            for i, j in cnt_at:
+                v[i] = c[j]
+            parts.append("\t".join(v) + eol)
+        return "".join(parts).encode("utf-8")
 
     def _ms1(self, body):
         """the MS1 isotope pattern of one feature at its apex in one file (the file where it is most intense unless

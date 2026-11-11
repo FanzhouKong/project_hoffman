@@ -616,8 +616,11 @@ def _mad(v):
 
 
 def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: int = EIC_FILES,
-          eic_points: int = EIC_POINTS, max_cells: int = MAX_CELLS) -> bytes:
-    """bundle for one output folder (raw bytes; callers gzip). cache_dir defaults to <output>/.cache"""
+          eic_points: int = EIC_POINTS, max_cells: int = MAX_CELLS, exclude=()) -> bytes:
+    """bundle for one output folder (raw bytes; callers gzip). cache_dir defaults to <output>/.cache. exclude: file
+    stems left out (subset.subset_frame: their columns, the features only they hold, their curves and anchors), named
+    in the header's "excluded" """
+    from . import subset
     output = Path(output)
     cache_dir = Path(cache_dir) if cache_dir else output / ".cache"
     table_path = output / "aligned_feature_table.tsv"
@@ -628,6 +631,14 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
     table = pd.read_csv(table_path, sep="\t")
     man = _read(output / "features" / "manifest.tsv")
     stems = table_stems(output, table.columns)
+    drop = [s for s in stems if s in {str(x) for x in exclude or ()}]
+    excluded = None
+    if drop:
+        n_before = len(table)
+        table = subset.subset_frame(output, table, table_path, stems, drop)
+        stems = [s for s in stems if s not in set(drop)]
+        flags = subset.file_flags(output)
+        excluded = {"files": [{"stem": s, "flag": flags.get(s, "")} for s in drop], "n_groups_before": n_before}
     G, N = len(table), len(stems)
     V = table[stems].to_numpy(np.float32) if N else np.zeros((G, 0), np.float32)
     table["_max"] = V.max(axis=1) if N else 0.0
@@ -725,6 +736,8 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
     arrays["drift_off"] = np.asarray(doff, np.int32)
     residuals = None
     anc = _read(output / "rt_correction" / "anchors.tsv")
+    if anc is not None and drop and "file" in anc:
+        anc = anc[~anc["file"].astype(str).isin(drop)]
     if anc is not None and len(anc):
         b = anc["residual_before_s"].to_numpy(float)
         a = anc.loc[anc["is_inlier"].astype(bool), "residual_after_s"].to_numpy(float)
@@ -755,5 +768,5 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
               "quant": options.get("quant", "height"), "n_groups": G, "stems": stems, "files": files_info,
               "params": _clean(params), "matrix": matrix, "matrix_note": matrix_note, "eic": eic,
               "eic_note": eic_note, "residuals": residuals, "compounds": compounds,
-              "iso_rt_win": rt_win, "halogen_names": halogen_names}
+              "iso_rt_win": rt_win, "halogen_names": halogen_names, "excluded": excluded}
     return pack(_clean(header), arrays)
