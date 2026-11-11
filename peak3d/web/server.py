@@ -99,7 +99,8 @@ def option_schema(command: str = "process"):
             f["kind"] = "int" if isinstance(one, int) and _probe(a.type, "0.5") is None else "float"
             if _probe(a.type, "0") is None:
                 f["min_exclusive"] = 0
-            if _probe(a.type, "1.5") is None and one is not None:
+            # a fraction in [0, 1] (_unit) refuses 1.5; an int type refuses it too, for not being whole -> no cap
+            if f["kind"] == "float" and one is not None and _probe(a.type, "1.5") is None:
                 f["max"] = 1
         else:
             f["kind"] = "text"

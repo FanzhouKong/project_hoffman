@@ -322,6 +322,9 @@ def test_schema_and_argv():
     assert "input" not in sch and "output" not in sch and "set" not in sch   # GUI runs are always the named variant
     assert sch["cores"]["kind"] == "int" and sch["cores"]["min_exclusive"] == 0
     assert sch["min_score"]["kind"] == "float" and sch["min_score"]["max"] == 1
+    # int options have no upper cap (1.2.1 and earlier capped every int at 1: "Must be at most 1" for 4 cores)
+    assert not [d for d, f in sch.items() if f["kind"] == "int" and "max" in f]
+    assert "max" not in {f["dest"]: f for f in server.option_schema("external")}["cores"]
     assert sch["polarity"]["kind"] == "choice" and sch["no_gap_fill"]["kind"] == "flag"
     # 1.1.1: compound grouping is opt-in, the cache is kept unless --no-keep-cache; hidden flags stay off the form
     assert sch["compounds"]["kind"] == "flag" and sch["compounds"]["default"] is False

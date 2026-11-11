@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.2.1](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.1) (all releases:
+[Mosa v1.2.2](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.2) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
