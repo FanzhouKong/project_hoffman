@@ -130,9 +130,11 @@ jobs:
           fi
           mkdir -p raw_in
           # ThermoRawFileParser's own test files (1.5 and 2.3 MB), from the release the add-on installs
+          # raw.githubusercontent.com refuses a request now and then (curl exit 22, linux-x64 on 57e5006): retry, and say why
           base=https://raw.githubusercontent.com/compomics/ThermoRawFileParser/v.2.0.0-dev/ThermoRawFileParserTest/Data
-          curl -sfL -o raw_in/small.RAW "$base/small.RAW"
-          curl -sfL -o raw_in/small2.RAW "$base/small2.RAW"
+          fetch() { curl -sSfL --retry 5 --retry-delay 10 --retry-all-errors -o "raw_in/$1" "$base/$1"; }
+          fetch small.RAW
+          fetch small2.RAW
           "$BIN" convert raw_in --cores 2
           test -s raw_in/mzml_converted/small.mzML && test -s raw_in/mzml_converted/small2.mzML
           "$BIN" convert raw_in | tee again.log
