@@ -174,8 +174,13 @@ def test_report_contents(processed):
                                    offs.get(s, 0.0))
         has = np.isin(gid, f.index)
         ff = f.loc[gid[has]]
-        assert np.all(target[has] * (1 - lo[has, j] * 1e-6) <= ff["mz_min"].to_numpy() * (1 + 1e-7))
-        assert np.all(target[has] * (1 + hi[has, j] * 1e-6) >= ff["mz_max"].to_numpy() * (1 - 1e-7))
+        assert np.all(target[has] * (1 - lo[has, j] * 1e-6) < ff["mz_min"].to_numpy())
+        assert np.all(target[has] * (1 + hi[has, j] * 1e-6) > ff["mz_max"].to_numpy())
+        # every scan the picker counted for the feature holds a centroid in that window
+        tg, l_, h_ = target[has], lo[has, j].astype(float), hi[has, j].astype(float)
+        for m_, a_, b_, s0, s1, ns_ in zip(tg, l_, h_, ff["scan_min"], ff["scan_max"], ff["n_scans"]):
+            c_, t_ = m_ * (1.0 + 0.5 * (b_ - a_) * 1e-6), m_ * 0.5 * (a_ + b_) * 1e-6
+            assert (cloud.eic(c_, t_ / c_ * 1e6, int(s0), int(s1) + 1) > 0).sum() >= ns_
         n_checked += int(has.sum())
     assert n_checked > 50
     # compound groups travel with the bundle: ids, roles (coded), neutral mass, base flag, size
@@ -204,11 +209,50 @@ def test_eic_windows_cover_the_feature_span():
     mn = np.array([300 * (1 - 12e-6), 300 * (1 - 1e-6), np.nan, np.nan])
     mx = np.array([300 * (1 + 3e-6), 300 * (1 + 20e-6), np.nan, np.nan])
     lo, hi = bundle.eic_windows(t, mn, mx, np.array([np.nan, np.nan, 8.0, np.nan]), np.array([np.nan, np.nan, 2.0, np.nan]), 5.0)
-    assert np.allclose(lo, [12, 5, 8, 5]) and np.allclose(hi, [5, 20, 5, 5])
+    # a span edge is moved out by EIC_EDGE_DA (0.033 ppm at m/z 300) and to the next 0.01 ppm; +/- ppm and the median
+    # span are not edges of this file's centroids and stay as they are
+    assert np.allclose(lo, [12.04, 5, 8, 5]) and np.allclose(hi, [5, 20.04, 5, 5])
     # a span off-centre (the file's offset not fully removed) still lies inside the window
     lo, hi = bundle.eic_windows(np.array([300.0]), np.array([300 * (1 + 2e-6)]), np.array([300 * (1 + 9e-6)]),
                                 np.array([np.nan]), np.array([np.nan]), 5.0)
-    assert np.allclose(lo, [5]) and np.allclose(hi, [9])
+    assert np.allclose(lo, [5]) and np.allclose(hi, [9.04])
+
+
+def test_eic_window_keeps_the_span_edge_centroids():
+    """the window must hold the feature's own lowest and highest centroid after every rounding on the way to it: the
+    feature table's 6 decimals, float32 in the results, and the viewer's 0.01 ppm and 5-decimal m/z for Whole run. A
+    window ending exactly on the span dropped the edge centroid about every second time, and the chromatogram was drawn
+    with a hole in that scan (MAFLD QTOF data 2026-11-10: 19 % of the features)"""
+    rng = np.random.default_rng(7)
+    n = 20000
+    mz = rng.uniform(50.0, 1500.0, n)
+    lo_true = mz * (1 - rng.uniform(0.0, 40e-6, n))        # the lowest / highest centroid of the peak, as measured
+    hi_true = mz * (1 + rng.uniform(0.0, 40e-6, n))
+    nan = np.full(n, np.nan)
+    lo, hi = bundle.eic_windows(mz, np.round(lo_true, 6), np.round(hi_true, 6), nan, nan, 5.0)
+    assert lo.min() >= 5.0 and hi.min() >= 5.0
+    # the stored traces: the window as computed
+    assert np.all(mz * (1 - lo * 1e-6) <= lo_true) and np.all(mz * (1 + hi * 1e-6) >= hi_true)
+    # Whole run: float32 in the bundle, two decimals and a 5-decimal m/z in the request, extract_eic's arithmetic
+    lo_v = np.round(lo.astype(np.float32).astype(float), 2)
+    hi_v = np.round(hi.astype(np.float32).astype(float), 2)
+    mz_v = np.round(mz, 5)
+    assert np.all(mz_v * (1.0 - lo_v * 1e-6) <= lo_true) and np.all(mz_v * (1.0 + hi_v * 1e-6) >= hi_true)
+    # and it costs next to nothing: at most EIC_EDGE_DA + 0.01 ppm beyond the span
+    wide = lo > 5.0
+    extra = mz[wide] * (1 - lo[wide] * 1e-6) - lo_true[wide]
+    assert extra.min() > -(bundle.EIC_EDGE_DA + 0.011e-6 * 1500 + 1e-6)
+
+    # the centroid at the edge is in the chromatogram: one feature whose apex scan holds its lowest m/z
+    scans = [(np.array([299.99412345]), np.array([50.0])), (np.array([299.98871234567]), np.array([900.0])),
+             (np.array([299.99601]), np.array([60.0]))]
+    cloud = io.from_scans("edge", [0.1, 0.2, 0.3], [m for m, _ in scans], [i for _, i in scans])
+    target = np.array([299.9921])
+    lo1, hi1 = bundle.eic_windows(target, np.array([round(299.98871234567, 6)]), np.array([round(299.99601, 6)]),
+                                  np.array([np.nan]), np.array([np.nan]), 5.0)
+    centre, tol = target * (1.0 + 0.5 * (hi1 - lo1) * 1e-6), target * 0.5 * (lo1 + hi1) * 1e-6
+    tr = bundle.eic_on_grid(cloud.off, cloud.mz, cloud.inten, cloud.rt, centre, tol, np.array([0.1]), np.array([0.1]), 3)
+    assert np.allclose(tr[0], [50.0, 900.0, 60.0])
 
 
 def test_numeric_file_names_stay_text(tmp_path):

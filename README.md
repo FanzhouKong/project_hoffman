@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.2.2](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.2) (all releases:
+[Mosa v1.2.3](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.3) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
@@ -237,7 +237,9 @@ point-cloud cache, so zooming out shows the full chromatogram and zooming in sho
 Each file's trace covers the m/z span of the centroids the picker took for the feature in that file, at least
 ±`--ppm` (files without the feature: the median span of those with it); hovering a trace names its window. Since
 1.1.4: on QTOF data a weak feature's centroids spread well past 5 ppm (median ±15 ppm on an Agilent Q-TOF), and the
-earlier fixed ±`--ppm` window cut such peaks short in the plot (the feature itself was not affected).
+earlier fixed ±`--ppm` window cut such peaks short in the plot (the feature itself was not affected). Since 1.2.3
+the window ends just outside that span (0.00001 m/z further): ending exactly on it, rounding left out the scan of
+the feature's lowest or highest centroid about every second time, and the plot showed a drop to zero inside the peak.
 
 **Download table** (Features tab) saves the listed features (search, filters and sort applied) with retention
 times in seconds and, after `n_filled`, a `gap_filled_files` column: the files whose value was gap-filled rather

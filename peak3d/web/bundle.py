@@ -289,18 +289,32 @@ def extract_eic(output, cache_dir, stem: str, mz: float, ppm: float, offset_ppm:
             "intensity": [float(f"{v:.5g}") for v in y.tolist()]}
 
 
+EIC_EDGE_DA = 1e-5     # a window that ends on a feature's own lowest / highest centroid is moved out by this much
+EIC_EDGE_STEP = 0.01   # ... and then out to the next multiple of this many ppm
+
+
 def eic_windows(target, mz_min, mz_max, med_lo, med_hi, ppm: float):
     """per group, the m/z window (ppm below, ppm above the target) a file's chromatogram is drawn over: where the file
     has the feature, the union of target +/- ppm and the m/z span of the centroids the picker took for it (mz_min,
     mz_max; on QTOF a weak feature's centroids spread well past 5 ppm, and a +/- ppm window cut its peak); where it has
     none, the group's median span (med_lo, med_hi, ppm from the feature m/z) over the files that have it, at least +/-
-    ppm; NaN spans fall back to +/- ppm"""
+    ppm; NaN spans fall back to +/- ppm.
+    A span edge is itself a centroid of the peak (the lowest or highest the picker took), and the values that reach
+    this window are rounded on the way: mz_min / mz_max to 6 decimals in the feature table, the window to float32 in
+    the results and to 0.01 ppm, the m/z to 5 decimals, when the viewer asks for the whole run. A window ending exactly
+    on the span lost that centroid about every second time, and its scan was drawn as a drop to zero inside the peak.
+    So a span edge is moved out by EIC_EDGE_DA (more than those roundings together) and then to the next multiple of
+    EIC_EDGE_STEP ppm, which float32 and two decimals carry unchanged; at m/z 100 that is 0.11 ppm at most."""
     target = np.asarray(target, float)
     lo, hi = np.full(len(target), float(ppm)), np.full(len(target), float(ppm))
+
+    def out(x):       # ppm from the target, edge moved out, on the EIC_EDGE_STEP grid (1e-9: a value on the grid stays)
+        return np.ceil((x + EIC_EDGE_DA) / target[det] * 1e6 / EIC_EDGE_STEP - 1e-9) * EIC_EDGE_STEP
+
     with np.errstate(invalid="ignore"):
         det = np.isfinite(mz_min) & np.isfinite(mz_max) & (mz_min > 0) & (mz_max >= mz_min)
-        lo[det] = np.maximum(ppm, (target[det] - mz_min[det]) / target[det] * 1e6)
-        hi[det] = np.maximum(ppm, (mz_max[det] - target[det]) / target[det] * 1e6)
+        lo[det] = np.maximum(ppm, out(target[det] - mz_min[det]))
+        hi[det] = np.maximum(ppm, out(mz_max[det] - target[det]))
         nd = ~det & np.isfinite(med_lo) & np.isfinite(med_hi)
         lo[nd] = np.maximum(ppm, med_lo[nd])
         hi[nd] = np.maximum(ppm, med_hi[nd])
