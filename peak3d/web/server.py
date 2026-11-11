@@ -118,7 +118,7 @@ def options_to_argv(options: dict, schema) -> list[str]:
             if v:
                 argv.append(f["flag"])
         elif f["kind"] == "list":
-            for item in v or []:
+            for item in ([v] if isinstance(v, str) else v or []):     # one path as text (API clients, 1.2.0 settings)
                 if str(item).strip():
                     argv += [f["flag"], str(item).strip()]
         elif v is not None and str(v).strip() != "" and str(v) != str(f["default"]):

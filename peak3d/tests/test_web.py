@@ -337,6 +337,10 @@ def test_schema_and_argv():
     assert sch["library"]["kind"] == "list" and sch["library"]["default"] == []
     argv = server.options_to_argv({"library": ["a.msp", " ", "b dir/c.pkl"]}, list(sch.values()))
     assert argv == ["--library", "a.msp", "--library", "b dir/c.pkl"]
+    # one library as text (as before 1.2.1, and the app's example run on Windows): one file, not one per character
+    win = "C:\\Users\\me\\peak3d_example\\demo_library.msp"
+    assert server.options_to_argv({"library": win}, list(sch.values())) == ["--library", win]
+    assert server.options_to_argv({"library": ""}, list(sch.values())) == []
     from peak3d.__main__ import build_parser
     args = build_parser().parse_args(["process", "--input", "x", "--output", "y", *argv])
     assert args.library == [Path("a.msp"), Path("b dir/c.pkl")]
