@@ -333,6 +333,15 @@ def test_schema_and_argv():
     assert argv == ["--cores", "4", "--ppm", "7", "--no-gap-fill"]          # parser order, defaults left out
     assert server.validate_argv(["process", "--input", "x", "--output", "y", *argv]) is None
     assert "must be in [0, 1]" in server.validate_argv(["process", "--input", "x", "--output", "y", "--min-score", "1.5"])
+    # libraries: a list on the form, one --library per file on the command line (which also takes them after one flag)
+    assert sch["library"]["kind"] == "list" and sch["library"]["default"] == []
+    argv = server.options_to_argv({"library": ["a.msp", " ", "b dir/c.pkl"]}, list(sch.values()))
+    assert argv == ["--library", "a.msp", "--library", "b dir/c.pkl"]
+    from peak3d.__main__ import build_parser
+    args = build_parser().parse_args(["process", "--input", "x", "--output", "y", *argv])
+    assert args.library == [Path("a.msp"), Path("b dir/c.pkl")]
+    assert build_parser().parse_args(["identify", "out", "--library", "a.msp", "b.pkl"]).library == [Path("a.msp"), Path("b.pkl")]
+    assert build_parser().parse_args(["process", "--input", "x", "--output", "y"]).library is None
 
 
 class _Client:
@@ -786,6 +795,66 @@ def test_identity_search_through_the_server(gui):
     assert c.req(f"/api/results/file?path={q}&name=identifications.tsv")[0] == 200
     full = bundle.unpack(bundle.build(out))[0]
     assert full["ids"]["n"] >= 1 and full["kernel"] == "peak3d"
+
+
+MORE = """NAME: Glucose (second library)
+PRECURSORMZ: 180.0633
+PRECURSORTYPE: [M+H]+
+IONMODE: Positive
+FORMULA: C6H12O6
+Num Peaks: 3
+72.04\t12
+110.06\t100
+163.06\t35
+"""
+
+
+def test_identity_search_with_several_libraries(gui):
+    """the panel's libraries reach one search: hits from both, each naming its library; a library added later is
+    searched with the ones before; a bad file among them is named"""
+    c, root, _ = gui
+    out = _ms2_output(root / "res")
+    (root / "libs").mkdir()
+    (root / "libs" / "mini.msp").write_text(LIBRARY)
+    (root / "libs" / "more.msp").write_text(MORE)
+    (root / "libs" / "Other.pkl").write_bytes(pickle.dumps({"not": "a library"}))
+    q, mini, more = quote(str(out)), str(root / "libs" / "mini.msp"), str(root / "libs" / "more.msp")
+    full = lambda p: str(Path(p).resolve())                    # as the server reads them
+    assert c.json("/api/results/identify", {"path": str(out), "libraries": []})[0] == 400
+    assert c.json("/api/results/identify", {"path": str(out), "libraries": mini})[0] == 400      # a list, not a path
+    code, err = c.json("/api/results/identify", {"path": str(out), "libraries": [mini, str(root / "libs" / "nope.msp")]})
+    assert code == 400 and "nope.msp" in err["error"]
+    code, err = c.json("/api/results/identify", {"path": str(out), "libraries": [mini, str(root / "libs" / "Other.pkl")]})
+    assert code == 400 and "could not read the library Other.pkl" in err["error"]
+    code, meta = c.json("/api/results/identify", {"path": str(out), "libraries": [mini], "min_score": 0.5})
+    assert code == 200 and meta["library_n"] == 3 and [d["name"] for d in meta["libraries"]] == ["mini.msp"]
+    h, a = bundle.unpack(gzip.decompress(c.req(f"/api/results/ms2ids?path={q}")[1]))
+    assert "id_db" not in a and h["ids"]["libraries"][0]["path"] == full(mini)    # one library: nothing per hit to say
+    code, meta = c.json("/api/results/identify", {"path": str(out), "libraries": [mini, more], "min_score": 0.5})
+    assert code == 200 and meta["library_n"] == 4 and [d["n"] for d in meta["libraries"]] == [3, 1]
+    h, a = bundle.unpack(gzip.decompress(c.req(f"/api/results/ms2ids?path={q}")[1]))
+    names = [h["ids"]["libraries"][k]["name"] for k in a["id_db"]]
+    assert set(zip(h["ids"]["name"], names)) >= {("Glucose", "mini.msp"), ("Glucose (second library)", "more.msp")}
+    assert set(a["id_lib"].tolist()) <= {0, 1, 3} and 3 in a["id_lib"]          # more.msp's record runs on as #3
+    # a hit the user picks from the second library keeps that library's path
+    hits = pd.read_csv(out / "identifications.tsv", sep="\t")
+    r = hits[(hits["library"] == "more.msp") & (hits["spectrum"] == "single")].iloc[0]
+    code, res = c.json("/api/results/annotate", {"path": str(out), "group_id": 1, "hit": {"spectrum": "single", "rank": int(r["rank"])}})
+    assert code == 200 and res["notes"]["annotation"]["library"] == full(more) and res["notes"]["annotation"]["library_index"] == 3
+    # an older page sends one "library"
+    code, meta = c.json("/api/results/identify", {"path": str(out), "library": more})
+    assert code == 200 and meta["library_n"] == 1
+
+
+def test_library_list_in_the_scripts():
+    """the run form and the Identity search panel keep a list of libraries; Browse picks several"""
+    st = ROOT / "peak3d" / "web" / "static"
+    viewer, app, core = ((st / f).read_text(encoding="utf-8") for f in ("viewer.js", "app.js", "core.js"))
+    assert "libraries: libs" in viewer and "state.idAgain = true" in viewer and 'h("div.lib-list"' in viewer
+    assert "done(mode === \"msp\" ? picked.slice() : cur.path)" in app and "P3.savedLibraries()" in app
+    assert "add([].concat(ps))" in app and "add([].concat(ps))" in viewer
+    assert "function savedLibraries()" in core and '"peak3d-id-libraries"' in core
+    assert 'cols.push("Library")' in viewer and "id: String(b.dbIndex)" in viewer
 
 
 def test_download_names_outside_latin1(gui):

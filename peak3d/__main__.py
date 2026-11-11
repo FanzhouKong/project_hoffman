@@ -111,9 +111,10 @@ def build_parser():
 
     def identify_opts(p, required=False):
         from .library import METHODS
-        p.add_argument("--library", type=Path, default=None, required=required,
+        p.add_argument("--library", type=Path, nargs="+", action="extend", default=None, required=required,
                        help="spectral library, .msp or a MassCube .pkl: identity search of every feature's MS2 spectrum" +
-                            ("" if required else " (optional)"))
+                            ("" if required else " (optional)") + "; several (--library A.msp B.pkl, or the option "
+                            "repeated) are searched as one, each hit naming its library")
         p.add_argument("--similarity", choices=list(METHODS), default="weighted_entropy",
                        help="spectral similarity score (default weighted_entropy)")
         p.add_argument("--min-similarity", type=_unit, default=0.7,
@@ -306,8 +307,9 @@ def main(argv=None):
         t0 = time.perf_counter()
         if not (args.output / "aligned_feature_table.tsv").exists():
             sys.exit(f"not a peak3d output folder: {args.output}")
-        if not args.library.expanduser().is_file():
-            sys.exit(f"--library: no such file: {args.library}")
+        for lib in args.library:
+            if not lib.expanduser().is_file():
+                sys.exit(f"--library: no such file: {lib}")
         identify(args.output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity,
                  workers=args.cores, denoise=args.denoise)
         from .web.report import refresh_ids

@@ -40,7 +40,7 @@
     min_presence: "Minimum files per feature", holdout: "Held-out anchor check", quant: "Main table value",
     no_keep_cache: "Keep the point-cloud cache", no_report: "Interactive report (report.html)",
     compounds: "Compound groups (adducts, fragments, isotopes)",
-    library: "Spectral library (.msp or .pkl, optional)", similarity: "Similarity score", min_similarity: "Minimum similarity",
+    library: "Spectral libraries (.msp or .pkl, optional)", similarity: "Similarity score", min_similarity: "Minimum similarity",
     precursor_ppm: "Precursor tolerance (ppm)", fragment_tol: "Fragment tolerance (Da)",
   };
   const HELP = {
@@ -51,7 +51,7 @@
     compounds: "Joins the adducts, in-source fragments and isotopes of one compound on peak shape and intensity correlation. Slow and memory-hungry on large studies (about 25 GB for 200 files).",
     set: "One NAME=VALUE per line; advanced picker parameters.",
     no_report: "A single HTML file with these views and chromatograms; opens in any browser, easy to share.",
-    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with a library, both are searched after the run, each candidate scored on the spectrum as measured and denoised with its own formula (ions without a plausible neutral loss removed), and the best hit on the denoised consensus becomes each feature's annotation.",
+    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with one or more libraries (searched as one, each hit naming its library), both are searched after the run, each candidate scored on the spectrum as measured and denoised with its own formula (ions without a plausible neutral loss removed), and the best hit on the denoised consensus becomes each feature's annotation.",
   };
   const INVERTED = new Set(["no_rt_correction", "no_gap_fill", "no_report", "no_keep_cache"]);
   const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];
@@ -147,15 +147,27 @@
       return h("div", h("div.label-medium", { style: { color: "var(--ink-2)", marginBottom: "6px" } }, label),
         segmented(SEGMENTS[f.dest], S.form[f.dest], set), help && f.dest !== "quant" ? h("div.body-small.muted", { style: { marginTop: "5px" } }, help) : null);
     }
-    if (f.dest === "library") {
-      const t = textField(label, S.form.library, {
-        lead: "description", help,
-        trail: h("button.icon-btn.state", { type: "button", title: "Browse", "aria-label": "Browse for a .msp or .pkl library",
-          onclick: () => browse("msp", S.form.library ? dirname(S.form.library) : S.input, (p) => { t.input.value = p; setLib(p); }) }, icon("folder_open")),
-        oninput: (v) => setLib(v.trim()),
+    if (f.dest === "library") {      // one or more libraries, searched as one: added by path or Browse (several at once)
+      const libs = () => S.form.library || [];
+      const rows = h("div.lib-rows.form-libs");
+      const paint = () => rows.replaceChildren(...libs().map((p) => h("div.lib-row", { title: p }, icon("description"), h("span.lib-name", basename(p)),
+        h("button.icon-btn.state", { type: "button", title: "Remove", "aria-label": `Remove ${basename(p)}`, onclick: () => setLibs(libs().filter((x) => x !== p)) }, icon("close")))));
+      const setLibs = (list, remember = true) => { S.form.library = list; if (remember) P3.saveLibraries(list); paint(); onAny(); };
+      const add = (paths) => {
+        const fresh = paths.map((p) => String(p).trim()).filter((p) => p && !libs().includes(p));
+        if (fresh.length) setLibs(libs().concat(fresh));
+      };
+      const t = textField(label, "", {
+        lead: "add", help,
+        trail: h("button.icon-btn.state", { type: "button", title: "Browse (pick one or several)", "aria-label": "Browse for .msp or .pkl libraries",
+          onclick: () => browse("msp", libs().length ? dirname(libs()[libs().length - 1]) : S.input, (ps) => add([].concat(ps))) }, icon("folder_open")),
+        onchange: (v) => { if (v.trim()) { t.input.value = ""; add([v]); } },
       });
-      const setLib = (v) => { S.form.library = v || null; P3.storeSet("peak3d-id-library", v || ""); onAny(); };
-      exampleLibrary = (v) => { t.input.value = v; S.form.library = v; onAny(); };     // not remembered as the user's library
+      t.input.placeholder = "Add a .msp or .pkl file: path, or Browse";
+      t.input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); const v = t.input.value; t.input.value = ""; add([v]); } });
+      t.el.insertBefore(rows, t.support);
+      paint();
+      exampleLibrary = (v) => setLibs([v], false);      // not remembered as the user's libraries
       return t.el;
     }
     if (f.kind === "choice") {
@@ -649,23 +661,32 @@
   }
 
   // ---------------------------------------------------------------- dialogs
+  // a folder picker; mode "msp" picks spectral library files instead, one or several (in one folder or more: the
+  // picks are kept while moving between folders) and done gets their paths as a list
   function browse(mode, start, done) {
     const dlg = document.getElementById("browse");
-    const titles = { input: "Choose the data folder (.mzML or Thermo .raw)", output: "Choose where to write results", results: "Choose a results folder", msp: "Choose a spectral library (.msp or MassCube .pkl)" };
-    let cur = null, file = null;
-    const pathField = textField("Folder", start || "", { lead: "folder_open", onchange: (v) => load(v.trim()) });
+    const titles = { input: "Choose the data folder (.mzML or Thermo .raw)", output: "Choose where to write results", results: "Choose a results folder", msp: "Choose spectral libraries (.msp or MassCube .pkl)" };
+    let cur = null;
+    const picked = [];             // msp: the library files chosen so far, full paths in the order picked
+    // change also fires when a click in the list takes the focus: reloading the folder already shown would swap the
+    // list under that click and lose it
+    const pathField = textField("Folder", start || "", { lead: "folder_open", onchange: (v) => { if (!cur || v.trim() !== cur.path) load(v.trim()); } });
     pathField.input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); load(pathField.input.value.trim()); } });
     const list = h("div.list");
     const status = h("div.body-small.muted", { style: { flex: 1 } });
     const ok = h("button.btn.filled.state", { type: "button" }, "Select");
     const cancel = h("button.btn.text.state", { type: "button", onclick: () => dlg.close() }, "Cancel");
     dlg.replaceChildren(h("div.dialog-head", h("h2.headline-small", titles[mode]), pathField.el), h("div.dialog-body", list), h("div.divider"), h("div.dialog-actions", status, cancel, ok));
-    ok.addEventListener("click", () => { if (mode === "msp" ? file : cur) { dlg.close(); done(mode === "msp" ? join(cur.path, file) : cur.path); } });
+    ok.addEventListener("click", () => { if (mode === "msp" ? picked.length : cur) { dlg.close(); done(mode === "msp" ? picked.slice() : cur.path); } });
+    const pickedText = () => {
+      const files = (cur && cur.files) || [], n = files.length, here = files.filter((f) => picked.includes(join(cur.path, f))).length;
+      if (picked.length) return `${int(picked.length)} selected${picked.length > here ? ` (${int(picked.length - here)} in other folders)` : ""}`;
+      return n ? `${int(n)} library file${n > 1 ? "s" : ""} here: click to select one or more` : "No .msp or .pkl files here";
+    };
     let seq = 0;                 // the latest listing asked for wins (the start folder's may answer after a typed path's)
     async function load(p) {
       const my = ++seq;
       list.replaceChildren(h("div.loading", { style: { padding: "32px" } }, P3.spinner()));
-      file = null;
       try {
         const r = await api(`/api/ls?path=${enc(p)}${mode === "msp" ? "&ext=msp" : ""}`);
         if (my !== seq) return;
@@ -676,14 +697,23 @@
         if (r.parent != null) items.push(h("button.list-item.state", { type: "button", onclick: () => load(r.parent) }, icon("arrow_back"), h("div.text", h("div.headline", "Up one level"))));
         for (const d of r.dirs) items.push(h("button.list-item.state", { type: "button", onclick: () => load(r.path ? join(r.path, d) : d) }, icon("folder"), h("div.text", h("div.headline", d)), icon("chevron_right")));
         if (mode === "msp") for (const f of r.files || []) {
-          const it = h("button.list-item.state", { type: "button", "aria-selected": "false",
-            onclick: () => { file = f; list.querySelectorAll("[data-file]").forEach((e) => e.setAttribute("aria-selected", String(e === it))); ok.disabled = false; status.textContent = f; },
-            ondblclick: () => { file = f; ok.click(); }, "data-file": f }, icon("description"), h("div.text", h("div.headline", f)));
+          const full = join(r.path, f), lead = h("span.pick-ic");
+          const mark = () => { const on = picked.includes(full); it.setAttribute("aria-selected", String(on)); lead.replaceChildren(icon(on ? "check_circle" : "description")); };
+          const it = h("button.list-item.state", { type: "button", "aria-selected": "false", "data-file": f,
+            onclick: () => {
+              const k = picked.indexOf(full);
+              if (k >= 0) picked.splice(k, 1); else picked.push(full);
+              mark();
+              ok.disabled = !picked.length;
+              status.textContent = pickedText();
+            },
+            ondblclick: () => { if (!picked.includes(full)) picked.push(full); ok.click(); } }, lead, h("div.text", h("div.headline", f)));
+          mark();
           items.push(it);
         }
         if (!r.dirs.length && !(mode === "msp" && (r.files || []).length)) items.push(h("div.list-item", h("div.text.muted", mode === "msp" ? "No subfolders or library files" : "No subfolders")));
         list.replaceChildren(...items);
-        if (mode === "msp") { ok.disabled = true; status.textContent = (r.files || []).length ? `${int(r.files.length)} library file${r.files.length > 1 ? "s" : ""} here: pick one` : "No .msp or .pkl files here"; }
+        if (mode === "msp") { ok.disabled = !picked.length; status.textContent = pickedText(); }
         else if (mode === "input") { ok.disabled = !r.n_inputs; status.textContent = r.n_inputs ? `${filesText(r)} here` : "No .mzML or Thermo .raw files here"; }
         else if (mode === "results") { ok.disabled = !r.is_output; status.textContent = r.is_output ? "Mosa results here" : "No Mosa results here"; }
         else { ok.disabled = !r.path || r.writable === false; status.textContent = r.writable === false ? "Not writable" : "Results go in a new subfolder here"; }
@@ -719,7 +749,7 @@
     S.formErrors = {};
     for (const f of [...S.schemas.peak3d, ...S.schemas.external]) if (!(f.dest in S.form)) S.form[f.dest] = f.kind === "list" ? [] : f.default;
     if ("cores" in S.form) S.form.cores = Math.max(1, Math.min(S.info.cpu_count || 1, 4));
-    if ("library" in S.form) S.form.library = P3.storeGet("peak3d-id-library") || null;     // search automatically with the last library
+    if ("library" in S.form) S.form.library = P3.savedLibraries();     // search automatically with the last libraries
     const k = P3.storeGet("peak3d-kernel");
     if (k && KNAME[k]) S.kernel = k;
     try {

@@ -342,6 +342,107 @@ def test_identify_denoising_search(tmp_path):
         identify(out, lib, denoise="t2")
 
 
+def _second_library(tmp_path, name="more.msp"):
+    """another library: Leucine again (a slightly different spectrum, its own name), a decoy, nothing for feature 2"""
+    p = tmp_path / name
+    with open(p, "w") as fh:
+        write_msp_record(fh, [("NAME", "Leucine B"), ("PRECURSORMZ", 132.1019), ("PRECURSORTYPE", "[M+H]+"),
+                              ("IONMODE", "Positive"), ("FORMULA", "C6H13NO2")], FRAG, np.array([30.0, 100.0, 40.0, 10.0]))
+        write_msp_record(fh, [("NAME", "Decoy B"), ("PRECURSORMZ", 132.1021)], np.array([55.0, 72.0808]), np.array([1.0, 1.0]))
+    return p
+
+
+def test_identify_several_libraries(tmp_path):
+    """libraries searched as one: hits from all of them ranked together, each naming its library; library_index runs
+    on through the libraries in order (unique), the first library's being its position in that file"""
+    out, a, b = _output(tmp_path), _library(tmp_path), _second_library(tmp_path)
+    one = identify(out, a, "weighted_entropy", min_score=0.0)
+    assert set(one["library"]) == {"lib.msp"}
+    info1 = json.loads((out / "identifications.json").read_text())
+    assert info1["library"] == str(a.resolve()) and info1["libraries"] == [{"path": str(a.resolve()), "name": "lib.msp", "n": 5}]
+    t = identify(out, [a, b, a], "weighted_entropy", min_score=0.0)          # a listed twice: searched once
+    info = json.loads((out / "identifications.json").read_text())
+    assert [d["name"] for d in info["libraries"]] == ["lib.msp", "more.msp"] and [d["n"] for d in info["libraries"]] == [5, 2]
+    assert info["library_n"] == 7 and info["library"] == f"{a.resolve()}; {b.resolve()}"
+    assert set(t["library"]) == {"lib.msp", "more.msp"}
+    for spec, g in t.groupby("spectrum"):                    # one ranking over both libraries, per copy
+        assert g["rank"].tolist() == list(range(1, len(g) + 1)) and (g["score"].diff().dropna() <= 0).all(), spec
+    sb = t[t["library"] == "more.msp"]
+    assert set(sb["library_index"]) <= {5, 6} and "Leucine B" in set(sb["name"])
+    # the first library's hits score and number as in a search of it alone
+    key = ["spectrum", "library_index"]
+    mine = t[t["library"] == "lib.msp"].set_index(key).sort_index()
+    alone = one.set_index(key).sort_index()
+    assert mine.index.equals(alone.index) and np.allclose(mine["score"], alone["score"])
+    assert (mine["name"] == alone["name"]).all() and (mine["denoise_ion"].fillna("") == alone["denoise_ion"].fillna("")).all()
+    # each listed record's spectrum once in identifications.msp, the comment naming its library
+    back = read_msp(out / "identifications.msp")
+    assert len(back) == t["library_index"].nunique()
+    leu_b = [c for n, c in zip(back.names, back.comments) if n == "Leucine B"][0]
+    assert 'library="more.msp"' in leu_b and f"library_index={int(sb[sb['name'] == 'Leucine B']['library_index'].iloc[0])}" in leu_b
+    # the denoising masks of hits from either library are the right ones
+    with np.load(out / library.DENOISE_FILE) as z:
+        ions = z["ion"].tolist()
+    d = t[(t["spectrum"] == "single_denoised") & (t["denoise_key"] >= 0)]
+    assert {"lib.msp", "more.msp"} <= set(d["library"]) and all(ions[k] == ion for k, ion in zip(d["denoise_key"], d["denoise_ion"]))
+    # what the viewer gets: the library of each hit, by its place in the search's list
+    from peak3d.web import bundle
+    h, arr = bundle.ms2_ids(out, [1, 2], stems=["S0"])
+    assert [x["name"] for x in h["ids"]["libraries"]] == ["lib.msp", "more.msp"]
+    names = np.array(["lib.msp", "more.msp"])[arr["id_db"]]
+    lib_of = dict(zip(t["library_index"], t["library"]))
+    assert all(lib_of[int(i)] == n for i, n in zip(arr["id_lib"], names))
+    # top_k over all the libraries together
+    k1 = identify(out, [a, b], "dot", min_score=0.9, top_k=1)
+    assert len(k1) == 2 and set(k1["spectrum"]) == {"single", "single_denoised"}
+
+
+def test_libraries_are_kept_in_memory_while_searched(tmp_path):
+    """adding a library to a search reads only that one; a library left out is let go"""
+    out, a, b = _output(tmp_path), _library(tmp_path), _second_library(tmp_path)
+    library._CACHE.clear()
+    identify(out, a, min_score=0.0)
+    la = library.load(a)
+    identify(out, [a, b], min_score=0.0)
+    assert len(library._CACHE) == 2 and library.load_all([a, b])[0] is la
+    lb = library.load_all([a, b])[1]
+    identify(out, [b], min_score=0.0)
+    assert len(library._CACHE) == 1 and library.load_all([b])[0] is lb
+    with pytest.raises(ValueError):
+        identify(out, [], min_score=0.0)
+
+
+def test_library_names_tell_files_apart(tmp_path):
+    p = [tmp_path / "a" / "lib.msp", tmp_path / "b" / "lib.msp", tmp_path / "c.pkl"]
+    assert library.library_names(p) == ["a/lib.msp", "b/lib.msp", "c.pkl"]
+    q = [tmp_path / "x" / "a" / "lib.msp", tmp_path / "y" / "a" / "lib.msp"]
+    assert library.library_names(q) == [str(x) for x in q]
+    assert library.library_paths([tmp_path / "c.pkl", str(tmp_path / "c.pkl")]) == [(tmp_path / "c.pkl").resolve()]
+
+
+def test_a_bad_library_among_several_is_named(tmp_path):
+    import pickle
+    out, a = _output(tmp_path), _library(tmp_path)
+    bad = tmp_path / "Other.pkl"
+    bad.write_bytes(pickle.dumps({"not": "a library"}))
+    with pytest.raises(library.LibraryError, match="could not read the library Other.pkl") as e:
+        identify(out, [a, bad])
+    assert e.value.path == bad.resolve()
+
+
+def test_reidentify_repeats_the_search_with_all_its_libraries(tmp_path, monkeypatch):
+    from peak3d import pipeline
+    out, a, b = _output(tmp_path), _library(tmp_path), _second_library(tmp_path)
+    identify(out, [a, b], "dot", min_score=0.5)
+    seen = []
+    monkeypatch.setattr(pipeline, "ms2_and_identify", lambda output, args, stage: seen.append(args))
+    pipeline._reidentify(out, {})
+    assert [str(x) for x in seen[0].library] == [str(a.resolve()), str(b.resolve())] and seen[0].similarity == "dot"
+    b.unlink()                                           # a library gone: the search is dropped, not half repeated
+    pipeline._reidentify(out, {})
+    assert len(seen) == 1 and not (out / "identifications.json").exists()
+
+
 def test_candidate_pairs_window_and_modes():
     q_mz = np.array([100.0, 200.0])
     lib_prec = np.array([np.nan, 100.0005, 99.9995, 100.01, 200.0, 200.0])

@@ -212,10 +212,28 @@
     hit(j) {
       const a = this.id.a, h = this.id.h, k = a.id_lk ? a.id_lk[j] : j;     // id_lk: each library spectrum is sent once
       const spec = h.spectra ? { mz: a.id_mz.subarray(a.id_off[k], a.id_off[k + 1]), inten: a.id_int.subarray(a.id_off[k], a.id_off[k + 1]) } : null;
+      const lib = a.id_lib ? a.id_lib[j] : -1, db = this.hitLibrary(j, lib);
       return { j, rank: a.id_rank[j], score: a.id_score[j], nmatch: a.id_nmatch[j], ppm: a.id_ppm[j], prec: a.id_prec[j],
-        spectrum: SPEC_NAME[a.id_spec ? a.id_spec[j] : 1], lib: a.id_lib ? a.id_lib[j] : -1,
+        spectrum: SPEC_NAME[a.id_spec ? a.id_spec[j] : 1], lib,
         name: h.name[j], adduct: h.precursor_type[j], formula: h.formula[j], inchikey: h.inchikey[j], smiles: h.smiles[j],
-        dion: h.denoise_ion ? h.denoise_ion[j] : "", spec };
+        dion: h.denoise_ion ? h.denoise_ion[j] : "", spec, db: db.name, dbPath: db.path, dbIndex: db.index };
+    }
+    // the libraries of the last search: [{path, name, n}] (one, from its path, for searches made before there could
+    // be several)
+    libraries() {
+      const h = this.id ? this.id.h : null;
+      if (!h) return [];
+      if (h.libraries && h.libraries.length) return h.libraries;
+      return h.library ? [{ path: h.library, name: base(h.library), n: h.library_n }] : [];
+    }
+    // the library hit j came from (id_db: its place in the search's list; one library: that one) and the record's
+    // position in that file (lib, its library_index, counts on from the earlier libraries' records)
+    hitLibrary(j, lib) {
+      const L = this.libraries(), k = this.id.a.id_db ? this.id.a.id_db[j] : 0, d = L[k] || L[0];
+      if (!d) return { name: "", path: "", index: lib };
+      let first = 0;
+      for (let i = 0; i < k && i < L.length; i++) first += +L[i].n || 0;
+      return { name: d.name || base(d.path), path: d.path || "", index: lib >= 0 ? lib - first : lib };
     }
     value(g, f) {
       const q = this.a.m_q[g * this.N + f];
@@ -365,7 +383,7 @@
     const pols = new Set([R.opts.polarity, ...R.files.map((f) => f.polarity)].filter(Boolean).map((p) => (/^(pos|\+)/i.test(p) ? 1 : /^(neg|-)/i.test(p) ? -1 : 0)));
     const runSign = pols.size === 1 ? [...pols][0] : 0;
     const signOf = (adduct) => (/[+]$/.test(adduct) ? 1 : /-$/.test(adduct) ? -1 : 0);
-    const db = base(ih.library).replace(/\.(msp|pkl)$/i, "");
+    const dbName = (b) => base(b.db).replace(/\.(msp|pkl)$/i, "");
     const lines = [];
     let k = 0;
     for (const g of rows) {
@@ -381,9 +399,9 @@
       for (const [, v] of clean) if (v > 0) entropy -= v * Math.log(v);
       const hits = R.hits(g, spec).slice(0, MW_MAX).map((j) => {
         const b = R.hit(j);
-        return { db, id: String(b.lib), name: txt(b.name), adduct: txt(b.adduct), rt: "", precursor_mz: isFinite(b.prec) ? String(b.prec) : "",
+        return { db: dbName(b), id: String(b.dbIndex), name: txt(b.name), adduct: txt(b.adduct), rt: "", precursor_mz: isFinite(b.prec) ? String(b.prec) : "",
           smiles: txt(b.smiles), user_name: "", spec_uid: "", predicted_rt_hilic: "", predicted_rt_rp: "", rt_confidence_level_hilic: "",
-          rt_confidence_level_rp: "", anno_delta_rt: "", splash: "", index: b.lib, entropy_similarity: fl(+(+b.score).toFixed(4)),
+          rt_confidence_level_rp: "", anno_delta_rt: "", splash: "", index: b.dbIndex, entropy_similarity: fl(+(+b.score).toFixed(4)),
           library_wiki_id: "", delta_predicted_rt: null, rt_confidence_level: null, confidence_in_domain: false, confidence_pct: null,
           ensemble_sd_pct: null };
       });
@@ -834,18 +852,40 @@
     }
 
     // ---------------------------------------------------------------- identity search (GUI only: the server searches)
+    // one or more libraries, searched as one: add them one at a time (a path, or Browse, which takes several at once)
+    // and the search runs again with the libraries already read kept in memory; a change made while a search runs is
+    // searched right after it (the settings live in state, so they outlast the panel's redraw)
     function identityPanel() {
       if (!opts.identify) return null;
       const methods = opts.methods || {};
       const saved = (k, d) => { const v = P3.storeGet("peak3d-id-" + k); return v == null || v === "" ? d : v; };
       const last = R.id ? R.id.h : {};
       const pick = (k, sk, d) => (last[k] != null ? last[k] : saved(sk, d));
-      const st = { library: pick("library", "library", ""), method: pick("method", "method", Object.keys(methods)[0] || "weighted_entropy"),
-        precursor_ppm: +pick("precursor_ppm", "ppm", 10), fragment_tol: +pick("fragment_tol", "tol", 0.02), min_score: +pick("min_score", "min", 0.7) };
+      const st = state.idSt || (state.idSt = { libraries: R.id ? R.libraries().map((d) => d.path) : P3.savedLibraries(),
+        method: pick("method", "method", Object.keys(methods)[0] || "weighted_entropy"),
+        precursor_ppm: +pick("precursor_ppm", "ppm", 10), fragment_tol: +pick("fragment_tol", "tol", 0.02), min_score: +pick("min_score", "min", 0.7) });
       const off = !R.m2;
-      const libIn = h("input", { type: "text", placeholder: "Choose a .msp or .pkl file", spellcheck: "false", value: st.library, disabled: off || null });
-      const browseBtn = opts.browseLibrary ? h("button.icon-btn.state", { type: "button", title: "Browse", "aria-label": "Browse for a .msp or .pkl library", disabled: off || null,
-        onclick: () => opts.browseLibrary(st.library, (p) => { libIn.value = p; st.library = p; run(); }) }, icon("folder_open")) : null;
+      const searched = new Map(R.libraries().map((d) => [d.path, d]));
+      const libList = h("div.lib-rows");
+      const paintLibs = () => libList.replaceChildren(...(st.libraries.length ? st.libraries.map((p) => {
+        const d = searched.get(p);
+        const rm = h("button.icon-btn.state", { type: "button", title: "Remove from the search", "aria-label": `Remove ${base(p)}`, disabled: off || null,
+          onclick: () => { st.libraries = st.libraries.filter((x) => x !== p); paintLibs(); run(); } }, icon("close"));
+        return h("div.lib-row", { title: p }, icon("description"), h("span.lib-name", base(p)),
+          h("span.lib-n", d && d.n != null ? `${int(d.n)} spectra` : "not searched yet"), rm);
+      }) : [h("div.lib-none.body-small.muted", "No library yet")]));
+      paintLibs();
+      const add = (paths) => {
+        const fresh = paths.map((p) => String(p).trim()).filter((p) => p && !st.libraries.includes(p));
+        if (!fresh.length) return;
+        st.libraries = st.libraries.concat(fresh);
+        paintLibs();
+        run();
+      };
+      const libIn = h("input", { type: "text", placeholder: "Add a .msp or .pkl file: path, or Browse", spellcheck: "false", disabled: off || null, "aria-label": "Add a library" });
+      const addTyped = () => { const v = libIn.value.trim(); libIn.value = ""; if (v) add([v]); };
+      const browseBtn = opts.browseLibrary ? h("button.icon-btn.state", { type: "button", title: "Browse (pick one or several)", "aria-label": "Browse for .msp or .pkl libraries", disabled: off || null,
+        onclick: () => opts.browseLibrary(st.libraries[st.libraries.length - 1] || "", (ps) => add([].concat(ps))) }, icon("folder_open")) : null;
       const sel = h("select", { disabled: off || null }, Object.entries(methods).map(([k, label]) => h("option", { value: k }, label)));
       sel.value = st.method;
       const num = (key, step, min, max) => {
@@ -853,53 +893,65 @@
         i.addEventListener("change", () => { const v = +i.value; if (i.value !== "" && isFinite(v) && v >= min && (max == null || v <= max)) { st[key] = v; soon(); } else i.value = String(st[key]); });
         return i;
       };
-      const go = h("button.btn.filled.state", { type: "button", disabled: off || null }, icon("search"), "Search");
+      const go = h("button.btn.filled.state", { type: "button", disabled: off || state.idBusy || null }, icon("search"), "Search");
       const status = h("p.body-small.muted.id-status");
+      const libText = (L) => (L.length > 2 ? `${int(L.length)} libraries` : L.map((d) => d.name || base(d.path)).join(" + "));
       const summary = () => {
         if (off) return "These results hold no MS2 spectra (MS1-only files, or a run made before MS2 mapping): nothing to search.";
-        if (!R.id) return st.library ? "Not searched yet with this library." : "Choose a spectral library (.msp or MassCube .pkl); the search then runs by itself whenever a setting changes.";
+        if (!R.id) return st.libraries.length ? "Not searched yet with these libraries." : "Add one or more spectral libraries (.msp or MassCube .pkl); the search then runs by itself whenever a setting changes.";
         const m = R.id.h;
         return `${int(R.nAnnotated)} of ${int(R.m2.h.n)} features with MS2 annotated${R.nByUser ? ` (${int(R.nByUser)} by you)` : ""} · ` +
           `${m.method_label || m.method} ≥ ${fixed(m.min_score, 2)} on the ${m.default_label || "consensus spectrum"} · ${int(m.n_hits != null ? m.n_hits : m.n)} hits above ${fixed(m.list_min != null ? m.list_min : 0.1, 1)} listed · ` +
-          `${base(m.library)}${m.library_n ? ` (${int(m.library_n)} spectra)` : ""}${m.seconds != null ? ` · ${fixed(m.seconds, 1)} s` : ""}`;
+          `${libText(R.libraries())}${m.library_n ? ` (${int(m.library_n)} spectra)` : ""}${m.seconds != null ? ` · ${fixed(m.seconds, 1)} s` : ""}`;
       };
       status.textContent = summary();
-      let busy = false, timer = null;
+      if (state.idBusy) status.replaceChildren(P3.spinner(14), h("span", " Searching…"));
+      state.idShown = [status, go];
+      let timer = null;
       const soon = () => { clearTimeout(timer); timer = setTimeout(run, 400); };
       async function run() {
         clearTimeout(timer);
-        st.library = libIn.value.trim();
         st.method = sel.value;
-        if (off || busy || !st.library) { status.textContent = summary(); return; }
-        busy = true;
-        go.disabled = true;
-        status.classList.remove("err");
-        status.replaceChildren(P3.spinner(14), h("span", " Searching " + base(st.library) + "…"));
+        if (state.idBusy) { state.idAgain = true; return; }       // searched with the change when this search is done
+        const [stEl, goEl] = state.idShown;                     // the panel on the page (it may have been drawn anew)
+        if (off || !st.libraries.length) { stEl.textContent = summary(); return; }
+        state.idBusy = true;
+        goEl.disabled = true;
+        stEl.classList.remove("err");
+        const libs = st.libraries.slice();
+        stEl.replaceChildren(P3.spinner(14), h("span", ` Searching ${libs.length > 1 ? `${int(libs.length)} libraries` : base(libs[0])}…`));
         try {
-          const res = await opts.identify({ library: st.library, method: st.method, precursor_ppm: st.precursor_ppm, fragment_tol: st.fragment_tol, min_score: st.min_score });
-          [["library", st.library], ["method", st.method], ["ppm", st.precursor_ppm], ["tol", st.fragment_tol], ["min", st.min_score]]
+          const res = await opts.identify({ libraries: libs, method: st.method, precursor_ppm: st.precursor_ppm, fragment_tol: st.fragment_tol, min_score: st.min_score });
+          [["method", st.method], ["ppm", st.precursor_ppm], ["tol", st.fragment_tol], ["min", st.min_score]]
             .forEach(([k, v]) => P3.storeSet("peak3d-id-" + k, String(v)));
+          state.idBusy = false;
           R.setMs2(res);
+          P3.saveLibraries(R.libraries().map((d) => d.path));     // as the server read them: full paths, each once
+          if (!state.idAgain) st.libraries = R.libraries().map((d) => d.path);
           state.hit = null;
           P3.snack(`${int(R.nAnnotated)} of ${int(R.m2.h.n)} features with MS2 annotated`);
           show("features");            // the table, chips and detail with the new hits; filters, sort and selection stay
         } catch (e) {
-          status.classList.add("err");
-          status.textContent = String(e.message || e);
-          busy = false;
-          go.disabled = false;
+          state.idBusy = false;
+          const [el, btn] = state.idShown;
+          el.classList.add("err");
+          el.textContent = String(e.message || e);
+          btn.disabled = false;
+          if (state.idAgain) { state.idAgain = false; run(); }
         }
       }
-      libIn.addEventListener("change", run);
-      libIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); run(); } });
+      libIn.addEventListener("change", addTyped);
+      libIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTyped(); } });
       sel.addEventListener("change", soon);
       go.addEventListener("click", run);
-      if (R.m2 && !R.id && st.library && !state.autoSearched) { state.autoSearched = true; setTimeout(run, 0); }   // automatic on open
+      if (state.idAgain && !state.idBusy) { state.idAgain = false; setTimeout(run, 0); }      // a change made during the last search
+      else if (R.m2 && !R.id && st.libraries.length && !state.autoSearched) { state.autoSearched = true; setTimeout(run, 0); }   // automatic on open
       return card(".elevated.id-card", "Identity search",
-        "Both MS2 spectra of each feature (the consensus and the highest-TIC spectrum) against a spectral library: candidates within the precursor tolerance of the feature m/z, each scored on the spectrum as measured and on the spectrum denoised with that candidate's own formula and adduct (only ions whose neutral loss is a plausible sub-formula of its precursor ion), all on cleaned spectra (precursor region removed, peaks below 1 % dropped). " +
+        "Both MS2 spectra of each feature (the consensus and the highest-TIC spectrum) against one or more spectral libraries, searched as one: candidates within the precursor tolerance of the feature m/z, each scored on the spectrum as measured and on the spectrum denoised with that candidate's own formula and adduct (only ions whose neutral loss is a plausible sub-formula of its precursor ion), all on cleaned spectra (precursor region removed, peaks below 1 % dropped). " +
         "Every hit above 0.1 on either version is listed with both scores; the best hit on the denoised consensus at or above the threshold becomes the feature's annotation, which you can change per feature.",
         h("div.id-form",
-          field("Library (.msp, .pkl)", libIn, browseBtn ? h("span.trail", browseBtn) : null),
+          h("div.lib-list", h("div.lib-label", "Libraries (.msp, .pkl)"), libList,
+            h("div.field.dense", h("div.box", libIn, h("label", "Add a library"), browseBtn ? h("span.trail", browseBtn) : null))),
           field("Similarity", sel, h("span.select-arrow", icon("expand_more"))),
           field("Precursor (ppm)", num("precursor_ppm", "1", 0.1)),
           field("Fragment (Da)", num("fragment_tol", "0.005", 0.0005)),
@@ -1134,7 +1186,8 @@
           R.dkey && both ? h("div.body-small.muted", (dn ? b : p || b).dion ? `Denoised as ${(dn ? b : p || b).dion}` : "No usable formula: not denoised") : null,
           h("div.cmp-facts.body-small", [b.formula, b.adduct, isFinite(b.ppm) ? `${fixed(b.ppm, 1)} ppm` : null].filter(Boolean).join(" · "))] : []));
         recEl.replaceChildren(b ? kv([["InChIKey", b.inchikey ? h("code.mono.wrap", b.inchikey) : null], ["SMILES", b.smiles ? h("code.mono.wrap", b.smiles) : null],
-          ["Library precursor", isFinite(b.prec) ? `m/z ${fixed(b.prec, 4)} (${fixed(b.ppm, 1)} ppm)` : null]]) : h("span"));
+          ["Library precursor", isFinite(b.prec) ? `m/z ${fixed(b.prec, 4)} (${fixed(b.ppm, 1)} ppm)` : null],
+          ["Library", b.db ? h("span", { title: b.dbPath }, b.db) : null]]) : h("span"));
       };
       const drawAnn = () => annBox.replaceChildren(...userAnnotation(g));
       const tableParts = [];
@@ -1145,6 +1198,8 @@
         // both scores of every candidate when the search scored the denoised copy: the shown copy's first (it orders the list)
         const cols = both ? ["#", "Library match", dn ? "Denoised" : "Raw", dn ? "Raw" : "Denoised", "Adduct", "Formula", "Δ ppm", "Peaks"] :
           ["#", "Library match", "Score", "Adduct", "Formula", "Δ ppm", "Peaks"];
+        const manyLibs = R.libraries().length > 1;           // a search of several libraries: which one each hit is from
+        if (manyLibs) cols.push("Library");
         const right = both ? [0, 2, 3, 6, 7] : [0, 2, 5, 6];
         const tb = h("tbody", hits.map((j) => {
           const b = R.hit(j), p = both ? pair(j) : null;
@@ -1152,7 +1207,8 @@
           const tr = h("tr" + (b.score < R.minScore ? ".below" : ""), { "aria-selected": String(j === state.hit) }, h("td.r", b.rank),
             h("td.ident", { title: b.name }, h("span.id-name", b.name), chosen ? h("span.id-user", "annotation") : null),
             h("td.r", fixed(b.score, 3)), both ? h("td.r.muted", p ? fixed(p.score, 3) : "–") : null,
-            h("td", b.adduct || "–"), h("td", b.formula || "–"), h("td.r", fixed(b.ppm, 1)), h("td.r", int(b.nmatch)));
+            h("td", b.adduct || "–"), h("td", b.formula || "–"), h("td.r", fixed(b.ppm, 1)), h("td.r", int(b.nmatch)),
+            manyLibs ? h("td.id-db", { title: b.dbPath }, b.db) : null);
           tr.addEventListener("click", () => {
             state.hit = j;
             tb.querySelectorAll("tr").forEach((r) => r.setAttribute("aria-selected", String(r === tr)));

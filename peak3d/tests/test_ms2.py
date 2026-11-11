@@ -256,11 +256,17 @@ def test_process_maps_ms2_and_identifies(tmp_path):
     assert (lib_ann["annotation"] == dtop.loc[lib_ann.index, "name"]).all() and (lib_ann["spectrum"] == "consensus_denoised").all()
     info = json.loads((out / "params.json").read_text())
     assert "ms2_s" in info["stage_times_s"] and info["options"]["similarity"] == "entropy"
-    # re-search with another score through the identify command
-    r = subprocess.run([sys.executable, "-m", "peak3d", "identify", str(out), "--library", str(lib), "--similarity", "dot"],
-                       cwd=ROOT, capture_output=True, text=True)
+    # re-search with another score through the identify command, in this library and a second one
+    lib2 = tmp_path / "lib2.msp"
+    with open(lib2, "w") as fh:
+        write_msp_record(fh, [("NAME", "compound 0 again"), ("PRECURSORMZ", base[0][0]), ("IONMODE", "Positive")], *frags[0])
+    r = subprocess.run([sys.executable, "-m", "peak3d", "identify", str(out), "--library", str(lib), str(lib2),
+                        "--similarity", "dot"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert json.loads((out / "identifications.json").read_text())["method"] == "dot"
+    info = json.loads((out / "identifications.json").read_text())
+    assert info["method"] == "dot" and [d["name"] for d in info["libraries"]] == ["lib.msp", "lib2.msp"]
+    hits = pd.read_csv(out / "identifications.tsv", sep="\t")
+    assert "compound 0 again" in set(hits.loc[hits["library"] == "lib2.msp", "name"])
     r = subprocess.run([sys.executable, "-m", "peak3d", "identify", str(out)], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode != 0 and "--library" in r.stderr
 

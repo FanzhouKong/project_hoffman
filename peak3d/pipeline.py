@@ -544,10 +544,11 @@ def _write_report(output: Path, cache_dir: Path, args):
 
 
 def check_library(args):
-    """fail before any work when --library names no readable file"""
-    lib = getattr(args, "library", None)
-    if lib and not Path(lib).expanduser().is_file():
-        sys.exit(f"--library: no such file: {lib}")
+    """fail before any work when --library names a file that is not there"""
+    libs = getattr(args, "library", None) or []
+    for lib in [libs] if isinstance(libs, (str, Path)) else libs:
+        if not Path(lib).expanduser().is_file():
+            sys.exit(f"--library: no such file: {lib}")
 
 
 def ms2_and_identify(output: Path, args, stage: dict) -> None:
@@ -583,12 +584,14 @@ def _reidentify(output: Path, stage: dict, cores: int = 1) -> None:
         return
     try:
         s = json.loads(path.read_text())
-        if not Path(s["library"]).is_file():
-            raise FileNotFoundError(s["library"])
-        args = argparse.Namespace(library=s["library"], similarity=s["method"], precursor_ppm=s["precursor_ppm"],
+        libs = [d["path"] for d in s["libraries"]] if s.get("libraries") else [s["library"]]
+        for lib in libs:
+            if not Path(lib).is_file():
+                raise FileNotFoundError(lib)
+        args = argparse.Namespace(library=libs, similarity=s["method"], precursor_ppm=s["precursor_ppm"],
                                   fragment_tol=s["fragment_tol"], min_similarity=s["min_score"], cores=cores,
                                   denoise=s.get("denoise_mode") or ("t0" if s.get("denoise") else "off"))
-    except (OSError, ValueError, KeyError) as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
         from .annotations import retire
         retire(output, keep_search=False)
         log(f"identifications removed (groups changed, library not available: {e!r})")

@@ -168,7 +168,8 @@ feature then gets two spectra:
   in the MS1 scan before each spectrum.
 - **highest TIC**: the single spectrum with the highest total ion current.
 
-With `--library` (an `.msp` file, or a MassCube `.pkl`), both are searched (`--similarity`, default weighted
+With `--library` (an `.msp` file, or a MassCube `.pkl`; several, `--library A.msp B.pkl`, are searched as one,
+each hit's `library` column naming its file), both are searched (`--similarity`, default weighted
 entropy) as a **denoising search** (`specdenoise`, tier T1, after Kong et al., Nat Methods 2025): every library
 spectrum within the precursor tolerance is scored on the spectrum as measured and on the spectrum denoised with
 that candidate's own formula and adduct, keeping only the ions whose neutral loss is a plausible sub-formula of
@@ -186,7 +187,9 @@ scores and switches the head-to-tail plot between the selected candidate's denoi
 it, pick another candidate or mark the feature unknown (the table's `reviewed` column says whether you did), write
 a comment, and give features red, blue or yellow stars to filter by. All of it is saved in `user_annotations.json`,
 kept apart from the search results, and used in the report and the exported tables (`reviewed`, `stars`,
-`comment` columns). `peak3d identify OUT --library LIB` searches again without re-processing; your notes are kept.
+`comment` columns). `peak3d identify OUT --library LIB [LIB ...]` searches again without re-processing; your notes are
+kept. In the app, the Identity search panel takes one library or several (Browse picks several at once); add
+another later and the search runs again, keeping the libraries already read in memory.
 
 ### In the browser: `peak3d gui`
 

@@ -117,9 +117,11 @@ def set_user(output, group_id: int, choice) -> dict | None:
             raise KeyError(f"feature {g} has no hit {rank} on the {spec} spectrum")
         r = row.iloc[0]
         info = _search_info(output)
+        where = {d.get("name"): d.get("path") for d in info.get("libraries") or [] if isinstance(d, dict)}
         entry["annotation"] = {"status": "user", "confirmed": spec == default_copy(output) and rank == 1,
                                **{c: str(r[c]) for c in TEXT}, "rank": rank, "score": float(r["score"]),
-                               "library_index": int(r["library_index"]), "library": info.get("library", ""),
+                               "library_index": int(r["library_index"]),
+                               "library": where.get(r.get("library"), info.get("library", "")),   # the hit's own
                                "method": info.get("method", ""), "set": stamp}
     notes[g] = entry
     _save_user(output, notes)

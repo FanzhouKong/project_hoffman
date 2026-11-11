@@ -563,7 +563,6 @@ td.ident.unknown .id-name { font-style: italic; color: var(--ink-3); }
 .page > .banner + .tiles { margin-top: 12px; }
 .filters .id-card { margin: 0 0 10px; }
 .filters .id-form { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 10px; }
-.filters .id-form > .field:first-child { grid-column: 1 / -1; }
 .filters .id-form .id-go { grid-column: 1 / -1; padding: 4px 0 0; }
 /* features: the spectrum choice and its notes */
 .copy-pick { margin: 4px 0 8px; display: flex; align-items: center; gap: 4px 14px; flex-wrap: wrap; }
@@ -620,6 +619,21 @@ textarea.comment:focus { outline: 0; border-color: var(--accent); box-shadow: va
 .id-card { margin: 4px 0 14px; }
 .id-form { display: grid; grid-template-columns: minmax(220px, 2.4fr) minmax(170px, 1.4fr) repeat(3, minmax(92px, .7fr)) auto; gap: 0 12px; align-items: end; }
 .id-form .id-go { padding-bottom: 1px; }
+/* identity search: the libraries searched as one, a row each, and the field that adds more */
+.id-form .lib-list { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; min-width: 0; margin-top: 4px; }
+.lib-label { font: 500 12px/16px var(--font); color: var(--ink-2); }
+.lib-rows { display: flex; flex-direction: column; gap: 3px; }
+.lib-row { display: flex; align-items: center; gap: 6px; min-width: 0; height: 30px; padding: 0 2px 0 8px; border-radius: var(--r); background: var(--surface-3); }
+.lib-row > .icon { width: 15px; height: 15px; flex: none; color: var(--ink-3); }
+.lib-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 12.5px/1.2 var(--font); color: var(--ink); }
+.lib-n { flex: none; font: 400 11.5px/1 var(--font); color: var(--ink-3); }
+.lib-row .icon-btn { width: 26px; height: 26px; }
+.lib-row .icon-btn .icon { width: 15px; height: 15px; }
+.lib-none { padding: 2px 1px; }
+.form-libs { margin-top: 6px; }
+.form-libs:empty { display: none; }
+.lib-list .field.dense .box { margin-top: 2px; }
+.hits td.id-db { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); }
 .id-status { margin-top: 10px; display: flex; align-items: center; gap: 6px; }
 .id-status.err { color: var(--danger); }
 .id-best { margin-top: 4px; color: var(--ink-2); }
@@ -631,6 +645,8 @@ textarea.comment:focus { outline: 0; border-color: var(--accent); box-shadow: va
 .kernel-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 14px; }
 .tab .tab-note { font: 400 10.5px/1 var(--mono); color: var(--ink-3); margin-left: 2px; }
 .list-item[aria-selected="true"] { background: var(--accent-soft); }
+.list-item .pick-ic { display: inline-flex; flex: none; }
+.list-item[aria-selected="true"] .pick-ic .icon { color: var(--accent); }
 
 /* a feature's chromatograms: zoom buttons, Peak, Whole run (the app), the range shown */
 .chrom-tools { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; margin: -4px 0 2px; }

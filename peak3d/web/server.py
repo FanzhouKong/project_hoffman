@@ -7,6 +7,7 @@ Security: the server reads folders and starts processes, so every request needs 
 localhost (blocks DNS rebinding), and ``--root`` confines browsing, inputs and outputs to one folder."""
 from __future__ import annotations
 
+import argparse
 import collections
 import gzip
 import html
@@ -15,7 +16,6 @@ import json
 import math
 import mimetypes
 import os
-import pickle
 import platform
 import re
 import secrets
@@ -88,7 +88,7 @@ def option_schema(command: str = "process"):
         kind = a.__class__.__name__
         if kind == "_StoreTrueAction":
             f["kind"] = "flag"
-        elif kind == "_AppendAction":
+        elif isinstance(a, argparse._AppendAction):           # append, and extend (--library A.msp B.pkl)
             f["kind"], f["default"] = "list", []
         elif a.choices:
             f["kind"], f["choices"] = "choice", list(a.choices)
@@ -949,15 +949,20 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(bundle.extract_eic(out, out / ".cache", stem, mz, ppm, offset, lo, hi))
 
     def _identify(self, body):
-        """identity search of this output's MS2 spectra against a .msp or .pkl library (peak3d.library.identify, the
-        denoising search: each candidate scored on the spectrum denoised with its own formula); rewrites
-        identifications.* and refreshes report.html, then answers with the search summary"""
-        from ..library import METHODS, identify
+        """identity search of this output's MS2 spectra against one or more .msp / .pkl libraries ("libraries": their
+        paths, searched as one; peak3d.library.identify, the denoising search: each candidate scored on the spectrum
+        denoised with its own formula); rewrites identifications.* and refreshes report.html, then answers with the
+        search summary"""
+        from ..library import METHODS, LibraryError, identify
         from ..ms2 import default_workers
         out = self._output({"path": [body.get("path") or ""]})
-        lib = self.app.resolve(body.get("library") or "")
-        if lib.suffix.lower() not in LIBRARY_SUFFIXES or not lib.is_file():
-            return self._error(400, f"not a spectral library (.msp or .pkl): {lib}")
+        given = body.get("libraries", [body.get("library") or ""])        # "library": one path (older pages)
+        if not (isinstance(given, list) and given and all(isinstance(x, str) for x in given)):
+            return self._error(400, "libraries must be a list of .msp or .pkl files")
+        libs = [self.app.resolve(x) for x in given]
+        for lib in libs:
+            if lib.suffix.lower() not in LIBRARY_SUFFIXES or not lib.is_file():
+                return self._error(400, f"not a spectral library (.msp or .pkl): {lib}")
         method = body.get("method") or "weighted_entropy"
         if method not in METHODS:
             return self._error(400, f"unknown similarity {method!r}")
@@ -973,10 +978,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(409, "a search is already running for these results")
         try:
             try:
-                identify(out, lib, method=method, precursor_ppm=ppm, fragment_tol=tol, min_score=min_score,
+                identify(out, libs, method=method, precursor_ppm=ppm, fragment_tol=tol, min_score=min_score,
                          workers=default_workers())
-            except (pickle.UnpicklingError, ValueError, EOFError) as e:     # a .pkl that is not a library we can read
-                return self._error(400, f"could not read the library {lib.name}: {e}")
+            except LibraryError as e:                                       # a .pkl that is not a library we can read
+                return self._error(400, str(e))
         finally:
             lock.release()
         self.app.refresh_now(out)                 # the report gets the new hits (and any annotations still waiting)

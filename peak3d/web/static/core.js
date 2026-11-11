@@ -84,6 +84,17 @@
   function onTheme(f) { listeners.add(f); return () => listeners.delete(f); }
   function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
+  // the spectral libraries searched last, shared by the run form and the results' Identity search: a JSON list (the
+  // one path that versions before several libraries kept is read too)
+  function savedLibraries() {
+    const v = storeGet("peak3d-id-libraries");
+    if (v) {
+      try { const a = JSON.parse(v); if (Array.isArray(a)) return a.filter((x) => typeof x === "string" && x); } catch (e) { /* not a list */ }
+    }
+    const one = storeGet("peak3d-id-library");
+    return one ? [one] : [];
+  }
+  function saveLibraries(list) { storeSet("peak3d-id-libraries", JSON.stringify(list || [])); }
 
   // the mark: a chromatographic peak on a blue tile
   // the MOSA mark (logo.js); also the browser tab's icon
@@ -149,5 +160,5 @@
   }
   async function loadBundle(gzBytes) { return parseBundle(await gunzip(gzBytes)); }
 
-  Object.assign(P3, { h, append, icon, spinner, saveBlob, logo, fixed, int, compact, sci, duration, onTheme, css, snack, loadBundle, b64bytes, storeGet, storeSet });
+  Object.assign(P3, { h, append, icon, spinner, saveBlob, logo, fixed, int, compact, sci, duration, onTheme, css, snack, loadBundle, b64bytes, storeGet, storeSet, savedLibraries, saveLibraries });
 })(window.P3 = window.P3 || {});

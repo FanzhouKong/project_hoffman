@@ -493,7 +493,8 @@ def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
     consensus as ms2c_*, each with the peaks its denoised copy kept as ms2_keep / ms2c_keep when the output has one),
     where their spectra were taken (mk_*), the hits of the last identity search on all copies (identifications.tsv,
     .msp, .json; id_spec SPEC_CODE, id_lib the library record, id_lk its spectrum among id_off/id_mz/id_int, each
-    library spectrum once) and the user's annotations, as header parts and
+    library spectrum once, id_db its library in ids.libraries when the search had several) and the user's
+    annotations, as header parts and
     arrays keyed by row of the aligned table (group_ids in table order; stems: its file columns, read from the table
     when not given). Header keys ms2 / ms2c / ids are None when the output has no such part; ann maps a row (as
     text) to the user's notes on it (annotations.load_user)"""
@@ -542,6 +543,10 @@ def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
                       id_nmatch=np.clip(np.nan_to_num(num("n_matched", 0)), 0, 65535).astype(np.uint16),
                       id_ppm=num("ppm_error").astype(np.float32), id_prec=num("library_precursor_mz"),
                       id_lib=np.nan_to_num(num("library_index", -1), nan=-1).astype(np.int32))
+        names = [d.get("name") for d in meta.get("libraries") or [] if isinstance(d, dict)]
+        if "library" in hits and len(names) > 1:     # which library each hit came from (searches of several)
+            at = {n: i for i, n in enumerate(names)}
+            arrays["id_db"] = np.array([at.get(v, 0) for v in hits["library"].tolist()], np.uint16)
         dk = _denoise_masks(output, hits, row_of, arrays)
         if dk is not None:
             arrays.update(dk)
