@@ -292,15 +292,28 @@ def _in_seconds(header, line, filled=None):
     return "\t".join(v) + eol
 
 
-def _filled_from_mask(out: Path, stems):
+def _filled_from_mask(out: Path, stems, table="aligned_feature_table.tsv"):
     """{group id: "stem;stem"}, read as text: the files filled_mask.tsv marks with 1 where the table holds a value > 0"""
     def rows(name):
         lines = (out / name).read_text(encoding="utf-8").splitlines()
         head = lines[0].split("\t")
         return {ln.split("\t")[0]: dict(zip(head, ln.split("\t"))) for ln in lines[1:]}
-    table, mask = rows("aligned_feature_table.tsv"), rows("filled_mask.tsv")
-    res = {g: ";".join(s for s in stems if mask[g][s] == "1" and float(r[s]) > 0) for g, r in table.items()}
+    table, mask = rows(table), rows("filled_mask.tsv")
+    res = {g: ";".join(s for s in stems if g in mask and mask[g][s] == "1" and float(r[s]) > 0) for g, r in table.items()}
     return {g: v for g, v in res.items() if v}
+
+
+def _menu_download(path: Path, filled):
+    """what the Download menu's Feature table items serve with filled_mask.tsv: the file's lines as written (minutes,
+    line endings) with gap_filled_files after n_filled"""
+    lines = path.read_bytes().decode("utf-8").splitlines(keepends=True)
+    at = lines[0].rstrip("\r\n").split("\t").index("n_filled") + 1
+    out = []
+    for i, ln in enumerate(lines):
+        v = ln.rstrip("\r\n").split("\t")
+        v.insert(at, "gap_filled_files" if i == 0 else filled.get(v[0], ""))
+        out.append("\t".join(v) + ln[len(ln.rstrip("\r\n")):])
+    return "".join(out).encode("utf-8")
 
 
 def test_schema_and_argv():
@@ -415,11 +428,16 @@ def test_server_run_and_results(gui):
     assert code == 200 and b'id="peak3d-data"' in page and "attachment" in hdr["Content-Disposition"]
     code, again = c.json("/api/runs", {"input": str(d), "output": str(root / "o")})
     assert code == 409 and again["confirm"] == "overwrite"
-    # downloads: whole files by name, and chosen rows exactly as in the file
+    # downloads: whole files by name (the feature tables with gap_filled_files), and chosen rows exactly as in the file
     out_q = quote(str(root / "o"))
     code, raw, hdr = c.req(f"/api/results/file?path={out_q}&name=aligned_feature_table.tsv")
-    assert code == 200 and raw == (root / "o" / "aligned_feature_table.tsv").read_bytes()
+    assert code == 200 and raw == _menu_download(root / "o" / "aligned_feature_table.tsv", _filled_from_mask(root / "o", ["S0", "S1"]))
     assert "attachment" in hdr["Content-Disposition"] and "o_aligned_feature_table.tsv" in hdr["Content-Disposition"]
+    area = root / "o" / "aligned_feature_area.tsv"
+    code, raw, _ = c.req(f"/api/results/file?path={out_q}&name=aligned_feature_area.tsv")
+    assert code == 200 and raw == _menu_download(area, _filled_from_mask(root / "o", ["S0", "S1"], area.name))
+    code, raw, _ = c.req(f"/api/results/file?path={out_q}&name=filled_mask.tsv")
+    assert code == 200 and raw == (root / "o" / "filled_mask.tsv").read_bytes()
     assert c.req(f"/api/results/file?path={out_q}&name=../../x")[0] == 404
     # the file's own line endings (CRLF where pandas writes os.linesep, i.e. on Windows)
     lines = (root / "o" / "aligned_feature_table.tsv").read_bytes().decode("utf-8").splitlines(keepends=True)
@@ -484,6 +502,57 @@ def test_export_lists_gap_filled_files(gui):
     assert "gap_filled_files" not in head and head[7:9] == ["n_filled", "mz_ppm_spread"] and float(rows[0]["A"]) == 30000
     viewer = (ROOT / "peak3d" / "web" / "static" / "viewer.js").read_text(encoding="utf-8")
     assert 'FILLED_COL = "gap_filled_files"' in viewer and "R.h.matrix.presence" in viewer
+
+
+def test_menu_feature_tables_list_gap_filled_files(gui):
+    """1.2.1: the Download menu's Feature table (heights / areas) carry gap_filled_files after n_filled as Download
+    table does, each from its own values (a filled cell that stayed 0 there is not listed); everything else as in the
+    file (minutes, all rows, CRLF kept); follows filled_mask.tsv; no column without it; other files untouched"""
+    c, root, _ = gui
+    out = root / "o"
+    out.mkdir()
+    base = {"group_id": [1, 2, 5], "mz": [180.0634, 300.2, 410.3], "rt": [2.0, 4.0, 5.0], "rt_min": [1.95, 3.95, 4.9],
+            "rt_max": [2.05, 4.05, 5.1], "n_detected": [1, 3, 1], "n_confirmed": [1, 0, 1], "n_filled": [1, 0, 2],
+            "mz_ppm_spread": [1.0, 0.5, np.nan], "rt_sd": [0.01, 0.02, np.nan], "iso_offset": [0, 0, 0], "charge": [1, 1, 1]}
+    pd.DataFrame({**base, "A": [2e6, 5e5, 3e4], "B": [1.5e5, 4e5, 9e5], "003": [0.0, 6e5, 7e3]}
+                 ).to_csv(out / "aligned_feature_table.tsv", sep="\t", index=False)
+    pd.DataFrame({**base, "A": [8e6, 2e6, 0.0], "B": [6e5, 1.6e6, 3e6], "003": [0.0, 2e6, 2e4]}      # A of #5: area 0
+                 ).to_csv(out / "aligned_feature_area.tsv", sep="\t", index=False, lineterminator="\r\n")
+    (out / "params.json").write_text("{}")
+    mask = pd.DataFrame({"group_id": [9, 5, 2, 1], "003": [1, 1, 0, 1], "B": [0, 0, 0, 1], "A": [1, 1, 0, 0]})
+    mask.to_csv(out / "filled_mask.tsv", sep="\t", index=False)
+    q = quote(str(out))
+
+    def menu(name):
+        code, raw, hdr = c.req(f"/api/results/file?path={q}&name={name}")
+        assert code == 200 and "attachment" in hdr["Content-Disposition"] and f"o_{name}" in hdr["Content-Disposition"]
+        return raw
+
+    def files(raw):
+        lines = raw.decode().splitlines()
+        head = lines[0].split("\t")
+        return head, [(r[0], r[head.index("gap_filled_files")]) for r in (ln.split("\t") for ln in lines[1:])]
+
+    heights, areas = menu("aligned_feature_table.tsv"), menu("aligned_feature_area.tsv")
+    head, rows = files(heights)
+    assert head[7:9] == ["n_filled", "gap_filled_files"] and head[2] == "rt" and head[-3:] == ["A", "B", "003"]
+    assert rows == [("1", "B"), ("2", ""), ("5", "A;003")]
+    assert files(areas)[1] == [("1", "B"), ("2", ""), ("5", "003")]
+    assert heights == _menu_download(out / "aligned_feature_table.tsv", dict(rows))
+    assert areas == _menu_download(out / "aligned_feature_area.tsv", dict(files(areas)[1])) and areas.count(b"\r\n") == 4
+    assert menu("filled_mask.tsv") == (out / "filled_mask.tsv").read_bytes()
+    # filled_mask.tsv rewritten: the download follows it
+    mask.assign(B=[0, 1, 0, 1]).to_csv(out / "filled_mask.tsv", sep="\t", index=False)
+    t = (out / "filled_mask.tsv").stat().st_mtime + 5
+    os.utime(out / "filled_mask.tsv", (t, t))
+    assert files(menu("aligned_feature_table.tsv"))[1][2] == ("5", "A;B;003")
+    # no filled_mask.tsv (external kernels): the file as written
+    (out / "filled_mask.tsv").unlink()
+    assert menu("aligned_feature_table.tsv") == (out / "aligned_feature_table.tsv").read_bytes()
+    assert menu("aligned_feature_area.tsv") == (out / "aligned_feature_area.tsv").read_bytes()
+    # the insertion itself: no n_filled -> at the end (as Download table), no final newline, blank line kept
+    assert server._insert_filled(b"group_id\tA\r\n1\t5\r\n\r\n2\t0", {"1": "A"}) == \
+        b"group_id\tA\tgap_filled_files\r\n1\t5\tA\r\n\r\n2\t0\t"
 
 
 # ------------------------------------------------------------------ MS2, identity search, kernels ----
@@ -815,9 +884,11 @@ def test_leave_flagged_files_out(gui):
     lines = raw.decode().splitlines()
     assert code == 200 and "without_1_files" in hdr["Content-Disposition"]
     assert lines[0].split("\t")[-3:] == ["A", "B", "C"] and [ln.split("\t")[0] for ln in lines[1:]] == ["1", "3"]
-    assert lines[2].split("\t")[2] == "3.0" and lines[2].split("\t")[5:8] == ["1", "1", "1"]
+    assert lines[2].split("\t")[2] == "3.0" and lines[2].split("\t")[5:9] == ["1", "1", "1", "C"]
+    assert lines[0].split("\t")[8] == "gap_filled_files" and lines[1].split("\t")[8] == ""   # D's fill goes with D
     code, raw, _ = c.req(f"/api/results/file?path={oq}&name=aligned_feature_table.tsv&skip=nonsense")
-    assert raw == (out / "aligned_feature_table.tsv").read_bytes()
+    assert raw == c.req(f"/api/results/file?path={oq}&name=aligned_feature_table.tsv")[1]     # unknown kinds: all files
+    assert raw.decode().splitlines()[1].split("\t")[8] == "D"
     # the report: built without D, which it names
     code, page, hdr = c.req(f"/api/results/report?path={oq}&skip=rt_residual_high&download=1")
     assert code == 200 and "without_1_files" in hdr["Content-Disposition"] and b"without 1 files" in page

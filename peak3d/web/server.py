@@ -324,6 +324,22 @@ def _without(cols, dropset):
     return keep_at, kcols, [(kcols.index(c), j) for j, c in enumerate(subset.COUNTS) if c in kcols]
 
 
+def _insert_filled(raw: bytes, filled: dict) -> bytes:
+    """an aligned table as written with the gap_filled_files column of _gap_filled_files after n_filled (at the end
+    without n_filled, as in Download table): every other byte as in the file, retention times in minutes, the file's
+    own line endings"""
+    lines = raw.decode("utf-8").split("\n")       # not splitlines: a line ends at \n only, as pandas reads it
+    cols = lines[0].rstrip("\r").split("\t")
+    at = cols.index("n_filled") + 1 if "n_filled" in cols else len(cols)
+    for i, line in enumerate(lines):
+        body = line.rstrip("\r")
+        if body:
+            v = body.split("\t", at)
+            v.insert(at, FILLED_COL if i == 0 else filled.get(v[0], ""))
+            lines[i] = "\t".join(v) + line[len(body):]
+    return "\n".join(lines).encode("utf-8")
+
+
 def _disposition(kind: str, filename: str) -> str:
     """a Content-Disposition header value for any file name: an ASCII fallback for old browsers and the exact name
     as RFC 5987 UTF-8 (http.server writes headers as Latin-1, so a results folder named in Chinese or with an
@@ -601,7 +617,13 @@ class Handler(BaseHTTPRequestHandler):
                 if drop:
                     return self._send(200, self._table_without(out, name, drop), ctype, {"Content-Disposition":
                                       _disposition("attachment", f"{out.name}_{name[:-4]}_without_{len(drop)}_files.tsv")})
-                return self._send(200, (out / name).read_bytes(), ctype,
+                data = (out / name).read_bytes()
+                if name.startswith("aligned_feature"):       # the menu's feature tables name the gap-filled files too
+                    cols = data.split(b"\n", 1)[0].decode("utf-8").rstrip("\r").split("\t")
+                    filled = self.app.gap_filled(out, out / name, cols)
+                    if filled is not None:
+                        data = _insert_filled(data, filled)
+                return self._send(200, data, ctype,
                                   {"Content-Disposition": _disposition("attachment", f"{out.name}_{name}")})
             if url.path == "/api/results/report":
                 out = self._output(q)
@@ -844,14 +866,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _table_without(self, out: Path, name: str, drop) -> bytes:
         """an aligned table file as written (minutes), without the file columns drop: the counts over the other files,
-        the features only the left-out files held left out (subset.recount)"""
+        the features only the left-out files held left out (subset.recount), and gap_filled_files after n_filled (as
+        _insert_filled) naming only the files kept"""
         header, rows = self.app.table_lines(out / name)
         cols = header.rstrip("\r\n").split("\t")
         eol = header[len(header.rstrip("\r\n")):] or "\n"
         drop = [s for s in drop if s in cols]
-        keep_at, kcols, cnt_at = _without(cols, set(drop))
+        dropset = set(drop)
+        keep_at, kcols, cnt_at = _without(cols, dropset)
         counts = self.app.recount(out, out / name, cols, drop)
-        parts = ["\t".join(kcols) + eol]
+        filled = self.app.gap_filled(out, out / name, cols)
+        fill_at = kcols.index("n_filled") + 1 if "n_filled" in kcols else len(kcols)
+        head = list(kcols)
+        if filled is not None:
+            head.insert(fill_at, FILLED_COL)
+        parts = ["\t".join(head) + eol]
         for k, line in rows.items():
             c = counts.get(k)
             if c is None:
@@ -860,6 +889,9 @@ class Handler(BaseHTTPRequestHandler):
             v = [v[i] for i in keep_at]
             for i, j in cnt_at:
                 v[i] = c[j]
+            if filled is not None:
+                f = filled.get(k, "")
+                v.insert(fill_at, ";".join(x for x in f.split(";") if x not in dropset) if f else "")
             parts.append("\t".join(v) + eol)
         return "".join(parts).encode("utf-8")
 

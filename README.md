@@ -239,7 +239,10 @@ earlier fixed ±`--ppm` window cut such peaks short in the plot (the feature its
 **Download table** (Features tab) saves the listed features (search, filters and sort applied) with retention
 times in seconds and, after `n_filled`, a `gap_filled_files` column: the files whose value was gap-filled rather
 than detected, separated by `;` (from `filled_mask.tsv`; a file gap filling found nothing in keeps 0 and is not
-listed). Results of external kernels have no such column.
+listed). Results of external kernels have no such column. Since 1.2.1 the **Download** menu's **Feature table
+(heights)** and **(areas)** carry the same column after `n_filled`, each from its own values; otherwise they are the
+files as written (all features, retention times in minutes). The tables in the output folder themselves stay
+unchanged.
 
 **Download candidates** (Features tab, beside Download table; the report has it too) saves the identity-search
 candidates of the listed features that have MS2 as a JSON array of MassWiki search records, the `data` of each row of a
