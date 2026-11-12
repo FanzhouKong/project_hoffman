@@ -4,7 +4,9 @@ Cleaning and the entropy scores follow Li et al. 2021 (Nat Methods 18:1524, "Spe
 product similarity"; reference code ms_entropy): drop non-positive peaks and everything from 1.6 Da below the
 precursor up, centroid peaks closer than max(0.05 Da, 2 x the fragment tolerance) (strongest first: intensity-
 weighted m/z, summed intensity), drop peaks under 1 % of the strongest, normalise to sum 1. Peaks are matched by a
-greedy two-pointer walk within the fragment tolerance (Da), each peak at most once.
+greedy two-pointer walk within the fragment tolerance, each peak at most once: tol (Da), or with ppm > 0 the larger of
+tol and ppm x the library peak's m/z (the rule of specdenoise's ion tolerance; library.identify uses its 3 mDa and
+10 ppm).
 
 Scores, all in [0, 1]:
   entropy           0.5 x sum over matched pairs of (a+b) log2(a+b) - a log2 a - b log2 b (= 1 - (2 S_AB - S_A - S_B) /
@@ -119,8 +121,9 @@ def clean_batch(off, mz, it, prec, tol):
 
 
 @njit(cache=True)
-def _match(ma, mb, tol):
-    """greedy two-pointer pairing of two ascending m/z lists within tol (Da): index pairs"""
+def _match(ma, mb, tol, ppm):
+    """greedy two-pointer pairing of two ascending m/z lists within max(tol, ppm x 1e-6 x the b peak's m/z) (Da):
+    index pairs"""
     n = min(len(ma), len(mb))
     pa = np.empty(n, np.int64)
     pb = np.empty(n, np.int64)
@@ -129,9 +132,10 @@ def _match(ma, mb, tol):
     k = 0
     while a < len(ma) and b < len(mb):
         d = ma[a] - mb[b]
-        if d < -tol:
+        w = max(tol, ppm * 1e-6 * mb[b])
+        if d < -w:
             a += 1
-        elif d > tol:
+        elif d > w:
             b += 1
         else:
             pa[k] = a
@@ -175,11 +179,12 @@ def _cosine(a, b, pa, pb):
 
 
 @njit(cache=True)
-def score(ma, ia, mb, ib, method, tol):
-    """(score, matched peaks) of two CLEANED spectra (query a, library b; intensities summing to 1)"""
+def score(ma, ia, mb, ib, method, tol, ppm=0.0):
+    """(score, matched peaks) of two CLEANED spectra (query a, library b; intensities summing to 1); peaks match
+    within max(tol, ppm x m/z)"""
     if len(ma) == 0 or len(mb) == 0:
         return 0.0, 0
-    pa, pb = _match(ma, mb, tol)
+    pa, pb = _match(ma, mb, tol, ppm)
     n = len(pa)
     if n == 0:
         return 0.0, 0
@@ -198,8 +203,9 @@ def score(ma, ia, mb, ib, method, tol):
 
 
 @njit(cache=True, parallel=True)
-def score_pairs(q_off, q_mz, q_it, l_off, l_mz, l_it, pair_q, pair_l, method, tol):
-    """scores and matched-peak counts of (query, library) index pairs over two cleaned CSR batches"""
+def score_pairs(q_off, q_mz, q_it, l_off, l_mz, l_it, pair_q, pair_l, method, tol, ppm=0.0):
+    """scores and matched-peak counts of (query, library) index pairs over two cleaned CSR batches (peaks match
+    within max(tol, ppm x m/z))"""
     n = len(pair_q)
     out = np.zeros(n)
     nm = np.zeros(n, np.int32)
@@ -207,17 +213,18 @@ def score_pairs(q_off, q_mz, q_it, l_off, l_mz, l_it, pair_q, pair_l, method, to
         q = pair_q[k]
         r = pair_l[k]
         s, m = score(q_mz[q_off[q]:q_off[q + 1]], q_it[q_off[q]:q_off[q + 1]],
-                     l_mz[l_off[r]:l_off[r + 1]], l_it[l_off[r]:l_off[r + 1]], method, tol)
+                     l_mz[l_off[r]:l_off[r + 1]], l_it[l_off[r]:l_off[r + 1]], method, tol, ppm)
         out[k] = s
         nm[k] = m
     return out, nm
 
 
 def similarity(mz_a, int_a, mz_b, int_b, method: str = "weighted_entropy", fragment_tol: float = 0.02,
-               prec_a: float = float("nan"), prec_b: float = float("nan")):
-    """(score, matched peaks) of two raw spectra: a = query, b = library; both are cleaned first"""
+               prec_a: float = float("nan"), prec_b: float = float("nan"), fragment_ppm: float = 0.0):
+    """(score, matched peaks) of two raw spectra: a = query, b = library; both are cleaned first. Peaks match within
+    fragment_tol (Da), or within the larger of it and fragment_ppm x m/z"""
     tol = float(fragment_tol)
     ma, ia = clean(np.asarray(mz_a, np.float64), np.asarray(int_a, np.float64), float(prec_a), tol)
     mb, ib = clean(np.asarray(mz_b, np.float64), np.asarray(int_b, np.float64), float(prec_b), tol)
-    s, n = score(ma, ia, mb, ib, METHOD_CODE[method], tol)
+    s, n = score(ma, ia, mb, ib, METHOD_CODE[method], tol, float(fragment_ppm))
     return float(s), int(n)

@@ -617,7 +617,7 @@ textarea.comment:focus { outline: 0; border-color: var(--accent); box-shadow: va
 .addon-note { margin: -6px 0 14px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .hits tr.below td { color: var(--ink-4); }
 .id-card { margin: 4px 0 14px; }
-.id-form { display: grid; grid-template-columns: minmax(220px, 2.4fr) minmax(170px, 1.4fr) repeat(3, minmax(92px, .7fr)) auto; gap: 0 12px; align-items: end; }
+.id-form { display: grid; grid-template-columns: minmax(220px, 2.4fr) minmax(170px, 1.4fr) repeat(4, minmax(92px, .7fr)) auto; gap: 0 12px; align-items: end; }
 .id-form .id-go { padding-bottom: 1px; }
 /* identity search: the libraries searched as one, a row each, and the field that adds more */
 .id-form .lib-list { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; min-width: 0; margin-top: 4px; }

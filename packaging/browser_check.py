@@ -97,12 +97,24 @@ def check_candidates(path: Path, results: Path) -> list:
     if not isinstance(doc, list) or not doc:
         fail(f"{path.name}: not a non-empty JSON array")
     meta = json.loads((results / "identifications.json").read_text(encoding="utf-8"))
-    spec = meta["default_spectrum"]
-    want: dict[str, list] = {}
+    # the annotation copy of each feature (1.2.6): the default copy whose best hit scores higher, the consensus on a
+    # tie (default_spectra; a search before 1.2.6 names one copy, its kind on both spectra)
+    dn = str(meta.get("default_spectrum", "")).endswith("_denoised")
+    copies = meta.get("default_spectra") or (["consensus_denoised", "single_denoised"] if dn else ["consensus", "single"])
     with open(results / "identifications.tsv", encoding="utf-8", newline="") as fh:
-        for r in csv.DictReader(fh, delimiter="\t"):
-            if r["spectrum"] == spec:
-                want.setdefault(r["group_id"], []).append((int(r["rank"]), r["name"], round(float(r["score"]), 4)))
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    best: dict[str, tuple] = {}
+    for r in rows:
+        if r["spectrum"] in copies and int(r["rank"]) == 1:
+            k = (float(r["score"]), -copies.index(r["spectrum"]))
+            if r["group_id"] not in best or k > best[r["group_id"]][0]:
+                best[r["group_id"]] = (k, r["spectrum"])
+    spec_of = {g: sp for g, (_, sp) in best.items()}
+    spec = "/".join(sorted(set(spec_of.values()))) or copies[0]
+    want: dict[str, list] = {}
+    for r in rows:
+        if r["spectrum"] == spec_of.get(r["group_id"], copies[0]):
+            want.setdefault(r["group_id"], []).append((int(r["rank"]), r["name"], round(float(r["score"]), 4)))
     n_hits = n_named = 0
     for rec in doc:
         errs = shape_errors(rec, RECORD)

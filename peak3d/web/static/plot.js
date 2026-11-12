@@ -639,9 +639,10 @@
   }
 
   // ---------------------------------------------------------------- mirror (an MS2 spectrum against a library hit)
-  // spec: top / bottom = { mz, inten } (bottom optional), tol = fragment tolerance (Da) for the matched colouring.
-  // Each side is scaled to its own base peak (100); peaks with a partner on the other side within tol are drawn
-  // in the series colour, the rest in the neutral grey.
+  // spec: top / bottom = { mz, inten } (bottom optional), tol = fragment tolerance (Da) for the matched colouring,
+  // ppm (optional) = the window is the larger of tol and ppm x m/z, shift (optional, ppm) = the top spectrum's file
+  // offset, taken out before matching as the search does. Each side is scaled to its own base peak (100); peaks with a
+  // partner on the other side within the window are drawn in the series colour, the rest in the neutral grey.
   class Mirror extends Chart {
     // drag across to zoom into an m/z range, double-click to see the whole spectrum again
     constructor(el, spec) {
@@ -669,12 +670,14 @@
         return { mz: r.mz, rel: Float32Array.from(r.inten, (v) => (m > 0 ? 100 * v / m : 0)), hit: new Uint8Array(r.mz.length) };
       });
       if (this.sides.length === 2 && s.tol > 0) {
-        const [A, B] = this.sides;
+        const [A, B] = this.sides, ppm = s.ppm > 0 ? s.ppm * 1e-6 : 0, k0 = 1 - (s.shift || 0) * 1e-6;
+        const w = (m) => Math.max(s.tol, ppm * m);          // b - w(b) and b + w(b) both rise with b: one pass
         const oa = Array.from(A.mz.keys()).sort((i, j) => A.mz[i] - A.mz[j]), ob = Array.from(B.mz.keys()).sort((i, j) => B.mz[i] - B.mz[j]);
         let j = 0;
         for (const i of oa) {
-          while (j < ob.length && B.mz[ob[j]] < A.mz[i] - s.tol) j++;
-          for (let k = j; k < ob.length && B.mz[ob[k]] <= A.mz[i] + s.tol; k++) { A.hit[i] = 1; B.hit[ob[k]] = 1; }
+          const m = A.mz[i] * k0;
+          while (j < ob.length && B.mz[ob[j]] + w(B.mz[ob[j]]) < m) j++;
+          for (let k = j; k < ob.length && B.mz[ob[k]] - w(B.mz[ob[k]]) <= m; k++) { A.hit[i] = 1; B.hit[ob[k]] = 1; }
         }
       }
     }

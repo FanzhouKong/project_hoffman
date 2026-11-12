@@ -333,13 +333,13 @@ def test_denoise_keeps_plausible_losses_and_raw_values(tmp_path):
     assert denoise(far, it, pmz, params=Params(**ms2.DENOISE)).keep.sum() < true.sum()
     text = (out / "ms2_spectra_denoised.msp").read_text()
     assert "denoised=T0_top-5 n_raw=12" in text and "Num Peaks: 7" in text
-    assert ms2.default_copy(out) == "consensus_denoised"
+    assert ms2.default_copies(out) == ["consensus_denoised", "single_denoised"]
 
 
 def test_ensure_denoised_follows_the_raw_copies(tmp_path):
     out, *_ = _denoise_output(tmp_path, consensus=False)
     assert ms2.ensure_denoised(out) and (out / "ms2_spectra_denoised.msp").exists()
-    assert not (out / "ms2_consensus_denoised.msp").exists() and ms2.default_copy(out) == "single_denoised"
+    assert not (out / "ms2_consensus_denoised.msp").exists() and ms2.default_copies(out) == ["single_denoised"]
     t = (out / "ms2_spectra_denoised.msp").stat().st_mtime_ns
     assert ms2.ensure_denoised(out) and (out / "ms2_spectra_denoised.msp").stat().st_mtime_ns == t   # current: kept
     (out / "ms2_spectra_denoised.msp").write_text("")                  # damaged or from an older raw copy: redone

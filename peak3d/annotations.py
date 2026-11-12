@@ -1,10 +1,11 @@
 """Feature annotations: the library search's result and the user's own choice, kept apart.
 
 identifications.tsv lists every library hit of the MS2 copies of each feature (library.identify: the consensus and
-the highest-TIC spectrum, each raw and denoised). A feature's default annotation is its best hit on the search's
-default copy (identifications.json default_spectrum: the denoised consensus; for searches made before the denoising,
-the consensus, or the single spectrum for outputs made before there was a consensus) when that scores at least the
-search's min_score. A user can replace it with any other listed hit
+the highest-TIC spectrum, each raw and denoised). A feature's default annotation is the better of its best hits on
+the search's default copies (identifications.json default_spectra: the denoised consensus and the denoised
+highest-TIC spectrum; the raw ones for searches without denoising; before 1.2.6 only the consensus counted, and its
+results are now read the same way) when that scores at least the search's min_score; on a tie the consensus wins.
+A user can replace it with any other listed hit
 or mark the feature unknown (or confirm the library's hit), and add a comment and stars (red, blue, yellow) to any
 feature; all of it lives in user_annotations.json, keyed by group id, with a chosen hit's library fields copied
 in, so it outlasts a new search. feature_annotations.tsv holds, for every feature with MS2 or notes, the
@@ -86,13 +87,31 @@ def _search_info(output) -> dict:
         return {}
 
 
-def default_copy(output) -> str:
-    """the copy whose best hit is the default annotation: the one the last search used, else (older searches) the
-    consensus when the output has one"""
-    d = _search_info(output).get("default_spectrum")
-    if d:
-        return str(d)
-    return "consensus" if (Path(output) / "ms2_consensus.msp").exists() else "single"
+# searches before 1.2.6 name one default copy: its kind (denoised or raw) on both spectra
+_PAIR = {"consensus_denoised": ["consensus_denoised", "single_denoised"],
+         "single_denoised": ["consensus_denoised", "single_denoised"],
+         "consensus": ["consensus", "single"], "single": ["consensus", "single"]}
+
+
+def default_copies(output) -> list[str]:
+    """the copies whose best hits compete for the default annotation, consensus first: those the last search named,
+    or for searches made before 1.2.6 its default copy's kind (denoised or raw) on both spectra"""
+    info = _search_info(output)
+    d = info.get("default_spectra")
+    if isinstance(d, list) and d:
+        return [str(x) for x in d]
+    one = str(info.get("default_spectrum") or "single")
+    return list(_PAIR.get(one, [one]))
+
+
+def default_hits(hits: pd.DataFrame, copies) -> pd.DataFrame:
+    """each feature's default hit: of the rank-1 hits on the copies, the highest-scoring (on a tie the earlier copy:
+    the consensus); one row per group_id of hits"""
+    copies = list(copies)
+    top = hits[(hits["rank"] == 1) & hits["spectrum"].isin(copies)]
+    order = top["spectrum"].map({c: i for i, c in enumerate(copies)}).to_numpy()
+    top = top.assign(_o=order).sort_values(["group_id", "score", "_o"], ascending=[True, False, True], kind="stable")
+    return top.drop_duplicates("group_id").drop(columns="_o")
 
 
 def set_user(output, group_id: int, choice) -> dict | None:
@@ -118,7 +137,9 @@ def set_user(output, group_id: int, choice) -> dict | None:
         r = row.iloc[0]
         info = _search_info(output)
         where = {d.get("name"): d.get("path") for d in info.get("libraries") or [] if isinstance(d, dict)}
-        entry["annotation"] = {"status": "user", "confirmed": spec == default_copy(output) and rank == 1,
+        best = default_hits(h[h["group_id"] == g], default_copies(output))
+        entry["annotation"] = {"status": "user", "confirmed": rank == 1 and len(best) > 0 and
+                               spec == str(best["spectrum"].iloc[0]),
                                **{c: str(r[c]) for c in TEXT}, "rank": rank, "score": float(r["score"]),
                                "library_index": int(r["library_index"]),
                                "library": where.get(r.get("library"), info.get("library", "")),   # the hit's own
@@ -169,7 +190,7 @@ def effective(output) -> pd.DataFrame:
     h = read_hits(output)
     min_score = float(_search_info(output).get("min_score", 0.7))
     if h is not None and len(h):
-        top = h[(h["rank"] == 1) & (h["spectrum"] == default_copy(output))]
+        top = default_hits(h, default_copies(output))
         best = {int(r.group_id): r for r in top.itertuples(index=False)}
     rows = []
     for g in sorted(groups):

@@ -572,9 +572,10 @@ def ms2_and_identify(output: Path, args, stage: dict) -> None:
     if getattr(args, "library", None):
         tic = time.perf_counter()
         try:
-            from .library import identify
+            from .library import FRAGMENT_PPM, identify
             identify(output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity,
-                     workers=max(1, int(getattr(args, "cores", 1) or 1)), denoise=getattr(args, "denoise", "search"))
+                     workers=max(1, int(getattr(args, "cores", 1) or 1)), denoise=getattr(args, "denoise", "search"),
+                     fragment_ppm=getattr(args, "fragment_ppm", FRAGMENT_PPM))
         except Exception as e:
             log(f"identify failed: {e!r}")
         stage["identify_s"] = round(time.perf_counter() - tic, 3)
@@ -592,7 +593,8 @@ def _reidentify(output: Path, stage: dict, cores: int = 1) -> None:
             if not Path(lib).is_file():
                 raise FileNotFoundError(lib)
         args = argparse.Namespace(library=libs, similarity=s["method"], precursor_ppm=s["precursor_ppm"],
-                                  fragment_tol=s["fragment_tol"], min_similarity=s["min_score"], cores=cores,
+                                  fragment_tol=s["fragment_tol"], fragment_ppm=float(s.get("fragment_ppm") or 0.0),
+                                  min_similarity=s["min_score"], cores=cores,
                                   denoise=s.get("denoise_mode") or ("t0" if s.get("denoise") else "off"))
     except (OSError, ValueError, KeyError, TypeError) as e:
         from .annotations import retire

@@ -41,7 +41,6 @@ DENOISE = dict(tier="t0", top_k=5)       # specdenoise.Params: precursor m/z onl
 DENOISE_LABEL = "T0 top-5"
 LABEL = {"consensus": "consensus spectrum", "single": "highest-TIC spectrum",
          "consensus_denoised": "denoised consensus spectrum", "single_denoised": "denoised highest-TIC spectrum"}
-DEFAULT_ORDER = ("consensus_denoised", "consensus", "single_denoised", "single")   # whose best hit annotates a feature
 POOL_MIN = 200                           # fewer spectra than this are denoised in-process (a pool costs seconds to start)
 
 
@@ -445,14 +444,22 @@ def default_workers() -> int:
     return max(1, min(8, n))
 
 
-def default_copy(output) -> str:
-    """the copy whose best hit is a feature's default annotation: the first of DEFAULT_ORDER the output holds"""
+def default_copies(output) -> list[str]:
+    """the copies whose best hits compete for a feature's default annotation (the higher-scoring one wins,
+    annotations.default_hits): the denoised consensus and highest-TIC spectra the output holds, else the raw ones"""
     output = Path(output)
-    for c in DEFAULT_ORDER:
-        p = output / SPECTRA[c]
-        if p.exists() and p.stat().st_size:
-            return c
-    return "single"
+    held = lambda c: (output / SPECTRA[c]).exists() and (output / SPECTRA[c]).stat().st_size > 0
+    have = [c for c in RAW if held(c)]
+    return [DENOISED[c] for c in have if held(DENOISED[c])] or have or ["single"]
+
+
+def default_label(copies) -> str:
+    """the default copies as they read in a sentence ("... at or above 0.7 on the <label>")"""
+    copies = list(copies)
+    if len(copies) == 1:
+        return LABEL[copies[0]]
+    dn = all(c in DENOISED.values() for c in copies)
+    return f"better of the {'denoised ' if dn else ''}consensus and highest-TIC spectra"
 
 
 def ensure_denoised(output, workers: int = 1) -> bool:

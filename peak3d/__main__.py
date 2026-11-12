@@ -32,6 +32,13 @@ def _positive(kind):
     return conv
 
 
+def _nonnegative(v):
+    x = float(v)
+    if not x >= 0.0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {v}")
+    return x
+
+
 def _unit(v):
     x = float(v)
     if not 0.0 <= x <= 1.0:
@@ -113,7 +120,7 @@ def build_parser():
                        help="value in the main aligned table (default height; the other is written too)")
 
     def identify_opts(p, required=False):
-        from .library import METHODS
+        from .library import FRAGMENT_PPM, FRAGMENT_TOL, METHODS
         p.add_argument("--library", type=Path, nargs="+", action="extend", default=None, required=required,
                        help="spectral library, .msp or a MassCube .pkl: identity search of every feature's MS2 spectrum" +
                             ("" if required else " (optional)") + "; several (--library A.msp B.pkl, or the option "
@@ -121,12 +128,17 @@ def build_parser():
         p.add_argument("--similarity", choices=list(METHODS), default="weighted_entropy",
                        help="spectral similarity score (default weighted_entropy)")
         p.add_argument("--min-similarity", type=_unit, default=0.7,
-                       help="score at which a feature's best hit on its denoised consensus spectrum becomes its "
-                            "annotation (default 0.7); every hit above 0.1 on a raw or denoised spectrum is listed")
+                       help="score at which a feature's default hit (the better of its best hits on the denoised consensus "
+                            "and denoised highest-TIC spectra) becomes its annotation (default 0.7); every hit above 0.1 "
+                            "on a raw or denoised spectrum is listed")
         p.add_argument("--precursor-ppm", type=_positive(float), default=10.0,
                        help="feature m/z vs library precursor m/z tolerance (ppm, default 10)")
-        p.add_argument("--fragment-tol", type=_positive(float), default=0.02,
-                       help="fragment m/z tolerance (Da, default 0.02)")
+        p.add_argument("--fragment-tol", type=_positive(float), default=FRAGMENT_TOL,
+                       help=f"fragment m/z tolerance (Da, default {FRAGMENT_TOL:g}); peaks match within the larger of "
+                            "this and --fragment-ppm, the tolerance of the MS2 denoising")
+        p.add_argument("--fragment-ppm", type=_nonnegative, default=FRAGMENT_PPM,
+                       help=f"fragment m/z tolerance in ppm of the fragment m/z (default {FRAGMENT_PPM:g}; 0 = "
+                            "--fragment-tol alone)")
         p.add_argument("--denoise", choices=["search", "t0", "off"], default="search",
                        help="MS2 denoising for the search: search (default) = each candidate scored on the spectrum "
                             "denoised with its own formula and adduct (tier T1); t0 = one copy per spectrum denoised "
@@ -314,7 +326,7 @@ def main(argv=None):
             if not lib.expanduser().is_file():
                 sys.exit(f"--library: no such file: {lib}")
         identify(args.output, args.library, args.similarity, args.precursor_ppm, args.fragment_tol, args.min_similarity,
-                 workers=args.cores, denoise=args.denoise)
+                 workers=args.cores, denoise=args.denoise, fragment_ppm=args.fragment_ppm)
         from .web.report import refresh_ids
         if refresh_ids(args.output):            # report.html shows the new hits (its chromatograms are kept)
             print("[peak3d] report.html updated", flush=True)

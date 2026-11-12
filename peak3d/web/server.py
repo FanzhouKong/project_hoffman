@@ -99,6 +99,8 @@ def option_schema(command: str = "process"):
             f["kind"] = "int" if isinstance(one, int) and _probe(a.type, "0.5") is None else "float"
             if _probe(a.type, "0") is None:
                 f["min_exclusive"] = 0
+            elif _probe(a.type, "-1") is None:
+                f["min"] = 0
             # a fraction in [0, 1] (_unit) refuses 1.5; an int type refuses it too, for not being whole -> no cap
             if f["kind"] == "float" and one is not None and _probe(a.type, "1.5") is None:
                 f["max"] = 1
@@ -954,7 +956,7 @@ class Handler(BaseHTTPRequestHandler):
         paths, searched as one; peak3d.library.identify, the denoising search: each candidate scored on the spectrum
         denoised with its own formula); rewrites identifications.* and refreshes report.html, then answers with the
         search summary"""
-        from ..library import METHODS, LibraryError, identify
+        from ..library import FRAGMENT_PPM, FRAGMENT_TOL, METHODS, LibraryError, identify
         from ..ms2 import default_workers
         out = self._output({"path": [body.get("path") or ""]})
         given = body.get("libraries", [body.get("library") or ""])        # "library": one path (older pages)
@@ -968,18 +970,20 @@ class Handler(BaseHTTPRequestHandler):
         if method not in METHODS:
             return self._error(400, f"unknown similarity {method!r}")
         try:
-            ppm, tol, min_score = (float(body.get(k, d)) for k, d in
-                                   (("precursor_ppm", 10.0), ("fragment_tol", 0.02), ("min_score", 0.7)))
+            ppm, tol, tol_ppm, min_score = (float(body.get(k, d)) for k, d in
+                                            (("precursor_ppm", 10.0), ("fragment_tol", FRAGMENT_TOL),
+                                             ("fragment_ppm", FRAGMENT_PPM), ("min_score", 0.7)))
         except (TypeError, ValueError):
             return self._error(400, "tolerances and minimum score must be numbers")
-        if not (ppm > 0 and tol > 0 and 0 <= min_score <= 1):
-            return self._error(400, "tolerances must be > 0 and the minimum score within [0, 1]")
+        if not (ppm > 0 and tol > 0 and tol_ppm >= 0 and 0 <= min_score <= 1):
+            return self._error(400, "tolerances must be > 0 (fragment ppm >= 0) and the minimum score within [0, 1]")
         lock = self.app.folder_lock(out)
         if not lock.acquire(blocking=False):
             return self._error(409, "a search is already running for these results")
         try:
             try:
-                identify(out, libs, method=method, precursor_ppm=ppm, fragment_tol=tol, min_score=min_score,
+                identify(out, libs, method=method, precursor_ppm=ppm, fragment_tol=tol, fragment_ppm=tol_ppm,
+                         min_score=min_score,
                          workers=default_workers())
             except LibraryError as e:                                       # a .pkl that is not a library we can read
                 return self._error(400, str(e))

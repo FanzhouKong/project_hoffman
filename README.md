@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.2.5](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.5) (all releases:
+[Mosa v1.2.6](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.6) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
@@ -163,7 +163,7 @@ member), e.g. `-44.0262`. Nothing is removed: every feature keeps its own row.
 Each MS2 spectrum is assigned to the feature whose m/z and RT window hold its precursor and time. Each
 feature then gets two spectra:
 
-- **consensus** (used by default): all its spectra, from every file, merged. A peak is kept only when at least
+- **consensus**: all its spectra, from every file, merged. A peak is kept only when at least
   two spectra hold it, so noise ions do not add up. Intensities are weighted by how abundant the precursor was
   in the MS1 scan before each spectrum.
 - **highest TIC**: the single spectrum with the highest total ion current.
@@ -181,9 +181,14 @@ the precursor's possible formulas ranked by the fragment intensity they explain;
 `ms2_*_denoised.msp`), `--denoise off` searches the raw spectra only. A library spectrum scoring above 0.1 on
 either version is listed in `identifications.tsv` for both (the `spectrum` column: `consensus`, `single`,
 `consensus_denoised`, `single_denoised`; `denoise_ion` the precursor ion formula it was denoised with), so
-every hit has a raw and a denoised score. A feature's best hit on the denoised consensus
-at or above `--min-similarity` (default 0.7) is its annotation in `feature_annotations.tsv`; the app shows both
-scores and switches the head-to-tail plot between the selected candidate's denoised spectrum and the raw one. In the app you can confirm
+every hit has a raw and a denoised score. Fragment ions match within the larger of 3 mDa and 10 ppm
+(`--fragment-tol`, `--fragment-ppm`), the tolerance the denoising judges ions with, on m/z corrected for each
+file's m/z offset; before 1.2.6 the window was 0.02 Da, wide enough for wrong ions to pair up and lift raw scores
+above denoised ones. A feature's annotation in `feature_annotations.tsv` is the better of its best hits on the
+denoised consensus and the denoised highest-TIC spectrum (the consensus on a tie; before 1.2.6 the consensus
+alone), when it scores at least `--min-similarity` (default 0.7). The app shows both scores, orders the candidates
+by either one (click the **Denoised** or **Raw** column), and switches the head-to-tail plot between the selected
+candidate's denoised spectrum and the raw one. In the app you can confirm
 it, pick another candidate or mark the feature unknown (the table's `reviewed` column says whether you did), write
 a comment, and give features red, blue or yellow stars to filter by. All of it is saved in `user_annotations.json`,
 kept apart from the search results, and used in the report and the exported tables (`reviewed`, `stars`,
@@ -207,7 +212,9 @@ The Features tab shows what each feature is within its compound group: `M+1` a c
 possible one (m/z and RT fit a 13C step from a stronger feature, but the peak shapes did not confirm it), a named
 ion such as `[M+Na]+`, or `Δ -57.0215`, the m/z difference to the group's base ion when no relation names it. The
 Feature group column's button lists only that group's features (the adducts, fragments, multimers and isotopes of
-one compound, `compound_id` in the tables); the same button sits in the feature's header.
+one compound, `compound_id` in the tables); the same button sits in the feature's header. **Clear filters**, next
+to the filter chips, removes every filter at once (the m/z or #id search, the m/z and RT windows, the chips, the
+stars and the feature group).
 
 The standalone app above is the same GUI without a Python installation.
 

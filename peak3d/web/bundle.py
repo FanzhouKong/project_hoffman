@@ -453,6 +453,7 @@ def _spectra(reps, row_of, prefix, den=None):
               f"{prefix}vs": np.asarray(reps["vs_single"], np.float32)[k],
               f"{prefix}prec": np.asarray(reps["prec_mz"], np.float64)[k],
               f"{prefix}rt": np.asarray(reps["rt_s"], np.float32)[k], f"{prefix}off": off,
+              f"{prefix}moff": np.asarray(reps["mz_offset_ppm"], np.float32)[k],   # its file's m/z offset (ppm)
               f"{prefix}mz": mz.astype(np.float32), f"{prefix}int": inten.astype(np.float32)}
     if den is not None:
         arrays[f"{prefix}keep"] = _keep_mask(reps, den, k)

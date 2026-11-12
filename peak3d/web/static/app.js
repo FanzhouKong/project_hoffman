@@ -41,7 +41,7 @@
     no_keep_cache: "Keep the point-cloud cache", no_report: "Interactive report (report.html)",
     compounds: "Compound groups (adducts, fragments, isotopes)",
     library: "Spectral libraries (.msp or .pkl, optional)", similarity: "Similarity score", min_similarity: "Minimum similarity",
-    precursor_ppm: "Precursor tolerance (ppm)", fragment_tol: "Fragment tolerance (Da)",
+    precursor_ppm: "Precursor tolerance (ppm)", fragment_tol: "Fragment tolerance (Da)", fragment_ppm: "Fragment tolerance (ppm)",
   };
   const HELP = {
     cores: "Files are picked in parallel; each worker holds one file in memory (about 0.5–1.5 GB).",
@@ -52,7 +52,7 @@
     compounds: "Joins the adducts, in-source fragments and isotopes of one compound on peak shape and intensity correlation. Slow and memory-hungry on large studies (about 25 GB for 200 files).",
     set: "One NAME=VALUE per line; advanced picker parameters.",
     no_report: "A single HTML file with these views and chromatograms; opens in any browser, easy to share.",
-    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with one or more libraries (searched as one, each hit naming its library), both are searched after the run, each candidate scored on the spectrum as measured and denoised with its own formula (ions without a plausible neutral loss removed), and the best hit on the denoised consensus becomes each feature's annotation.",
+    library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with one or more libraries (searched as one, each hit naming its library), both are searched after the run, each candidate scored on the spectrum as measured and denoised with its own formula (ions without a plausible neutral loss removed), and the better of the best hits on the denoised consensus and highest-TIC spectra becomes each feature's annotation.",
   };
   const INVERTED = new Set(["no_rt_correction", "no_rt_tracking", "no_gap_fill", "no_report", "no_keep_cache"]);
   const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];
@@ -186,7 +186,7 @@
     }
     const num = f.kind === "int" || f.kind === "float";
     const t = textField(label, S.form[f.dest], {
-      type: num ? "number" : "text", help, step: f.kind === "int" ? "1" : "any", min: f.min_exclusive != null ? (f.kind === "int" ? 1 : 0) : null, max: f.max,
+      type: num ? "number" : "text", help, step: f.kind === "int" ? "1" : "any", min: f.min_exclusive != null ? (f.kind === "int" ? 1 : 0) : f.min, max: f.max,
       oninput: (v) => {
         let err = null;
         if (num && v !== "") {
@@ -194,6 +194,7 @@
           if (!isFinite(x)) err = "Enter a number";
           else if (f.kind === "int" && !Number.isInteger(x)) err = "Enter a whole number";
           else if (f.min_exclusive != null && x <= f.min_exclusive) err = "Must be greater than 0";
+          else if (f.min != null && x < f.min) err = `Must be at least ${f.min}`;
           else if (f.max != null && x > f.max) err = `Must be at most ${f.max}`;
         }
         t.setError(err);

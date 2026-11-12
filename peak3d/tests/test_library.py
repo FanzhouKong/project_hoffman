@@ -203,6 +203,48 @@ def test_fragment_tolerance():
     assert similarity(*a, *b, "entropy", fragment_tol=0.01)[1] == 0
 
 
+def test_fragment_tolerance_ppm_rule():
+    """the window is the larger of the Da floor and ppm x m/z: 3 mDa below m/z 300, 10 ppm above (9 mDa at 900)"""
+    a = (np.array([150.0, 900.0]), np.array([1.0, 1.0]))
+    b = (np.array([150.004, 900.006]), np.array([1.0, 1.0]))
+    assert similarity(*a, *b, "entropy", fragment_tol=0.003)[1] == 0
+    assert similarity(*a, *b, "entropy", fragment_tol=0.003, fragment_ppm=10.0)[1] == 1       # 900 only
+    assert similarity(*a, *b, "entropy", fragment_tol=0.005, fragment_ppm=10.0)[1] == 2
+    from specdenoise import Params                       # the search matches as tightly as the denoising judges
+    assert (library.FRAGMENT_TOL, library.FRAGMENT_PPM) == (Params().tol_abs, Params().tol_ppm)
+
+
+def test_identify_tight_fragment_tolerance_and_file_offset(tmp_path):
+    """the default window (3 mDa / 10 ppm) no longer pairs ions 8 mDa apart; a file's m/z offset (mz_offset_ppm) is
+    taken out before matching, so a shifted file still matches"""
+    out = tmp_path / "out"
+    out.mkdir()
+    pd.DataFrame({"group_id": [1, 2], "mz": [132.1019, 132.1019], "rt": [1.0, 2.0]}).to_csv(
+        out / "aligned_feature_table.tsv", sep="\t", index=False)
+    wrong = FRAG + np.array([0.0, 0.008, 0.008, 0.0])          # two ions 8 mDa off: other ions, not these fragments
+    shifted = FRAG * (1 + 25e-6)                                 # a file measuring 25 ppm high
+    with open(out / "ms2_spectra.msp", "w") as fh:
+        write_msp_record(fh, [("NAME", "feature_1"), ("PRECURSORMZ", "132.101900"), ("IONMODE", "Positive"),
+                              ("Comment", 'group_id=1 file="S0" scan="5" rt_s=60.000 n_ms2=1 mz_offset_ppm=0.000')],
+                         wrong, FRAG_I)
+        write_msp_record(fh, [("NAME", "feature_2"), ("PRECURSORMZ", "132.101900"), ("IONMODE", "Positive"),
+                              ("Comment", 'group_id=2 file="S1" scan="9" rt_s=120.000 n_ms2=1 mz_offset_ppm=25.000')],
+                         shifted, FRAG_I)
+    lib = tmp_path / "lib.msp"
+    with open(lib, "w") as fh:
+        write_msp_record(fh, [("NAME", "Leucine"), ("PRECURSORMZ", 132.1019), ("PRECURSORTYPE", "[M+H]+"),
+                              ("IONMODE", "Positive"), ("FORMULA", "C6H13NO2")], FRAG, FRAG_I)
+    t = identify(out, lib, "entropy", min_score=0.0).set_index(["group_id", "spectrum"])
+    assert t.loc[(1, "single"), "n_matched"] == 2 and t.loc[(1, "single_denoised"), "n_matched"] == 2
+    assert t.loc[(2, "single"), "n_matched"] == 4 and t.loc[(2, "single"), "score"] == pytest.approx(1.0)
+    assert t.loc[(2, "single_denoised"), "score"] == pytest.approx(1.0)
+    info = json.loads((out / "identifications.json").read_text())
+    assert info["fragment_tol"] == 0.003 and info["fragment_ppm"] == 10.0 and info["mz_calibrated"]
+    # the old 0.02 Da window pairs the wrong ions up, and the raw score rises
+    w = identify(out, lib, "entropy", min_score=0.0, fragment_tol=0.02, fragment_ppm=0.0).set_index(["group_id", "spectrum"])
+    assert w.loc[(1, "single"), "n_matched"] == 4 and w.loc[(1, "single"), "score"] > t.loc[(1, "single"), "score"]
+
+
 # ------------------------------------------------------------------ identify ----
 FRAG = np.array([60.0444, 72.0808, 86.0964, 104.1070])   # leucine [M+H]+ fragments: C2H6NO, C4H10N, C5H12N, C5H14NO
                                                      # (plausible losses: the denoising keeps them all)

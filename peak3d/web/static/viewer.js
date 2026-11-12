@@ -78,8 +78,13 @@
       this.dn = this.dkey ? { consensus: !!this.m2c, single: !!this.m2 } :
         { consensus: !!(this.m2c && a.ms2c_keep), single: !!(this.m2 && a.ms2_keep) };
       this.dnHits = !!this.id && (this.idsAt[2].size > 0 || this.idsAt[3].size > 0);
-      const d = this.id && this.id.h.default_spectrum;   // the copy whose best hit is the default annotation
-      this.defSpec = d != null && SPEC[d] != null ? SPEC[d] : this.m2c ? 0 : 1;
+      // the copies whose best hits compete for the default annotation (the higher score wins, the consensus on a tie):
+      // the search's default_spectra, or for searches before 1.2.6 its one default copy's kind on both spectra
+      const ds = this.id && this.id.h.default_spectra, d = this.id && this.id.h.default_spectrum;
+      this.defSpecs = (Array.isArray(ds) ? ds : []).map((x) => SPEC[x]).filter((x) => x != null);
+      if (!this.defSpecs.length) this.defSpecs = d != null && SPEC[d] != null ? [SPEC[d] & 2, (SPEC[d] & 2) + 1] : [0, 1];
+      this.defLabel = this.defSpecs.length > 1 ? `better of the ${this.defSpecs[0] >= 2 ? "denoised " : ""}consensus and highest-TIC spectra` :
+        (this.id && this.id.h.default_label) || "consensus spectrum";
       this.minScore = this.id && this.id.h.min_score != null ? this.id.h.min_score : 0.7;
       this.setAnnotations(header.ann || {});
     }
@@ -148,16 +153,27 @@
     reviewed(g) { const e = this.notes.get(g); return !!(e && e.annotation); }
     hits(g, spec) { return (this.id && this.idsAt[spec].get(g)) || []; }
     nWithMs2() { return Math.max(this.ms2At.size, this.ms2cAt.size); }
-    bestScore(g) { const l = this.hits(g, this.defSpec); return l.length ? this.id.a.id_score[l[0]] : NaN; }
-    // the annotation in force: the user's choice, else the best hit on the default copy at or above min_score
+    specCode(j) { return this.id.a.id_spec ? this.id.a.id_spec[j] : 1; }      // the copy (SPEC) hit j is on
+    // the feature's default hit: of the best hits on the default copies the higher-scoring one (the earlier copy, the
+    // consensus, on a tie); null without hits there
+    defHit(g) {
+      let best = null;
+      for (const s of this.defSpecs) {
+        const l = this.hits(g, s);
+        if (l.length && (best == null || this.id.a.id_score[l[0]] > this.id.a.id_score[best])) best = l[0];
+      }
+      return best;
+    }
+    bestScore(g) { const j = this.defHit(g); return j != null ? this.id.a.id_score[j] : NaN; }
+    // the annotation in force: the user's choice, else the default hit (defHit) at or above min_score
     annotation(g) {
       const e = this.notes.get(g), u = e && e.annotation;
       if (u) return u.status === "unknown" ? { source: "user", unknown: true } : { source: "user", confirmed: !!u.confirmed, name: u.name,
         adduct: u.precursor_type, formula: u.formula, inchikey: u.inchikey, smiles: u.smiles, score: u.score, spectrum: u.spectrum, rank: u.rank,
         lib: u.library_index != null ? u.library_index : -1 };
-      const l = this.hits(g, this.defSpec);
-      if (!l.length) return null;
-      const b = this.hit(l[0]);
+      const j = this.defHit(g);
+      if (j == null) return null;
+      const b = this.hit(j);
       return b.score >= this.minScore ? Object.assign({ source: "library" }, b) : null;
     }
     // are the two copies of row g one and the same spectrum (one MS2, or a consensus of one that is the highest-TIC
@@ -317,7 +333,7 @@
       if (R.cid) row.push(a.g_cid[g], R.role(g), num(a.g_nm[g], 6), a.g_base[g], a.g_nmem[g], R.isoq && R.isoq[g] ? `M+${R.isoq[g]}` : "");
       if (a.g_hal) row.push(HAL_TEXT[R.hal(g)] || "", R.halHint(g));
       if (notes) {
-        const x = R.m2 ? R.annotation(g) : null, kc = R.ms2cAt.get(g), l = R.hits(g, R.defSpec), b = l.length ? R.hit(l[0]) : null;
+        const x = R.m2 ? R.annotation(g) : null, kc = R.ms2cAt.get(g), dj = R.id ? R.defHit(g) : null, b = dj != null ? R.hit(dj) : null;
         const named = x && !x.unknown;
         row.push(R.nms2[g], kc != null ? R.m2c.a.ms2c_merged[kc] : 0, x ? (x.unknown ? "unknown" : clean(x.name)) : "", x ? x.source : "",
           R.reviewed(g) ? "yes" : "no", named ? num(x.score, 4) : "", named ? clean(x.adduct) : "", named ? clean(x.formula) : "",
@@ -387,7 +403,8 @@
     const lines = [];
     let k = 0;
     for (const g of rows) {
-      let spec = R.defSpec, which = spec % 2 ? "single" : "consensus", kk = (which === "single" ? R.ms2At : R.ms2cAt).get(g);
+      const dj = R.defHit(g);                   // the copy of the default hit (or the first default copy)
+      let spec = dj != null ? R.specCode(dj) : R.defSpecs[0], which = spec % 2 ? "single" : "consensus", kk = (which === "single" ? R.ms2At : R.ms2cAt).get(g);
       if (kk == null) {                         // a feature without that copy: the other one
         spec ^= 1; which = spec % 2 ? "single" : "consensus"; kk = (which === "single" ? R.ms2At : R.ms2cAt).get(g);
       }
@@ -604,6 +621,21 @@
         b.addEventListener("click", () => { state.starF[c] = !state.starF[c]; b.setAttribute("aria-pressed", String(state.starF[c])); scroller.scrollTop = 0; features_refresh(); });
         return b;
       };
+      // one click back to every feature: the search, the m/z and RT windows, every chip, the stars and the feature-group
+      // filter (the m/z search tolerance and the sort stay); greyed out while nothing filters the list
+      const CHIPS = ["mono", "all", "withEic", "withMs2", "identified", "halogen"], WINDOWS = ["mzLo", "mzHi", "rtLo", "rtHi"];
+      const filtering = () => state.query.trim() !== "" || WINDOWS.some((k) => state[k] !== "") || CHIPS.some((k) => state[k]) ||
+        STARS.some((c) => state.starF[c]) || state.cidF != null;
+      const clearBtn = h("button.btn.text.state.clear-filters", { type: "button",
+        title: "Clear every filter at once: the m/z or #id search, the m/z and RT windows, the chips, the stars and the feature group" },
+        icon("close"), "Clear filters");
+      clearBtn.addEventListener("click", () => {
+        Object.assign(state, { query: "", cidF: null });
+        for (const k of WINDOWS) state[k] = "";
+        for (const k of CHIPS) state[k] = false;
+        for (const c of STARS) state.starF[c] = false;
+        show("features");                // the page drawn anew from state: every field and chip cleared, selection kept
+      });
       const dl = h("button.btn.outlined.state", { type: "button", title: opts.exportTable ?
         "The features listed here (search, filters and sort applied), with the values from aligned_feature_table.tsv; retention times in seconds; gap_filled_files names the files whose value was gap-filled" :
         "The features listed here (search, filters and sort applied); retention times in seconds; gap_filled_files names the files whose value was gap-filled. Values are rounded to 0.04 %; the exact table is aligned_feature_table.tsv in the output folder (minutes)." },
@@ -687,7 +719,7 @@
       const filters = [idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
           R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null,
-          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, h("span.spacer"), count, eicBtn, dl, dlc), skipRow];
+          a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, clearBtn, h("span.spacer"), count, eicBtn, dl, dlc), skipRow];
       const mini = track(P3.plot.scatter(mapEl, {
         height: 210, x: R.rtS, y: a.g_mz, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
         xLabel: "RT (s)", yLabel: "m/z", xFmt: (v, d) => fixed(v, Math.min(d, 0)), yFmt: (v, d) => fixed(v, Math.min(d, 0)),
@@ -811,6 +843,7 @@
       }
       function features_refresh() {
         list = rows();
+        clearBtn.disabled = !filtering();
         count.textContent = state.cidF != null ? `${int(list.length)} features of feature group #${int(state.cidF)}` : `${int(list.length)} of ${int(R.G)} features`;
         if (state.cidF != null) {
           const x = h("button.chip.state.cmp-chip", { type: "button", "aria-pressed": "true", title: "Show all features again" }, icon("filter_list"), `Feature group #${int(state.cidF)}`, icon("close"));
@@ -861,9 +894,13 @@
       const saved = (k, d) => { const v = P3.storeGet("peak3d-id-" + k); return v == null || v === "" ? d : v; };
       const last = R.id ? R.id.h : {};
       const pick = (k, sk, d) => (last[k] != null ? last[k] : saved(sk, d));
+      // fragment tolerance: the larger of Da and ppm x m/z (library.FRAGMENT_TOL, FRAGMENT_PPM: the denoising's). A
+      // search before 1.2.6 matched within 0.02 Da alone: the next one takes the tighter defaults (new stored keys)
+      const fresh = last.fragment_ppm != null, pickF = (k, sk, d) => (fresh ? last[k] : saved(sk, d));
       const st = state.idSt || (state.idSt = { libraries: R.id ? R.libraries().map((d) => d.path) : P3.savedLibraries(),
         method: pick("method", "method", Object.keys(methods)[0] || "weighted_entropy"),
-        precursor_ppm: +pick("precursor_ppm", "ppm", 10), fragment_tol: +pick("fragment_tol", "tol", 0.02), min_score: +pick("min_score", "min", 0.7) });
+        precursor_ppm: +pick("precursor_ppm", "ppm", 10), fragment_tol: +pickF("fragment_tol", "ftol", 0.003),
+        fragment_ppm: +pickF("fragment_ppm", "fppm", 10), min_score: +pick("min_score", "min", 0.7) });
       const off = !R.m2;
       const searched = new Map(R.libraries().map((d) => [d.path, d]));
       const libList = h("div.lib-rows");
@@ -901,7 +938,7 @@
         if (!R.id) return st.libraries.length ? "Not searched yet with these libraries." : "Add one or more spectral libraries (.msp or MassCube .pkl); the search then runs by itself whenever a setting changes.";
         const m = R.id.h;
         return `${int(R.nAnnotated)} of ${int(R.m2.h.n)} features with MS2 annotated${R.nByUser ? ` (${int(R.nByUser)} by you)` : ""} · ` +
-          `${m.method_label || m.method} ≥ ${fixed(m.min_score, 2)} on the ${m.default_label || "consensus spectrum"} · ${int(m.n_hits != null ? m.n_hits : m.n)} hits above ${fixed(m.list_min != null ? m.list_min : 0.1, 1)} listed · ` +
+          `${m.method_label || m.method} ≥ ${fixed(m.min_score, 2)} on the ${R.defLabel} · ${int(m.n_hits != null ? m.n_hits : m.n)} hits above ${fixed(m.list_min != null ? m.list_min : 0.1, 1)} listed · ` +
           `${libText(R.libraries())}${m.library_n ? ` (${int(m.library_n)} spectra)` : ""}${m.seconds != null ? ` · ${fixed(m.seconds, 1)} s` : ""}`;
       };
       status.textContent = summary();
@@ -921,8 +958,9 @@
         const libs = st.libraries.slice();
         stEl.replaceChildren(P3.spinner(14), h("span", ` Searching ${libs.length > 1 ? `${int(libs.length)} libraries` : base(libs[0])}…`));
         try {
-          const res = await opts.identify({ libraries: libs, method: st.method, precursor_ppm: st.precursor_ppm, fragment_tol: st.fragment_tol, min_score: st.min_score });
-          [["method", st.method], ["ppm", st.precursor_ppm], ["tol", st.fragment_tol], ["min", st.min_score]]
+          const res = await opts.identify({ libraries: libs, method: st.method, precursor_ppm: st.precursor_ppm, fragment_tol: st.fragment_tol,
+            fragment_ppm: st.fragment_ppm, min_score: st.min_score });
+          [["method", st.method], ["ppm", st.precursor_ppm], ["ftol", st.fragment_tol], ["fppm", st.fragment_ppm], ["min", st.min_score]]
             .forEach(([k, v]) => P3.storeSet("peak3d-id-" + k, String(v)));
           state.idBusy = false;
           R.setMs2(res);
@@ -947,14 +985,15 @@
       if (state.idAgain && !state.idBusy) { state.idAgain = false; setTimeout(run, 0); }      // a change made during the last search
       else if (R.m2 && !R.id && st.libraries.length && !state.autoSearched) { state.autoSearched = true; setTimeout(run, 0); }   // automatic on open
       return card(".elevated.id-card", "Identity search",
-        "Both MS2 spectra of each feature (the consensus and the highest-TIC spectrum) against one or more spectral libraries, searched as one: candidates within the precursor tolerance of the feature m/z, each scored on the spectrum as measured and on the spectrum denoised with that candidate's own formula and adduct (only ions whose neutral loss is a plausible sub-formula of its precursor ion), all on cleaned spectra (precursor region removed, peaks below 1 % dropped). " +
-        "Every hit above 0.1 on either version is listed with both scores; the best hit on the denoised consensus at or above the threshold becomes the feature's annotation, which you can change per feature.",
+        "Both MS2 spectra of each feature (the consensus and the highest-TIC spectrum) against one or more spectral libraries, searched as one: candidates within the precursor tolerance of the feature m/z, each scored on the spectrum as measured and on the spectrum denoised with that candidate's own formula and adduct (only ions whose neutral loss is a plausible sub-formula of its precursor ion), all on cleaned spectra (precursor region removed, peaks below 1 % dropped). Fragments match within the larger of the Da and ppm tolerances, the denoising's own (3 mDa, 10 ppm by default), on m/z corrected for each file's offset. " +
+        "Every hit above 0.1 on either version is listed with both scores; the feature's annotation is the better of the best hits on the denoised consensus and the denoised highest-TIC spectrum, at or above the threshold, which you can change per feature.",
         h("div.id-form",
           h("div.lib-list", h("div.lib-label", "Libraries (.msp, .pkl)"), libList,
             h("div.field.dense", h("div.box", libIn, h("label", "Add a library"), browseBtn ? h("span.trail", browseBtn) : null))),
           field("Similarity", sel, h("span.select-arrow", icon("expand_more"))),
           field("Precursor (ppm)", num("precursor_ppm", "1", 0.1)),
-          field("Fragment (Da)", num("fragment_tol", "0.005", 0.0005)),
+          field("Fragment (Da)", num("fragment_tol", "0.001", 0.0001)),
+          field("Fragment (ppm)", num("fragment_ppm", "1", 0)),
           field("Annotate at ≥", num("min_score", "0.05", 0, 1)),
           h("div.id-go", go)),
         status);
@@ -1083,6 +1122,11 @@
       const kc = R.ms2cAt.get(g), ks = R.ms2At.get(g), n = R.nms2[g];
       if (ks == null) return [h("p.body-medium.muted", "No MS2 spectrum was acquired for this feature."), commentBlock(g)];
       const one = R.oneSpectrum(g);
+      if (state.copy == null && !one) {          // a feature just picked: the spectrum its annotation (or default hit) is on
+        const x = R.annotation(g), dj = R.id ? R.defHit(g) : null;
+        const on = x && !x.unknown && x.spectrum ? x.spectrum : dj != null ? SPEC_NAME[R.specCode(dj)] : "";
+        if (/^single/.test(on)) state.copy = "single";
+      }
       if (one || state.copy == null || (state.copy === "consensus" && kc == null)) state.copy = kc != null ? "consensus" : "single";
       const copy = state.copy, k = copy === "consensus" ? kc : ks, M = copy === "consensus" ? R.m2c : R.m2;
       // raw or denoised: the denoised spectrum by default, when the results have one; the search's hits follow
@@ -1134,6 +1178,7 @@
       const spectrum = () => {
         const b = state.hit != null ? R.hit(state.hit) : null;
         return { top: R.spectrum(copy, k, dn, state.hit), bottom: b && b.spec ? b.spec : null, bottomLabel: b ? b.name : null, prec: R.a.g_mz[g],
+          ppm: (R.id && R.id.h.fragment_ppm) || 0, shift: R.id && R.id.h.mz_calibrated && M.a[(copy === "consensus" ? "ms2c_" : "ms2_") + "moff"] ? M.a[(copy === "consensus" ? "ms2c_" : "ms2_") + "moff"][k] : 0,
           score: b ? scoreLine(method, b, pair(state.hit), dn ? "raw" : "denoised") : null,
           topLabel: (copy === "consensus" && !one ? "consensus" : "measured") + (dn ? (R.dkey && b && b.dion ? `, denoised as ${b.dion}` : ", denoised") : "") };
       };
@@ -1195,13 +1240,24 @@
       else if (!hits.length) tableParts.push(banner(`No library spectrum scoring above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)} (${R.id.h.method_label || R.id.h.method}) within the precursor tolerance.`));
       else {
         const x = R.annotation(g);
-        // both scores of every candidate when the search scored the denoised copy: the shown copy's first (it orders the list)
+        // both scores of every candidate when the search scored the denoised copy: the shown copy's first. The list is
+        // ordered by the shown copy's score (its ranks) until a click on the Denoised or Raw column orders it by that
+        // score, best first (a second click: lowest first); the choice holds from feature to feature
         const cols = both ? ["#", "Library match", dn ? "Denoised" : "Raw", dn ? "Raw" : "Denoised", "Adduct", "Formula", "Δ ppm", "Peaks"] :
           ["#", "Library match", "Score", "Adduct", "Formula", "Δ ppm", "Peaks"];
+        const ia = R.id.a, colKey = [null, null, dn ? "dn" : "raw", dn ? "raw" : "dn"];
+        const sortKey = both && state.candSort ? state.candSort : dn ? "dn" : "raw", sortDir = both && state.candSort ? state.candDir || -1 : -1;
+        const otherScore = (j) => { const t = lib && lib[j] >= 0 ? otherOf.get(lib[j]) : null; return t != null ? ia.id_score[t] : NaN; };
+        const keyScore = (j) => ((sortKey === "dn") === dn || !both ? ia.id_score[j] : otherScore(j));
+        const shown = both && (sortKey !== (dn ? "dn" : "raw") || sortDir > 0) ? hits.slice().sort((p, q) => {
+          const u = keyScore(p), v = keyScore(q);
+          if (isNaN(u) || isNaN(v)) return isNaN(u) ? (isNaN(v) ? ia.id_rank[p] - ia.id_rank[q] : 1) : -1;     // no score: last
+          return sortDir * (u - v) || ia.id_rank[p] - ia.id_rank[q];
+        }) : hits;
         const manyLibs = R.libraries().length > 1;           // a search of several libraries: which one each hit is from
         if (manyLibs) cols.push("Library");
         const right = both ? [0, 2, 3, 6, 7] : [0, 2, 5, 6];
-        const tb = h("tbody", hits.map((j) => {
+        const tb = h("tbody", shown.map((j) => {
           const b = R.hit(j), p = both ? pair(j) : null;
           const chosen = x && !x.unknown && x.name === b.name && (x.lib == null || x.lib < 0 || x.lib === b.lib);
           const tr = h("tr" + (b.score < R.minScore ? ".below" : ""), { "aria-selected": String(j === state.hit) }, h("td.r", b.rank),
@@ -1221,10 +1277,22 @@
           return tr;
         }));
         const nBelow = hits.filter((j) => R.id.a.id_score[j] < R.minScore).length;
-        tableParts.push(h("div.table-wrap.hits.scroll", h("table.data", h("thead", h("tr", cols
-          .map((t, i) => h("th" + (right.includes(i) ? ".r" : ""), { title: both && (i === 2 || i === 3) ? `${method} on the ${t.toLowerCase()} spectrum` : null }, t)))), tb)),
-          h("p.body-small.muted", { style: { margin: "6px 0 0" } }, `${int(hits.length)} listed (above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)}${both ? " on the raw or the denoised spectrum" : ""}), ordered by the ${both ? (dn ? "denoised" : "raw") + " " : ""}score` +
-            (nBelow ? `; ${int(nBelow)} below the annotation threshold ${fixed(R.minScore, 2)} (grey)` : "") + ". Click one to compare."));
+        const head = cols.map((t, i) => {
+          const k = both ? colKey[i] : null;
+          if (!k) return h("th" + (right.includes(i) ? ".r" : ""), t);
+          const th = h("th.sortable.r", { title: `${method} on the ${t.toLowerCase()} spectrum: click to order the candidates by it`, "aria-sort": k === sortKey ? (sortDir > 0 ? "ascending" : "descending") : "none" }, t);
+          if (k === sortKey) th.appendChild(icon(sortDir > 0 ? "arrow_upward" : "arrow_downward"));
+          th.addEventListener("click", () => {
+            state.candDir = k === sortKey ? -sortDir : -1;
+            state.candSort = k;
+            state.view = chart.view;
+            renderAnno(g);
+          });
+          return th;
+        });
+        tableParts.push(h("div.table-wrap.hits.scroll", h("table.data", h("thead", h("tr", head)), tb)),
+          h("p.body-small.muted", { style: { margin: "6px 0 0" } }, `${int(hits.length)} listed (above ${fixed(R.id.h.list_min != null ? R.id.h.list_min : 0.1, 1)}${both ? " on the raw or the denoised spectrum" : ""}), ordered by the ${both ? (sortKey === "dn" ? "denoised" : "raw") + " " : ""}score${sortDir > 0 ? ", lowest first" : ""}` +
+            (nBelow ? `; ${int(nBelow)} below the annotation threshold ${fixed(R.minScore, 2)} (grey)` : "") + `. Click one to compare${both ? "; click Denoised or Raw to order by that score" : ""}.`));
         drawCand();
       }
       drawAnn();
@@ -1241,7 +1309,7 @@
     // replaced by the user, or "unknown"; set in the app (opts.annotate), shown read-only in a report
     function userAnnotation(g) {
       const x = R.annotation(g), e = R.notes.get(g), user = !!(e && e.annotation);
-      const out = [h("div.ann-label.label-medium.muted", { title: `Default: the best candidate on the ${(R.id && R.id.h.default_label) || "consensus spectrum"} scoring ≥ ${fixed(R.minScore, 2)}. Used in the report and the export.` }, "Annotation")];
+      const out = [h("div.ann-label.label-medium.muted", { title: `Default: the best candidate on the ${R.defLabel}, when it scores ≥ ${fixed(R.minScore, 2)}. Used in the report and the export.` }, "Annotation")];
       if (!x) {
         const bs = R.bestScore(g);
         out.push(h("p.body-small.muted", { style: { margin: "2px 0 0" } }, !R.id ? "Not annotated: no identity search yet." : isFinite(bs) ?
@@ -1260,7 +1328,7 @@
         const btns = [];
         if (x && x.source === "library") {
           const ok = h("button.btn.filled.state", { type: "button" }, icon("check"), "Confirm");
-          ok.addEventListener("click", () => setAnnotation(g, { spectrum: SPEC_NAME[R.defSpec], rank: 1 }));
+          ok.addEventListener("click", () => setAnnotation(g, { spectrum: x.spectrum, rank: x.rank }));
           btns.push(ok);
         }
         if (pick && !same) {

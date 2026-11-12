@@ -13,18 +13,18 @@ FRAG = np.array([60.0444, 72.0808, 86.0964, 104.1070])   # leucine [M+H]+ fragme
 FRAG_I = np.array([30.0, 100.0, 45.0, 10.0])
 
 
-def _output(tmp_path):
+def _output(tmp_path, consensus_i=None):
     out = tmp_path / "out"
     out.mkdir()
     pd.DataFrame({"group_id": [1, 2], "mz": [132.1019, 250.0], "rt": [1.0, 2.0]}).to_csv(
         out / "aligned_feature_table.tsv", sep="\t", index=False)
     pd.DataFrame({"group_id": [1, 1, 2], "file": ["S0", "S1", "S0"], "scan": ["5", "6", "9"],
                   "representative": [1, 0, 1], "in_consensus": [1, 1, 1]}).to_csv(out / "ms2_map.tsv", sep="\t", index=False)
-    for name, scale in (("ms2_spectra.msp", 1.0), ("ms2_consensus.msp", 1.0)):
+    for name, inten in (("ms2_spectra.msp", FRAG_I), ("ms2_consensus.msp", FRAG_I if consensus_i is None else consensus_i)):
         with open(out / name, "w") as fh:
             write_msp_record(fh, [("NAME", "feature_1"), ("PRECURSORMZ", "132.101900"), ("IONMODE", "Positive"),
                                   ("Comment", 'group_id=1 file="S0" scan="5" rt_s=60.000 n_ms2=2 n_merged=2')],
-                             FRAG, FRAG_I * scale)
+                             FRAG, inten)
             write_msp_record(fh, [("NAME", "feature_2"), ("PRECURSORMZ", "250.000000"), ("IONMODE", "Positive"),
                                   ("Comment", 'group_id=2 file="S0" scan="9" rt_s=120.000 n_ms2=1')],
                              np.array([80.0, 120.0]), np.array([1.0, 1.0]))
@@ -45,12 +45,42 @@ def test_default_is_the_best_consensus_hit_above_min_score(tmp_path):
     assert set(hits["spectrum"]) == {"consensus", "single", "consensus_denoised", "single_denoised"}
     assert (hits.groupby(["group_id", "spectrum"]).size() > 0).all()
     assert (hits.groupby(["group_id", "library_index"])["score"].max() > 0.1).all()   # above 0.1 on raw or denoised
-    assert A.default_copy(out) == "consensus_denoised"
+    assert A.default_copies(out) == ["consensus_denoised", "single_denoised"]
     e = pd.read_csv(out / A.TABLE_FILE, sep="\t").set_index("group_id")
     assert e.loc[1, "annotation"] == "Leucine" and e.loc[1, "source"] == "library" and e.loc[1, "spectrum"] == "consensus_denoised"
     w = hits[(hits["group_id"] == 2) & (hits["spectrum"] == "consensus")]
     assert len(w) == 1 and w["score"].iloc[0] < 0.7                      # listed, but too weak to annotate
     assert pd.isna(e.loc[2, "annotation"]) and e.loc[2, "best_hit"] == "Weak"
+
+
+def test_default_is_the_better_of_consensus_and_highest_tic(tmp_path):
+    """the default annotation is the better of the best hits on the (denoised) consensus and highest-TIC spectra, not
+    the consensus by rule; on a tie the consensus; confirming means picking that hit"""
+    out, lib = _output(tmp_path, consensus_i=np.array([100.0, 5.0, 100.0, 60.0]))   # a distorted consensus
+    hits = identify(out, lib, "entropy", min_score=0.7)
+    top = hits[(hits["group_id"] == 1) & (hits["rank"] == 1)].set_index("spectrum")["score"]
+    assert top["single_denoised"] > top["consensus_denoised"]
+    e = A.effective(out).set_index("group_id")
+    assert e.loc[1, "annotation"] == "Leucine" and e.loc[1, "spectrum"] == "single_denoised"
+    assert e.loc[1, "score"] == pytest.approx(top["single_denoised"]) and e.loc[1, "best_score"] == e.loc[1, "score"]
+    assert e.loc[2, "spectrum"] in ("", np.nan) or pd.isna(e.loc[2, "spectrum"])      # too weak: not annotated
+    info = json.loads((out / "identifications.json").read_text())
+    assert info["default_spectra"] == ["consensus_denoised", "single_denoised"] and info["n_identified"] == 1
+    assert "highest-TIC" in info["default_label"]
+    assert not A.set_user(out, 1, {"spectrum": "consensus_denoised", "rank": 1})["annotation"]["confirmed"]
+    assert A.set_user(out, 1, {"spectrum": "single_denoised", "rank": 1})["annotation"]["confirmed"]
+    # a search made before 1.2.6 names one default copy: its kind counts on both spectra
+    info.pop("default_spectra")
+    (out / "identifications.json").write_text(json.dumps(info))
+    assert A.default_copies(out) == ["consensus_denoised", "single_denoised"]
+    info["default_spectrum"] = "consensus"
+    (out / "identifications.json").write_text(json.dumps(info))
+    assert A.default_copies(out) == ["consensus", "single"]
+    # a tie goes to the consensus
+    h = pd.DataFrame({"group_id": [5, 5, 5], "spectrum": ["single_denoised", "consensus_denoised", "consensus"],
+                      "rank": [1, 1, 1], "score": [0.9, 0.9, 0.95], "name": ["a", "b", "c"]})
+    d = A.default_hits(h, ["consensus_denoised", "single_denoised"])
+    assert len(d) == 1 and d["name"].iloc[0] == "b"
 
 
 def test_user_choice_unknown_and_reset(tmp_path):

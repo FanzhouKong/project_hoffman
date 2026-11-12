@@ -367,6 +367,9 @@ def test_schema_and_argv():
     assert "input" not in sch and "output" not in sch and "set" not in sch   # GUI runs are always the named variant
     assert sch["cores"]["kind"] == "int" and sch["cores"]["min_exclusive"] == 0
     assert sch["min_score"]["kind"] == "float" and sch["min_score"]["max"] == 1
+    # 1.2.6: fragments match within the larger of 3 mDa and 10 ppm; ppm may be 0 (Da alone), not below
+    assert sch["fragment_tol"]["default"] == 0.003 and sch["fragment_ppm"]["default"] == 10.0
+    assert sch["fragment_ppm"]["min"] == 0 and "min_exclusive" not in sch["fragment_ppm"]
     # int options have no upper cap (1.2.1 and earlier capped every int at 1: "Must be at most 1" for 4 cores)
     assert not [d for d, f in sch.items() if f["kind"] == "int" and "max" in f]
     assert "max" not in {f["dest"]: f for f in server.option_schema("external")}["cores"]
@@ -791,6 +794,7 @@ def test_identity_search_through_the_server(gui):
     code, err = c.json("/api/results/identify", {**bad, "library": str(root / "libs" / "Other.pkl")})
     assert code == 400 and "could not read the library Other.pkl" in err["error"]
     assert c.json("/api/results/identify", {**bad, "library": str(root / "libs" / "mini.msp"), "method": "cosine"})[0] == 400
+    assert c.json("/api/results/identify", {**bad, "library": str(root / "libs" / "mini.msp"), "fragment_ppm": -1})[0] == 400
     report.write_report(out)                                # a report from before the search (no cache: no chromatograms)
     for method in ("weighted_entropy", "entropy", "dot", "weighted_dot", "reverse_entropy"):
         code, meta = c.json("/api/results/identify", {"path": str(out), "library": str(root / "libs" / "mini.msp"),
@@ -804,6 +808,8 @@ def test_identity_search_through_the_server(gui):
         assert len(d) == len(a["id_row"]) and (d[a["id_spec"] == 1] == -1).all() and (d[a["id_spec"] == 3] >= 0).any()
         assert all(a["dk_off"][x + 1] - a["dk_off"][x] == len(a["ms2_mz"]) for x in d[d >= 0])
         assert set(a["id_spec"].tolist()) == {1, 3} and h["ids"]["default_spectrum"] == "single_denoised"
+        assert h["ids"]["default_spectra"] == ["single_denoised"] and h["ids"]["fragment_ppm"] == 10.0
+        assert len(a["ms2_moff"]) == len(a["ms2_row"])          # each spectrum's file offset, for the plot's matching
         assert "Far precursor" not in h["ids"]["name"] and list(a["id_row"]) == [0] * len(a["id_row"])
         assert h["ids"]["spectra"] and np.allclose(a["id_mz"][:3], [m for m, _ in QUERY])
     # the report now carries the hits too
