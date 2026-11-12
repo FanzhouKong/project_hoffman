@@ -176,6 +176,18 @@ def test_scaled_warp_interpolates_between_identity_and_the_fit():
     assert np.allclose(s.shift(GRID), ramp * w.shift(GRID), atol=1e-8)
 
 
+def test_moved_warp_adds_a_shift_and_stays_increasing():
+    g = np.arange(0, 5.001, 0.01)
+    a = TableWarp(g, g + 0.05)
+    assert np.allclose(a.moved(np.zeros(len(g))).corr, a.corr)
+    extra = -0.1 * np.clip((g - 1.0) / 2.0, 0, 1)
+    c = a.moved(extra)
+    assert np.allclose(c.corr, a.corr + extra) and np.all(np.diff(c.corr) > 0)
+    # a shift that drops faster than a scan per scan cannot fold the axis back
+    step = a.moved(-0.5 * (g > 2.5))
+    assert np.all(np.diff(step.corr) > 0)
+
+
 def test_isolation_matches_the_pairwise_definition():
     from peak3d.anchors import _isolated
     rng = np.random.default_rng(1)

@@ -63,6 +63,12 @@ class TableWarp:
         step = 1e-9 * np.arange(len(corr))
         return TableWarp(self.native, np.maximum.accumulate(corr - step) + step)
 
+    def moved(self, extra):
+        """this warp with ``extra`` (one value per grid point, min) added to its shift"""
+        corr = self.corr + np.asarray(extra, dtype=np.float64)
+        step = 1e-9 * np.arange(len(corr))          # strictly increasing, as in scaled()
+        return TableWarp(self.native, np.maximum.accumulate(corr - step) + step)
+
     @property
     def is_identity(self):
         return bool(np.array_equal(self.native, self.corr))

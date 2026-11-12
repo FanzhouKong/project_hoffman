@@ -34,9 +34,24 @@ does; and a narrow spike loses more height to the smoothing than a peak of the e
 
 **RT correction from the data itself.** No internal standards. Each file's most credible features
 (monoisotopic, high score and S/N, m/z-isolated, spread across the gradient) are anchors. A medoid
-file defines the output RT axis; every other file is matched to it by mutual-unique m/z matches,
-and a monotone warp (PCHIP through robustly weighted binned medians, straight lines across
-anchor-free stretches, constant shift beyond the anchors) maps it onto that axis. Two to three consensus iterations refine the target with the
+file defines the output RT axis. **Drift tracking:** a file's drift is not one number: a first injection can be
+on time for the first minutes and 20 s late afterwards. Matching its anchors around one typical shift (the method
+up to 1.2.4) kept only the anchors near that shift, and the rest of the run took their shift as a constant: there
+the correction moved compounds that were on time by that much, and one compound came out as two features. So each
+file's drift is first tracked along its whole run against the medoid, on every credible feature (monoisotopic,
+S/N >= 5, >= 5 scans) paired with the medoid features of its m/z within the coarse window: in bins of equal time
+holding >= 30 features, the support of a shift is the share of the bin's features with a partner at that shift,
+counted per feature and per group of co-eluting features, the smaller of the two (so neither one compound's many
+ions nor many scattered ions whose retention depends on the sample decide); the path is the sequence of shifts with
+the largest total support that changes by at most half the time elapsed between bins, a change costing support, so
+it stays with the drift of the neighbouring stretches unless a stretch clearly says otherwise. A bin places the path
+only with >= 10 features on it and no rival shift half as supported; between such bins it is interpolated. The path is
+used only for a file with a stretch of the run farther from the file's one typical shift than the anchor window
+(flag `rt_drift_tracked`): its
+anchors are matched to the target by mutual-unique m/z matches around the path instead of around one shift, and the
+monotone warp (PCHIP through robustly weighted binned medians, straight lines across anchor-free stretches, constant
+beyond the anchors) is fitted to them on top of it. Every other file, whose anchors one shift and its window all
+reach, is matched and fitted exactly as before (`--no-rt-tracking`: all files that way). Two to three consensus iterations refine the target with the
 union of all anchors. **Do-no-harm check:** the anchors are the strongest, most isolated ions, and
 their drift is not always that of the other compounds (compound-specific drift; a constant shift
 extrapolated beyond the first or last anchor). Every warp is therefore checked on held-out features:
@@ -147,7 +162,7 @@ Options: `--ppm 5`, `--rt-tol-max 0.25`, `--min-score 0.5`, `--min-presence 2`, 
 | `features/<stem>.tsv` | per-file features: mz, rt, rt_apex, height, area, area_bsub, rt_min, rt_max, scans, n_scans, n_gaps, fwhm, asym, mz_sd_ppm, baseline (where the bounds walk stopped), baseline_lo, noise (cell floor, used in the S/N), snr, prominence_rel, persistence, gauss_r2, ridge_ratio, background_ratio, far_level, tv_ratio, n_valleys, tv_excess, noise_i (sigma at the apex under the file's noise law), iso_offset, charge, iso_parent, iso_ratio, score_rule, score_model, score, flags, rt_corr, rt_min_corr, rt_max_corr, is_anchor, group_id, group_kept, compound_id, role |
 | `features/<stem>.params.json` | every per-file estimated parameter, counts and stage timings |
 | `rt_correction/<stem>.tsv` | the warp: scan, rt_native, rt_corr |
-| `rt_correction/summary.tsv` | per file: role, anchor tier, counts, knots, coarse shift, max shift, MAD before/after (s), anchors matched relative to the median file (flag few_anchors_matched below 0.8, shown first), m/z offset and its coarse part (ppm), do-no-harm check (validation features, smallest / median factor, their mean deviation native / anchor fit / applied, s), flag (rt_residual_high, shown first: the applied deviation stays >= 4 x the study's median and >= 2 scans, with >= 8 files checked; the file's retention changed in a way the correction could not follow) |
+| `rt_correction/summary.tsv` | per file: role, anchor tier, counts, knots, coarse shift, max shift, MAD before/after (s), anchors matched relative to the median file (flag few_anchors_matched below 0.8, shown first), m/z offset and its coarse part (ppm), do-no-harm check (validation features, smallest / median factor, their mean deviation native / anchor fit / applied, s), drift tracking (features paired with the medoid, bins that placed the path, range of the tracked drift along the run and its largest distance from the file's one shift, s), flag (rt_drift_tracked: that distance exceeds the anchor window; rt_residual_high, shown first: the applied deviation stays >= 4 x the study's median and >= 2 scans, with >= 8 files checked; the file's retention changed in a way the correction could not follow) |
 | `rt_correction/anchors.tsv` | every matched anchor with residuals before/after the anchor fit (before the do-no-harm scaling) |
 | `qc/` | drift curves, residual histograms, anchor fits, presence histogram, `holdout.tsv` |
 | `params.json` | resolved parameters, versions, medoid, tolerances, stage times |

@@ -91,6 +91,8 @@ def anchor_fit(fa, path: Path):
                linewidths=0.6, label="matched anchor (outlier)")
     ax.scatter(m["rt_native"][ok], m["residual_before_s"][ok], s=10, color=CAT[0], label="matched anchor")
     g = fa.warp.native
+    if getattr(fa, "pre", None) is not None:
+        ax.plot(g, 60 * fa.pre.shift(g), color=INK2, linewidth=1.0, linestyle=":", label="tracked drift (all credible features)")
     if fa.warp_fit is not None:
         ax.plot(g, 60 * fa.warp_fit.shift(g), color=INK2, linewidth=1.0, linestyle="--", label="anchor fit")
     ax.plot(g, 60 * fa.warp.shift(g), color=INK, linewidth=1.5,

@@ -36,7 +36,7 @@
   const LABELS = {
     cores: "CPU cores", min_score: "Minimum feature score", polarity: "Polarity", model: "Re-scoring model (optional)",
     keep_rejected: "Also write rejected candidates", set: "Picker overrides", ppm: "m/z tolerance (ppm)",
-    rt_tol_max: "Maximum RT tolerance (min)", no_rt_correction: "RT correction", no_gap_fill: "Gap filling",
+    rt_tol_max: "Maximum RT tolerance (min)", no_rt_correction: "RT correction", no_rt_tracking: "RT drift tracking", no_gap_fill: "Gap filling",
     min_presence: "Minimum files per feature", holdout: "Held-out anchor check", quant: "Main table value",
     no_keep_cache: "Keep the point-cloud cache", no_report: "Interactive report (report.html)",
     compounds: "Compound groups (adducts, fragments, isotopes)",
@@ -46,6 +46,7 @@
   const HELP = {
     cores: "Files are picked in parallel; each worker holds one file in memory (about 0.5–1.5 GB).",
     no_rt_correction: "Align the runs on their own most credible features before grouping.",
+    no_rt_tracking: "Follow each run's drift over its whole length before its anchors are matched (off: one typical shift per run, as up to 1.2.4).",
     no_gap_fill: "Fill missing values from each file's chromatogram, and confirm real peaks there.",
     no_keep_cache: "Keeps .cache/ (about the size of the mzML files) for Show MS1, and so `peak3d align` can re-run alignment without re-picking.",
     compounds: "Joins the adducts, in-source fragments and isotopes of one compound on peak shape and intensity correlation. Slow and memory-hungry on large studies (about 25 GB for 200 files).",
@@ -53,7 +54,7 @@
     no_report: "A single HTML file with these views and chromatograms; opens in any browser, easy to share.",
     library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with one or more libraries (searched as one, each hit naming its library), both are searched after the run, each candidate scored on the spectrum as measured and denoised with its own formula (ions without a plausible neutral loss removed), and the best hit on the denoised consensus becomes each feature's annotation.",
   };
-  const INVERTED = new Set(["no_rt_correction", "no_gap_fill", "no_report", "no_keep_cache"]);
+  const INVERTED = new Set(["no_rt_correction", "no_rt_tracking", "no_gap_fill", "no_report", "no_keep_cache"]);
   const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];
   const SEGMENTS = { polarity: [[null, "Auto"], ["pos", "Positive"], ["neg", "Negative"]], quant: [["height", "Height"], ["area", "Area"]] };
 

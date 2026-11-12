@@ -363,6 +363,7 @@ def _menu_download(path: Path, filled):
 def test_schema_and_argv():
     sch = {f["dest"]: f for f in server.option_schema()}
     assert {"cores", "min_score", "polarity", "ppm", "no_rt_correction", "no_gap_fill", "quant", "no_report"} <= set(sch)
+    assert sch["no_rt_tracking"]["kind"] == "flag"
     assert "input" not in sch and "output" not in sch and "set" not in sch   # GUI runs are always the named variant
     assert sch["cores"]["kind"] == "int" and sch["cores"]["min_exclusive"] == 0
     assert sch["min_score"]["kind"] == "float" and sch["min_score"]["max"] == 1

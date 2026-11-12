@@ -257,7 +257,8 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     dts = [float(np.median(np.diff(g))) if len(g) > 1 else 0.01 for g in grids.values()]
     dt_med = float(np.median(dts))
     dyn = not bool(getattr(args, "mz_static", False))       # --mz-static: one offset per file, no jump handling
-    P = AlignParams(ppm=args.ppm, rt_tol_max=args.rt_tol_max, holdout=args.holdout, mz_dynamic=dyn,
+    P = AlignParams(ppm=args.ppm, rt_tol_max=args.rt_tol_max, holdout=args.holdout,
+                    track=not bool(getattr(args, "no_rt_tracking", False)), mz_dynamic=dyn,
                     mz_relaxed_second_mode=dyn, mz_step_curve=dyn, mz_fallback_ref=dyn, mz_probe_features=dyn)
 
     tic = time.perf_counter()

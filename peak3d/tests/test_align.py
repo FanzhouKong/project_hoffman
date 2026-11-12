@@ -446,8 +446,9 @@ def test_gate_removes_unsupported_extrapolation_before_the_first_anchor():
     early = np.flatnonzero((weak["rt"].values > 0.4) & (weak["rt"].values < 1.3))
     late = np.flatnonzero((weak["rt"].values > 2.0) & (weak["rt"].values < T - 0.4))
     ns = len(strong)
-    off = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(gate=False))
-    on = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams())
+    # the do-no-harm check on its own: anchors matched around one shift per file (track=False)
+    off = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(gate=False, track=False))
+    on = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(track=False))
     assert on.medoid != "b"
     assert _pair_gap(off, feats, "a", "b", ns, early) > 0.03          # the fit extrapolates the 2.4 s shift
     assert _pair_gap(on, feats, "a", "b", ns, early) < 0.2 * 0.04     # the gate takes it back
@@ -456,6 +457,10 @@ def test_gate_removes_unsupported_extrapolation_before_the_first_anchor():
     assert g["lam"][0] < 0.2 and g["lam"][-1] > 0.8 and g["dev_gated_s"] <= g["dev_native_s"]
     s = summary_table(on)
     assert {"gate_n_val", "gate_lambda_min", "gate_dev_applied_s"} <= set(s.columns)
+    # a 2.4 s drift is within the anchor window: such a file is not put on a tracked path, and the result is the same
+    default = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams())
+    assert default.files["b"].pre is None and "rt_drift_tracked" not in default.files["b"].flags
+    assert np.array_equal(default.files["b"].warp.corr, on.files["b"].warp.corr)
 
 
 def test_gate_shrinks_a_drift_only_the_anchors_have():
@@ -488,6 +493,119 @@ def test_gate_keeps_a_coherent_warp():
             continue
         assert fa.gate is not None and np.median(fa.gate["lam"]) > 0.9, fa.gate["lam"]
         assert fa.gate["dev_gated_s"] < 0.5 * fa.gate["dev_native_s"]
+
+
+def _late_start_files(n=1500, seed=21):
+    """five files; b is on time until 1.3 min and 18 s late from 2.3 min on (a first injection: the early part of
+    its run did not drift with the rest), the others drift by a second or two"""
+    truth = _truth(n, seed=seed)
+    W = {"a": lambda t: t, "b": lambda t: t + 0.3 * np.clip((t - 1.3) / 1.0, 0.0, 1.0),
+         "c": lambda t: t - 0.02 + 0.004 * t, "d": lambda t: t + 0.015, "e": lambda t: t - 0.004 * t}
+    feats = {k: _file(truth, W[k], n_decoy=100, seed=i) for i, k in enumerate(W)}
+    return truth, feats, {k: GRID for k in W}
+
+
+def _gap(res, feats, a, b, rows):
+    """median |corrected RT in b - corrected RT in a| (min) over the truth rows `rows`"""
+    return float(np.median(np.abs(res.files[b].warp.forward(feats[b]["rt"].values[rows])
+                                  - res.files[a].warp.forward(feats[a]["rt"].values[rows]))))
+
+
+def test_tracking_follows_a_drift_wider_than_the_anchor_window():
+    """file b: no shift before 1.3 min, 18 s after 2.3 min. One typical shift per file (the method up to 1.2.4)
+    matches the late anchors only (the window around the 18 s is +-6 s) and gives the early part their shift, so the
+    early compounds end up ~18 s from the other files. Tracking the drift along the run first matches the anchors
+    everywhere, and the whole run is aligned"""
+    truth, feats, grids = _late_start_files()
+    rt = truth["rt"].values
+    early, ramp, late = [np.flatnonzero((rt > lo) & (rt < hi)) for lo, hi in ((0.4, 1.2), (1.5, 2.1), (2.5, T - 0.4))]
+    off = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(track=False))
+    on = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams())
+    assert on.medoid == off.medoid != "b"
+    m = on.medoid
+    assert _gap(off, feats, m, "b", early) > 0.1                    # 6 s and more: the bug
+    assert _gap(off, feats, m, "b", late) < DT
+    for rows in (early, ramp, late):
+        assert _gap(on, feats, m, "b", rows) < DT
+    fb = on.files["b"]
+    assert fb.pre is not None and "rt_drift_tracked" in fb.flags and fb.flag.startswith("ok")
+    assert fb.drift["range_s"] > 15 and fb.drift["off_s"] > 15 and fb.drift["ok"].sum() >= 10
+    assert abs(fb.pre.shift(0.8)) < DT and abs(fb.pre.shift(3.5) + 0.3) < 2 * DT      # the path itself
+    assert fb.diag.n > 1.5 * off.files["b"].diag.n                 # anchors matched along the whole run now
+    assert np.all(np.diff(fb.warp.corr) > 0)
+    assert any(n_.startswith("rt drift tracked: 1 file") for n_ in on.notes)
+    for k in "acde":                                               # steady files: matched as before, not on a path
+        if k != m:
+            assert on.files[k].pre is None and "rt_drift_tracked" not in on.files[k].flags
+            assert on.files[k].drift["off_s"] < 3 and np.max(np.abs(on.files[k].warp.corr - off.files[k].warp.corr)) < DT
+    s = summary_table(on).set_index("file")
+    assert {"drift_n", "drift_bins", "drift_range_s", "drift_off_s"} <= set(s.columns) and s.loc["b", "drift_off_s"] > 15
+    assert "rt_drift_tracked" in s.loc["b", "flag"]
+
+
+def test_tracking_off_is_the_single_shift_method():
+    _, feats, grids = _late_start_files()
+    res = align_run({k: f.copy() for k, f in feats.items()}, grids, AlignParams(track=False))
+    assert all(fa.pre is None and fa.drift is None and "rt_drift_tracked" not in fa.flags for fa in res.files.values())
+    assert np.isnan(summary_table(res)["drift_range_s"]).all()
+
+
+def _path_case(x, late, x_ref=None):
+    """a file and a reference for _drift_path: features at native RT x in the file, x - late in the reference"""
+    from peak3d.align import FileAlignment
+    from peak3d.warp import TableWarp
+    x, late = np.asarray(x, float), np.asarray(late, float)
+
+    def table(rt):
+        df = pd.DataFrame({"mz": 100.0 + 0.37 * np.arange(len(rt)), "rt": rt, "height": 1e5})
+        df["rt_min"], df["rt_max"] = df["rt"] - 0.03, df["rt"] + 0.03
+        df["score"], df["snr"], df["n_scans"], df["mz_sd_ppm"], df["iso_offset"], df["iso_parent"] = 0.9, 50.0, 12, 0.4, 0, -1
+        df["feature_id"] = np.arange(len(df))
+        return df[COLS]
+
+    fa = FileAlignment("f", TableWarp.identity(GRID), dt=DT, span=T)
+    fm = FileAlignment("m", TableWarp.identity(GRID), dt=DT, span=T)
+    return fa, table(x + 0.1 * DT * np.random.default_rng(2).standard_normal(len(x))), fm, table(x - late)
+
+
+def test_drift_path_stays_with_the_features_that_are_on_time():
+    """between 2 and 3 min twelve scattered ions of the file elute 15 s late (their retention depends on the sample,
+    not on the run) while the other ions there, among them two groups of twenty co-eluting ones, are on time: the
+    path does not leave the on-time features, there or anywhere"""
+    from peak3d.align import _drift_path
+    rng = np.random.default_rng(4)
+    base = np.arange(0.3, 4.76, 0.02)
+    lone = np.arange(2.05, 2.96, 0.08)
+    swarms = np.concatenate([c + rng.uniform(-0.003, 0.003, 20) for c in (2.33, 2.67)])
+    x = np.concatenate([base, lone, swarms])
+    late = np.concatenate([np.zeros(len(base)), np.full(len(lone), 0.25), np.zeros(len(swarms))])
+    pre, info = _drift_path(*_path_case(x, late), 5.0)
+    assert info["ok"].sum() >= 5 and np.max(np.abs(info["shift"][info["ok"]])) < DT
+    assert pre is not None and np.max(np.abs(pre.shift(GRID))) < DT
+
+
+def test_drift_path_does_not_follow_one_compound():
+    """forty co-eluting ions (one compound: adducts, fragments) elute 9 s late, the thirty-odd other ions around
+    them are on time: the forty count once among the compounds, and the path stays"""
+    from peak3d.align import _drift_path
+    rng = np.random.default_rng(5)
+    base = np.arange(0.3, 4.76, 0.02)
+    swarm = 2.505 + rng.uniform(-0.003, 0.003, 40)
+    x = np.concatenate([base, swarm])
+    late = np.concatenate([np.zeros(len(base)), np.full(40, 0.15)])
+    pre, info = _drift_path(*_path_case(x, late), 5.0)
+    assert pre is not None and np.max(np.abs(pre.shift(GRID))) < DT
+
+
+def test_drift_path_needs_features_shared_with_the_reference():
+    """nothing in common with the reference (or too few features): no path, and the file is handled as before"""
+    from peak3d.align import _drift_path
+    fa, f, fm, m = _path_case(np.arange(0.3, 4.76, 0.02), 0.0)
+    m["mz"] += 0.2                                                   # no partner within 5 ppm
+    pre, info = _drift_path(fa, f, fm, m, 5.0)
+    assert pre is None and info["n"] == 0
+    fa, f, fm, m = _path_case(np.arange(0.3, 4.76, 0.3), 0.0)        # 15 features: fewer than one bin
+    assert _drift_path(fa, f, fm, m, 5.0)[0] is None
 
 
 def test_loo_median_and_scale_factor_match_brute_force():

@@ -62,6 +62,9 @@ def build_parser():
         p.add_argument("--ppm", type=_positive(float), default=5.0, help="m/z tolerance for anchors/grouping")
         p.add_argument("--rt-tol-max", type=_positive(float), default=0.25, help="cap on the grouping RT tolerance (min)")
         p.add_argument("--no-rt-correction", action="store_true", help="group on native RT (identity warps)")
+        p.add_argument("--no-rt-tracking", action="store_true",
+                       help="match each file's anchors around one typical shift instead of along its drift tracked over "
+                            "the run (the RT correction as up to 1.2.4)")
         p.add_argument("--no-gap-fill", action="store_true")
         p.add_argument("--no-halogen-test", action="store_true",
                        help="skip the MS1 isotope check for chlorine / bromine (the possible_halogen column)")

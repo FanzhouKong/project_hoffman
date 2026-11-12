@@ -97,19 +97,23 @@ def cluster_weights(rt, width):
     n = len(rt)
     if n == 0:
         return np.zeros(0)
-    tol = 0.25 * float(np.median(width)) if n else 0.0
-    tol = max(tol, 1e-6)
     o = np.argsort(rt, kind="stable")
-    r = rt[o]
-    cid = np.zeros(n, np.int64)
-    start = r[0]
-    for i in range(1, n):
+    cid = _clusters(rt[o], 0.25 * float(np.median(width)))
+    out = np.empty(n)
+    out[o] = 1.0 / np.bincount(cid)[cid]
+    return out
+
+
+def _clusters(r, tol):
+    """cluster index per element of the ascending times r: a cluster starts at its first element and takes the
+    following ones within tol of that start"""
+    tol = max(tol, 1e-6)
+    cid = np.zeros(len(r), np.int64)
+    start = r[0] if len(r) else 0.0
+    for i in range(1, len(r)):
         if r[i] - start <= tol:
             cid[i] = cid[i - 1]
         else:
             cid[i] = cid[i - 1] + 1
             start = r[i]
-    size = np.bincount(cid)[cid]
-    out = np.empty(n)
-    out[o] = 1.0 / size
-    return out
+    return cid

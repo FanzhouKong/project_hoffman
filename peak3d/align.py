@@ -1,7 +1,9 @@
-"""Study-level RT alignment: medoid reference whose native axis is the output axis, refined by
-consensus iterations over the union of every file's anchors, then a do-no-harm check of every warp
-on held-out (non-anchor) features. Each file's m/z offset is found first, coarsely, against the medoid
-within MZ_SEARCH_PPM and removed before anchors are matched within the narrow tolerance; the fine offset
+"""Study-level RT alignment: medoid reference whose native axis is the output axis. Each file's drift is first
+tracked along its whole run against the medoid on every credible feature (_drift_path: the continuous path of
+shifts that most features and most compounds agree on), anchors are matched around that path and the warp is fitted
+to them on top of it, refined by consensus iterations over the union of every file's anchors, then a do-no-harm
+check of every warp on held-out (non-anchor) features. Each file's m/z offset is found first, coarsely, against
+the medoid within MZ_SEARCH_PPM and removed before anchors are matched within the narrow tolerance; the fine offset
 is measured on the matched anchors, and the file's offset (mz_offset_ppm) is the sum."""
 from __future__ import annotations
 
@@ -10,10 +12,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .anchors import _isolated, select_anchors
+from .anchors import _clusters, _isolated, select_anchors
 from .grouping import group_features
-from .warp import (FitDiag, TableWarp, _pairs, coarse_mz_offset, coarse_shift, fit_warp, mad, match_anchors,
-                   weighted_median)
+from .warp import (MIN_SLOPE, FitDiag, TableWarp, _merge_close_knots, _pairs, coarse_mz_offset, coarse_shift, fit_warp,
+                   mad, match_anchors, weighted_median)
 
 
 CONSENSUS_MIN_FILES = 3    # a consensus anchor group must be present in at least this many files
@@ -25,6 +27,14 @@ ANCHOR_MATCH_MIN = 0.8     # a file matching fewer anchors than this share of th
 RT_RESIDUAL_RATIO = 4.0    # a file whose held-out features stay this many times the study's median deviation from the
                            # other files after correction is flagged rt_residual_high (benchmark studies: <= 1.8 x)
 RT_RESIDUAL_MIN_FILES = 8  # ... when at least this many files were checked (the median of a few means little)
+# drift tracking (_drift_path), before anchors are matched
+DRIFT_SNR, DRIFT_SCANS = 5.0, 5   # a credible feature: monoisotopic, S/N and scans at least these
+DRIFT_SEG = 30             # credible features per bin of the run, at least (bins are stretches of time: the knot
+                           # spacing of fit_warp, joined with the next until they hold this many)
+DRIFT_MIN_ON = 10          # a bin places the path only when this many of its features lie on it ...
+DRIFT_DOMINANT = 2.0       # ... and their share is this many times that of any other shift
+DRIFT_MAX_SLOPE = 0.5      # between bins the shift changes by at most this share of the time elapsed
+DRIFT_STIFF = 0.1          # share of a bin's features a change of one tolerance between neighbouring bins must win
 WARN_FLAGS = ("few_anchors_matched", "rt_residual_high")   # shown first in FileAlignment.flag, so the report marks the file
 
 
@@ -36,6 +46,8 @@ class AlignParams:
     n_medoid_candidates: int = 25
     holdout: bool = False
     gate: bool = True          # do-no-harm: scale each warp down where held-out features do not support it
+    track: bool = True         # follow each file's drift along its run on every credible feature before anchors
+                               # are matched (False: around one typical shift per file, as up to 1.2.4)
     # m/z: the five below are on by default since 2026-10-31 (judged on the PR002464 m/z error test: 25 injections
     # whose calibration jumps mid-run; no change on the 12 clean benchmark datasets); all off = one offset per file
     mz_dynamic: bool = True    # each file's m/z offset as a curve over its run time (running median over its
@@ -75,6 +87,8 @@ class FileAlignment:
     anchor_w: np.ndarray = field(default_factory=lambda: np.zeros(0))   # 1/cluster size per anchor
     gate: dict | None = None       # do-no-harm step: validation count, segment nodes and factors, |dev| before/after
     warp_fit: TableWarp | None = None   # the anchor fit before the do-no-harm step (None = applied as fitted)
+    pre: TableWarp | None = None        # the tracked drift (native -> medoid axis) the anchors are matched and fitted on
+    drift: dict | None = None           # drift tracking: bin nodes, shifts, support, which bins placed the path
     match_ratio: float = float("nan")   # anchors matched / the median file's (not the medoid)
     mz_coarse_curve: np.ndarray | None = None   # mz_dynamic: the coarse offset per scan of the native grid
     mz_curve: np.ndarray | None = None          # mz_dynamic: the offset (coarse + fine) per scan of the native grid
@@ -337,11 +351,139 @@ def _coarse_mz(files, features, stems, ref, ppm: float, dynamic: bool = False, r
             fa.mz_coarse_ppm = fa.mz_offset_ppm = float(np.median(fa.mz_coarse_curve))
 
 
+def _credible(feats: pd.DataFrame):
+    return np.flatnonzero((feats["iso_offset"].values == 0) & (feats["snr"].values >= DRIFT_SNR)
+                          & (feats["n_scans"].values >= DRIFT_SCANS))
+
+
+def _drift_path(fa: FileAlignment, feats: pd.DataFrame, fm: FileAlignment, feats_m: pd.DataFrame, ppm: float):
+    """The file's drift along its run against the medoid, before any anchor is matched: (TableWarp native ->
+    medoid axis, info), or (None, info) when no stretch of the run places it.
+
+    One typical shift per file (coarse_shift) with a window around it loses the anchors wherever the file's drift
+    is further from that shift than the window: a first injection that is on time early and 20 s late afterwards
+    keeps only its late anchors, and its early part gets their shift. Here every credible feature (monoisotopic,
+    S/N >= DRIFT_SNR, >= DRIFT_SCANS scans) is paired with every credible medoid feature of its m/z within the
+    coarse window W; true pairs lie along one curve shift(RT), the others anywhere. The run is cut into bins of equal
+    time (the knot spacing of fit_warp), each joined with the next until it holds >= DRIFT_SEG features: the drift
+    belongs to the run, so a stretch of time is the unit, and a band of a hundred co-eluting ions is not a bin of
+    its own. In a bin, the support of a shift is the share of the features with a partner within tau of it (tau =
+    half the anchor window), counted twice, each feature once and each group of co-eluting features once, and the
+    smaller share is taken: a shift needs most features and most compounds, so neither one compound's many ions
+    nor many scattered ions whose retention depends on the sample can pull the path off the others. The
+    path is the sequence of shifts, one per bin, with the largest total support, when the shift changes by at most
+    DRIFT_MAX_SLOPE of the time elapsed between bins and a change of tau costs DRIFT_STIFF of support (dynamic
+    programming): it stays with the drift of the neighbouring stretches unless a stretch clearly says otherwise.
+    A bin places the path when >= DRIFT_MIN_ON of its features lie on it and no shift elsewhere has half their
+    support; its shift is then the median of those features (co-eluting ones counting once). Between such bins
+    the drift is interpolated, before the first and after the last it is constant.
+
+    The caller uses the path only for a file with a stretch farther from the file's one shift than the anchor
+    window: there that shift cannot reach its anchors. Any other file is matched around its one shift as before,
+    and its result does not depend on this function."""
+    grid = fa.warp.native
+    _, _, dt, span = _file_grid_info(grid)
+    W = float(np.clip(0.1 * span, 0.3, 4.0))
+    tau = 0.5 * max(0.1, 6 * dt)
+    info = dict(n=0, nodes=np.zeros(0), shift=np.zeros(0), support=np.zeros(0), on=np.zeros(0, int),
+                ok=np.zeros(0, bool), range_s=0.0)
+    a, b = _credible(feats), _credible(feats_m)
+    if len(a) < DRIFT_SEG or len(b) < DRIFT_SEG:
+        return None, info
+    x_all = feats["rt"].values[a]
+    i, _, d = _pairs(_mz(fa, feats, a), x_all, _mz(fm, feats_m, b), feats_m["rt"].values[b], ppm)
+    keep = np.abs(d) <= W
+    i, d = i[keep], d[keep]
+    fi = np.unique(i)                                  # features with a candidate partner ...
+    n = len(fi)
+    info["n"] = int(n)
+    if n < DRIFT_SEG:
+        return None, info
+    fi = fi[np.argsort(x_all[fi], kind="stable")]      # ... in run order
+    pos = np.full(len(a), -1, np.int64)
+    pos[fi] = np.arange(n)
+    row = pos[i]
+    o = np.argsort(row, kind="stable")
+    row, d = row[o], d[o]
+    x = x_all[fi]
+    cid = _clusters(x, 0.25 * float(np.median((feats["rt_max"].values - feats["rt_min"].values)[a][fi])))
+    ds = tau / 3
+    s_grid = np.arange(-W, W + ds / 2, ds)
+    S = len(s_grid)
+    lo = np.searchsorted(s_grid, d - tau, side="left")
+    hi = np.searchsorted(s_grid, d + tau, side="right")          # the pair supports s_grid[lo:hi]
+    spacing = float(np.clip(span / 32.0, 0.1, 1.0))              # as the knots of fit_warp
+    cuts = np.searchsorted(x, np.arange(grid[0] + spacing, grid[-1], spacing))
+    edges = [0]
+    for c in cuts:                                               # time slices, joined until they hold DRIFT_SEG
+        if c - edges[-1] >= DRIFT_SEG and n - c >= DRIFT_SEG:
+            edges.append(int(c))
+    edges = np.asarray(edges + [n], np.int64)
+    K = len(edges) - 1
+    pe = np.searchsorted(row, edges)
+    sup, nodes = np.zeros((K, S)), np.zeros(K)
+    for k in range(K):
+        r0, r1, p0, p1 = edges[k], edges[k + 1], pe[k], pe[k + 1]
+        D = np.zeros((r1 - r0, S + 1), np.int16)
+        np.add.at(D, (row[p0:p1] - r0, lo[p0:p1]), 1)
+        np.add.at(D, (row[p0:p1] - r0, hi[p0:p1]), -1)
+        M = np.cumsum(D[:, :S], axis=1) > 0                      # feature x shift: a partner within tau
+        starts = np.flatnonzero(np.r_[True, np.diff(cid[r0:r1]) != 0])
+        sup[k] = np.minimum(M.sum(0) / (r1 - r0), np.logical_or.reduceat(M, starts, axis=0).sum(0) / len(starts))
+        nodes[k] = float(np.median(x[r0:r1]))
+    # the best path: total support minus DRIFT_STIFF per tau of change, within the slope limit
+    cost = DRIFT_STIFF * ds / tau
+    best, back = sup[0].copy(), np.zeros((K, S), np.int64)
+    idx = np.arange(S)
+    for k in range(1, K):
+        reach = int(np.clip(np.floor(DRIFT_MAX_SLOPE * (nodes[k] - nodes[k - 1]) / ds), 1, S - 1))
+        cand, arg = best.copy(), idx.copy()                      # no change
+        for m in range(1, reach + 1):
+            v = best[:S - m] - cost * m                          # from m steps below / above
+            up = v > cand[m:]
+            cand[m:][up], arg[m:][up] = v[up], idx[:S - m][up]
+            v = best[m:] - cost * m
+            dn = v > cand[:S - m]
+            cand[:S - m][dn], arg[:S - m][dn] = v[dn], idx[m:][dn]
+        back[k], best = arg, cand + sup[k]
+    path = np.zeros(K, np.int64)
+    path[-1] = int(np.argmax(best))
+    for k in range(K - 1, 0, -1):
+        path[k - 1] = back[k][path[k]]
+    ok, shift, on = np.zeros(K, bool), np.zeros(K), np.zeros(K, np.int64)
+    for k in range(K):
+        s0, p0, p1 = s_grid[path[k]], pe[k], pe[k + 1]
+        near = np.abs(d[p0:p1] - s0) <= tau
+        rows, dd = row[p0:p1][near], d[p0:p1][near]
+        if not len(rows):
+            continue
+        q = np.lexsort((np.abs(dd - s0), rows))                  # per feature, its partner nearest the path
+        q = q[np.r_[True, np.diff(rows[q]) != 0]]
+        on[k] = len(q)
+        c = cid[rows[q]]
+        shift[k] = weighted_median(dd[q], 1.0 / np.bincount(c)[c])
+        away = np.abs(s_grid - s0) > 2 * tau
+        rival = float(sup[k][away].max()) if away.any() else 0.0
+        ok[k] = on[k] >= DRIFT_MIN_ON and sup[k][path[k]] >= DRIFT_DOMINANT * rival
+    info.update(nodes=nodes, shift=shift, support=sup[np.arange(K), path], on=on, ok=ok)
+    if not ok.any():
+        return None, info
+    kx, ky, _ = _merge_close_knots(nodes[ok], nodes[ok] + shift[ok], on[ok].astype(float), spacing)
+    for k in range(1, len(kx)):
+        ky[k] = max(ky[k], ky[k - 1] + MIN_SLOPE * (kx[k] - kx[k - 1]))
+    sh = np.interp(grid, kx, ky - kx)
+    info["range_s"] = 60 * float(sh.max() - sh.min())
+    return TableWarp.identity(grid).moved(sh), info
+
+
 def _fit_file(fa: FileAlignment, feats: pd.DataFrame, grid, tgt_mz, tgt_rt, P: AlignParams):
     """coarse shift, mutual-unique matching and warp fit of one file against the target"""
     t0, t_end, dt, span = _file_grid_info(grid)
     a = fa.anchor_idx
-    mz_f, rt_f = _mz(fa, feats, a), feats["rt"].values[a]
+    # with a tracked drift (fa.pre) the file is first put on the medoid's axis along that path: the single shift
+    # below, the matching window and the fit then only have to take up what the path left
+    rt_n = feats["rt"].values[a]
+    mz_f, rt_f = _mz(fa, feats, a), (fa.pre.forward(rt_n) if fa.pre is not None else rt_n)
     W_coarse = float(np.clip(0.1 * span, 0.3, 4.0))
     bin_w = max(2 * dt, 0.5 / 60)
     delta, support, sigma = coarse_shift(mz_f, rt_f, tgt_mz, tgt_rt, P.ppm, W_coarse, bin_w)
@@ -354,7 +496,11 @@ def _fit_file(fa: FileAlignment, feats: pd.DataFrame, grid, tgt_mz, tgt_rt, P: A
     i, j = match_anchors(mz_f, rt_f, tgt_mz, tgt_rt, P.ppm, delta, W_fine)
     x, y = rt_f[i], tgt_rt[j]
     w0 = fa.anchor_w[i] if len(fa.anchor_w) == len(a) else None
-    warp, diag = fit_warp(x, y, grid, dt, w0=w0)
+    warp, diag = fit_warp(x, y, fa.pre.corr if fa.pre is not None else grid, dt, w0=w0)
+    if fa.pre is not None:       # fitted on the tracked axis: the warp of the native grid is the two in a row
+        warp = TableWarp(np.asarray(grid, dtype=np.float64), warp.corr)
+        diag.knot_x = [float(v) for v in fa.pre.inverse(np.asarray(diag.knot_x))] if diag.knot_x else diag.knot_x
+        x = rt_n[i]
     fa.warp, fa.diag = warp, diag
     fa.anchor_w_matched = w0
     m = pd.DataFrame({"feature_id": feats["feature_id"].values[a][i], "mz": feats["mz"].values[a][i],
@@ -392,10 +538,13 @@ def _holdout(fa: FileAlignment, grid):
     x, y = m["rt_native"].values, m["consensus_rt"].values
     _, _, dt, _ = _file_grid_info(grid)
     w0 = fa.anchor_w_matched[even] if getattr(fa, "anchor_w_matched", None) is not None else None
+    xn = x
+    if fa.pre is not None:       # as in _fit_file: fitted on the tracked axis
+        x, grid = fa.pre.forward(x), fa.pre.corr
     w, d = fit_warp(x[even], y[even], grid, dt, w0=w0)
     r_out = y[odd] - w.forward(x[odd])
     r_in = y[even] - w.forward(x[even])
-    r_none = y[odd] - x[odd]
+    r_none = y[odd] - xn[odd]
     return dict(n_fit=int(len(even)), n_eval=int(len(odd)), mad_in_s=60 * 1.4826 * mad(r_in),
                 mad_out_s=60 * 1.4826 * mad(r_out), mad_none_s=60 * 1.4826 * mad(r_none), flag=d.flag)
 
@@ -625,6 +774,35 @@ def align_run(features: dict, scan_rt: dict, P: AlignParams | None = None) -> Al
     tgt_mz = _mz(files[medoid], features[medoid], a)
     tgt_rt = features[medoid]["rt"].values[a]
 
+    if P.track:
+        wide = []
+        for s in stems:
+            if s == medoid:
+                continue
+            fa = files[s]
+            pre, fa.drift = _drift_path(fa, features[s], files[medoid], features[medoid], P.ppm)
+            if pre is None:
+                continue
+            # One shift with its window (as _fit_file finds them) reaches every anchor of a file whose drift stays
+            # within that window of that shift: such a file is matched as before. Only a file with a stretch
+            # farther from its one shift than the window needs the path
+            b = fa.anchor_idx
+            delta, support, sigma = coarse_shift(_mz(fa, features[s], b), features[s]["rt"].values[b], tgt_mz, tgt_rt, P.ppm,
+                                                 float(np.clip(0.1 * fa.span, 0.3, 4.0)), max(2 * fa.dt, 0.5 / 60))
+            if support < max(10, 0.1 * len(b)):
+                delta, sigma = 0.0, float("nan")
+            ok = fa.drift["ok"]
+            g = fa.warp.native
+            g = g[(g >= fa.drift["nodes"][ok].min()) & (g <= fa.drift["nodes"][ok].max())]
+            off = float(np.max(np.abs(pre.shift(g) - delta))) if len(g) else 0.0
+            fa.drift["off_s"] = 60 * off
+            if off > max(0.1, 6 * fa.dt, 3 * sigma if np.isfinite(sigma) else 0.0):
+                fa.pre = pre
+                fa.flags.append("rt_drift_tracked")
+                wide.append(s)
+        if wide:
+            notes.append(f"rt drift tracked: {len(wide)} file(s) with a stretch of the run farther from the file's "
+                         f"typical shift than the anchor window; their anchors are matched along the tracked drift")
     n_done = 0
     prev = {s: files[s].warp.corr.copy() for s in stems}
     for it in range(P.n_iter):
@@ -720,7 +898,11 @@ def summary_table(res: AlignResult) -> pd.DataFrame:
                          gate_lambda_med=float(np.median(fa.gate["lam"])) if fa.gate else np.nan,
                          gate_dev_native_s=fa.gate["dev_native_s"] if fa.gate else np.nan,
                          gate_dev_fit_s=fa.gate["dev_full_s"] if fa.gate else np.nan,
-                         gate_dev_applied_s=fa.gate["dev_gated_s"] if fa.gate else np.nan, flag=fa.flag))
+                         gate_dev_applied_s=fa.gate["dev_gated_s"] if fa.gate else np.nan,
+                         drift_n=fa.drift["n"] if fa.drift else 0,
+                         drift_bins=int(fa.drift["ok"].sum()) if fa.drift else 0,
+                         drift_range_s=fa.drift["range_s"] if fa.drift else np.nan,
+                         drift_off_s=fa.drift.get("off_s", np.nan) if fa.drift else np.nan, flag=fa.flag))
     return pd.DataFrame(rows)
 
 
