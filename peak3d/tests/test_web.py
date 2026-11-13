@@ -451,13 +451,13 @@ def test_server_guards(gui):
     assert c.req("/api/info", host="localhost:1")[0] == 200
     code, page, _ = c.req("/")
     assert code == 200 and b"t0ken" in page and b"/static/app.js" in page
-    assert b'id="variant"' in page and b">GLRSZ</span>" in page and b"narrow_rule=local_median" in page
+    assert b'id="variant"' in page and b">GLRSZW</span>" in page and b"narrow_rule=local_median" in page
     assert b"sigma_sat=true" in page
     assert c.req("/static/app.js")[0] == 200 and c.req("/static/../server.py")[0] == 404
     assert c.req("/static/style.css")[2]["Content-Type"].startswith("text/css")
     code, info = c.json("/api/info")
     assert info["root"] == str(root.resolve()) and info["cpu_count"] >= 1
-    assert info["variant"] == "GLRSZ" and info["variant_sets"]["min_scans_rule"] == "local"
+    assert info["variant"] == "GLRSZW" and info["variant_sets"]["min_scans_rule"] == "local"
     assert info["variant_sets"]["sigma_sat"] is True
     assert c.json("/api/ls?path=/")[0] == 403                               # outside --root
     assert c.req("/api/runs", {"input": str(root)}, token=False)[0] == 403

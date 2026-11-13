@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.2.6](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.6) (all releases:
+[Mosa v1.2.7](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.7) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
@@ -290,7 +290,12 @@ to be used as they are. Since 1.2.4 the m/z error includes detector saturation: 
 centroids that scatter more than the rest (within one decade of its strongest centroid), the m/z tolerance grows by
 the factor measured there, so the top of a saturated peak stays with its flanks instead of being cut off as a
 separate piece (`sat_f` in each file's `features/*.params.json`; `--set sigma_sat=false` gives the earlier
-behaviour). The options you are most likely to need:
+behaviour). Since 1.2.7 two checks remove pieces of a constant background ion that were reported as peaks: a
+stretch whose measured m/z shifts by 10 to 20 ppm for some seconds (as happens while a saturating compound elutes),
+and the last piece of the ion's plateau before it drops (for example when the sample front arrives). Both follow the
+ion through its m/z shift and reject the candidate when the ion is continuous beside it
+(`--set wide_background=false --set plateau_edge=false` gives the earlier behaviour). The options you are most
+likely to need:
 
 | option | default | meaning |
 |---|---|---|

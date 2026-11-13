@@ -119,6 +119,29 @@ same ion: on the validated IDSL003 peaks it cost 33 true peaks for 27 false ones
 The ridge and background gates judge only sides that the run edge leaves at least 3 scans long, so a
 feature at the run start or end is judged on the side it has.
 
+**The ion followed through an m/z wander (1D, per file).** The checks above read the ion within the
+tolerance around the candidate's own m/z (3 sd + 1 ppm, at least 5 ppm). A strong, constant background
+ion does not stay inside it: its measured m/z moves by 15 to 20 ppm for tens of seconds while a
+saturating compound elutes, and single scans jump by 12 to 16 ppm. Within the narrow tolerance such a
+stretch has nothing beside it and looks like an isolated peak with a very high S/N. Every candidate that
+passes the basin gates is therefore read once more with the file's linking cap (`tol_max_ppm`) as the
+m/z window, most intense centroid per scan, in the same side windows 2 to 6 widths out:
+- `wide_background`: the ion stays above a third of the apex (lower-quartile level) on both sides: the
+  candidate is a stretch of a continuous ion and is rejected;
+- `plateau_edge`: the ion continues at 0.9x the apex or more on one side and the trace never falls below
+  0.8x the apex on the way there: the candidate is the last piece of a plateau before it drops, not a
+  peak, and is rejected. A peak beside a bigger one of the same ion has a valley in between and is kept.
+
+Neither check applies when a second ion lives in the wide window (a second centroid with at least a
+fifth of the candidate's intensity in more than 20 % of its scans): the wide view is then not this ion
+alone. Rejected candidates carry the reason `gate:wide_background` or `gate:plateau_edge` with
+`--keep-rejected`. Default on since 1.2.7 (variant GLRSZW; `--set wide_background=false --set
+plateau_edge=false` gives the 1.2.6 picker). On nine Agilent Q-TOF plasma files the checks remove 503 of
+258,396 features, among them background ions at 1e6 counts; on the 22 benchmark runs 0.01 to 0.14 % of
+the features, 2 of 3,992 credentialed yeast peaks and 1 IDSL003 peak, at 0.3 s per file. A peak that
+sits on its own continuous background at about a third of its apex is at the limit of the first check
+and can be rejected in some files (it is then gap-filled).
+
 **Presence across files.** In a study of two or more files a group is reported only if it is present in
 at least `--min-presence` files (default 2, capped at the file count). Presence is being detected by
 the picker *or* being confirmed in gap filling: a missing cell counts when the smoothed chromatogram at

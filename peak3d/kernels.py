@@ -1021,6 +1021,111 @@ def local_scan_dt(rt, s_lo, s_hi, pad):
     return out
 
 
+WV_BG, WV_LEVEL, WV_DIP, WV_FOREIGN = 0, 1, 2, 3
+
+
+@njit(cache=True, parallel=True)
+def wide_view(off, mz, inten, q_mz, tol_n, tol_w, s_apex, s_lo, s_hi, near, far):
+    """Each query's ion followed through an m/z wander: its chromatogram is the most intense centroid per scan
+    within +/- tol_w (the linking cap) instead of +/- tol_n (the tolerance around the query's own m/z); empty scans
+    count as 0. The side windows are those of side_levels: [apex - far, apex - near] and [apex + near, apex + far],
+    clipped to the run; a side with fewer than 3 scans is not used. Returns float64[n, 4] indexed by WV_*:
+    WV_BG       lower-quartile level of the lower side (the ion's continuous background, as SL_Q25 on the wide view);
+    WV_LEVEL    lower-quartile level of the higher side;
+    WV_DIP      on that higher side, the lowest point between the apex and the side window (3-scan running median,
+                so one empty scan is not a dip): how far the trace falls before it reaches that level;
+    WV_FOREIGN  share of the query's own scans (those with a centroid within tol_n) that hold a second centroid
+                between tol_n and tol_w with at least a fifth of its intensity: another ion lives in the wide
+                window, and the wide view is not this ion alone."""
+    n = len(q_mz)
+    S = len(off) - 1
+    out = np.zeros((n, 4), np.float64)
+    for i in prange(n):
+        a0 = max(0, s_apex[i] - far[i])
+        a1 = min(S, s_apex[i] + far[i] + 1)
+        m = a1 - a0
+        if m <= 0:
+            continue
+        e = np.zeros(m, np.float64)
+        n_own = 0
+        n_for = 0
+        for s in range(a0, a1):
+            a = off[s]
+            b = off[s + 1]
+            lo = a
+            hi = b
+            v = q_mz[i] - tol_w[i]
+            while lo < hi:
+                mid = (lo + hi) >> 1
+                if mz[mid] < v:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            v2 = q_mz[i] + tol_w[i]
+            best = 0.0
+            own = 0.0
+            other = 0.0
+            p = lo
+            while p < b and mz[p] <= v2:
+                x = inten[p]
+                if x > best:
+                    best = x
+                if abs(mz[p] - q_mz[i]) <= tol_n[i]:
+                    if x > own:
+                        own = x
+                elif x > other:
+                    other = x
+                p += 1
+            e[s - a0] = best
+            if s_lo[i] <= s <= s_hi[i] and own > 0.0:
+                n_own += 1
+                if other >= 0.2 * own:
+                    n_for += 1
+        out[i, WV_FOREIGN] = n_for / n_own if n_own > 0 else 0.0
+        q25 = np.full(2, -1.0)
+        for side in range(2):
+            if side == 0:
+                b0 = max(0, s_apex[i] - far[i])
+                b1 = min(S, s_apex[i] - near[i] + 1)
+            else:
+                b0 = max(0, s_apex[i] + near[i])
+                b1 = min(S, s_apex[i] + far[i] + 1)
+            k = b1 - b0
+            if k < 3:
+                continue
+            vals = np.sort(e[b0 - a0:b1 - a0])
+            q25[side] = vals[min(k - 1, int(0.25 * (k - 1) + 0.5))]
+        if q25[0] < 0.0 and q25[1] < 0.0:
+            continue
+        if q25[0] < 0.0:
+            hs = 1
+            out[i, WV_BG] = q25[1]
+        elif q25[1] < 0.0:
+            hs = 0
+            out[i, WV_BG] = q25[0]
+        else:
+            hs = 0 if q25[0] >= q25[1] else 1
+            out[i, WV_BG] = min(q25[0], q25[1])
+        out[i, WV_LEVEL] = q25[hs]
+        # between the apex and the near edge of the higher side: the lowest 3-scan running median
+        if hs == 0:
+            c0 = max(a0, s_apex[i] - near[i])
+            c1 = s_apex[i] + 1
+        else:
+            c0 = s_apex[i]
+            c1 = min(a1, s_apex[i] + near[i] + 1)
+        dip = np.inf
+        for s in range(c0, c1):
+            x0 = e[max(s - 1, a0) - a0]
+            x1 = e[s - a0]
+            x2 = e[min(s + 1, a1 - 1) - a0]
+            med = max(min(x0, x1), min(max(x0, x1), x2))
+            if med < dip:
+                dip = med
+        out[i, WV_DIP] = dip if dip < np.inf else 0.0
+    return out
+
+
 ES_TOP, ES_SCAN, ES_APEX, ES_PROM, ES_NOISE, ES_OWN = 0, 1, 2, 3, 4, 5
 OWN_MIN_POINTS = 10   # scans with signal needed to measure a trace's own noise (-1 below)
 

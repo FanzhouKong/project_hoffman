@@ -22,11 +22,11 @@ SAT_SAME_ION = 3.0     # a trace's calm centroids are one ion when each lies wit
 
 # the benchmark name of the Params defaults (manifest/peak3d_variants.tsv) and the switches that make it on top of the
 # base picker: G scan_gain, L link_da 2 mDa, R narrow_rule local_median, S min_scans_rule local, Z sigma_sat (the m/z
-# error model's saturation factor). The GUI shows it and params.json records it; rename it whenever a default change
-# moves the picker's output
-VARIANT = "GLRSZ"
+# error model's saturation factor), W the two wide-view gates wide_background and plateau_edge. The GUI shows it and
+# params.json records it; rename it whenever a default change moves the picker's output
+VARIANT = "GLRSZW"
 VARIANT_SETS = {"scan_gain": True, "link_da": 0.002, "narrow_rule": "local_median", "min_scans_rule": "local",
-                "sigma_sat": True}
+                "sigma_sat": True, "wide_background": True, "plateau_edge": True}
 
 
 @dataclass
@@ -172,6 +172,19 @@ class Params:
     # eic_k_snr x the trace's own scan-to-scan noise wherever it has signal (kernels.eic_shape ES_OWN; the cell noise
     # when it has too few scans with signal), so a peak is judged against its own noise, not its neighbourhood's
     eic_noise: str = "max"
+    # Two gates on the ion followed through an m/z wander (features.wide_view: its chromatogram within the linking
+    # cap tol_max_ppm instead of the tolerance around the candidate's own m/z). A strong background ion's measured
+    # m/z moves by 15-20 ppm for tens of seconds while a saturating compound elutes, and single scans flip by 12-16
+    # ppm at a detector gain switch: within the narrow tolerance such a stretch has nothing beside it and reads as an
+    # isolated peak with a huge S/N. Both gates apply only when no second ion lives in the wide window.
+    # Default on since 2026-11-12 (variant GLRSZW, Mosa 1.2.7: on nine Agilent Q-TOF plasma files 503 of 258,396
+    # features go, the strongest of them background ions at 1e6 counts; on the 22 benchmark runs 0.01-0.14 % of the
+    # features, 2 of 3,992 credentialed yeast peaks and 1 IDSL003 peak, every other truth score within 0.004; 0.3 s
+    # per file)
+    wide_background: bool = True    # reject a candidate whose ion, followed this way, stays above a third of its apex
+                                    # (lower-quartile level) 2-6 widths out on both sides: a stretch of a continuous ion
+    plateau_edge: bool = True       # reject a candidate whose ion continues at >= 0.9 x its apex on one side without
+                                    # falling 20 % in between: the last piece of a plateau before it drops, not a peak
     far_level_max: float = 0.5      # gate: reject when the ion's typical level 2-6 widths out on the cleaner side exceeds
                                     # this fraction of the apex (a bump on a tail or ridge; 1.0 = off)
     k_noise: float = 3.0

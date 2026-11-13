@@ -58,6 +58,12 @@ def _warm_jit():
                           n_scans=200, dt=0.005, floor=50.0, n_noise=2000, thresh=20.0)
     b = pick_cloud(cloud)
     build_features(cloud, b)
+    # the wide-view gates (Params.wide_background / plateau_edge) run only on candidates that pass the basin gates:
+    # compile their kernel whether or not this small cloud has one
+    from . import kernels as K
+    one = lambda v: np.array([v], np.int64)
+    K.wide_view(cloud.off, cloud.mz, cloud.inten, np.array([300.0]), np.array([1.5e-3]), np.array([4.5e-3]),
+                one(100), one(95), one(105), one(5), one(15))
     from .gapfill import fill_file as _ff
     _ff(cloud, TableWarp.identity(cloud.rt), np.array([300.0]), np.array([0.5]), np.array([0.05]), 5.0)
     from .tsv import warm

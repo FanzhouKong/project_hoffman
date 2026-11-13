@@ -124,6 +124,48 @@ def ridge_ratio(df: pd.DataFrame, cloud: Cloud, P: Params) -> dict:
     return ratios_from_levels(L, df["height"].values)
 
 
+WIDE_FOREIGN_MAX = 0.2   # a second ion in more than this share of the candidate's scans: the wide view is not judged
+PLATEAU_LEVEL = 0.9      # one side continues at this fraction of the apex (lower-quartile level 2-6 widths out) ...
+PLATEAU_DIP = 0.8        # ... and the trace never falls below this fraction of the apex on the way there (the 20 %
+                         # valley that makes two apexes two peaks, Params.far_frac)
+
+
+def wide_view(df: pd.DataFrame, cloud: Cloud, P: Params) -> dict:
+    """The candidates' ions followed through an m/z wander (kernels.wide_view), with the side windows of ridge_ratio:
+    ``background_wide`` (lower side's lower-quartile level / apex), ``plateau_level`` (higher side's), ``plateau_dip``
+    (lowest point between the apex and that side / apex) and ``foreign`` (share of the candidate's scans holding a
+    second ion in the wide window). The wide window is the file's linking cap (tol_max_ppm); where it is no wider
+    than the tolerance around the candidate's own m/z the view is the usual one."""
+    n = len(df)
+    if n == 0:
+        z = np.zeros(0)
+        return {"background_wide": z, "plateau_level": z, "plateau_dip": z, "foreign": z}
+    dt = df["dt_local"].values if "dt_local" in df else P.dt
+    w = np.minimum(np.maximum(df["fwhm"].values, P.fwhm_med), P.ridge_w_cap * P.fwhm_med) / dt   # scans
+    sa, slo, shi = (df[c].values.astype(np.int64) for c in ("scan_apex", "scan_lo", "scan_hi"))
+    q_mz = df["mz"].values.astype(np.float64)
+    tol_n = q_mz * np.maximum(3.0 * df["sig_apex"].values + 1.0, RIDGE_MIN_PPM) * 1e-6
+    tol_w = np.maximum(q_mz * P.tol_max_ppm * 1e-6, tol_n)
+    near = np.maximum(1, np.round(RIDGE_NEAR * w)).astype(np.int64)
+    far = np.maximum(near + 2, np.round(RIDGE_FAR * w)).astype(np.int64)
+    W = K.wide_view(cloud.off, cloud.mz, cloud.inten, q_mz, tol_n, tol_w, sa, slo, shi, near, far)
+    h = np.maximum(df["height"].values, 1e-9)
+    return {"background_wide": W[:, K.WV_BG] / h, "plateau_level": W[:, K.WV_LEVEL] / h, "plateau_dip": W[:, K.WV_DIP] / h,
+            "foreign": W[:, K.WV_FOREIGN]}
+
+
+def wide_gate(cand: pd.DataFrame, P: Params) -> np.ndarray:
+    """reason per candidate ("" = kept): "wide_background" / "plateau_edge" (Params of the same names), judged on the
+    columns of wide_view"""
+    alone = cand["foreign"].values <= WIDE_FOREIGN_MAX
+    why = np.full(len(cand), "", dtype=object)
+    if P.plateau_edge:
+        why[alone & (cand["plateau_level"].values >= PLATEAU_LEVEL) & (cand["plateau_dip"].values >= PLATEAU_DIP)] = "plateau_edge"
+    if P.wide_background:
+        why[alone & (cand["background_wide"].values > BACKGROUND_MAX)] = "wide_background"
+    return why
+
+
 def ratios_from_levels(L: np.ndarray, height: np.ndarray) -> dict:
     """ridge / background / ripple ratios and far_level from side levels L (float64[n, 2, 6], SL_*)"""
     n = len(height)
@@ -441,6 +483,13 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
     ok = gate(df, P)
     df["gate"] = ok.values
     cand = df[ok].reset_index(drop=True)
+    wide_rej = None
+    if P.wide_background or P.plateau_edge:
+        for name, vals in wide_view(cand, cloud, P).items():
+            cand[name] = vals
+        why = wide_gate(cand, P)
+        wide_rej = cand[why != ""].assign(reason="gate:" + pd.Series(why[why != ""], index=cand.index[why != ""]))
+        cand = cand[why == ""].reset_index(drop=True)
     cand["eic_snr"] = np.inf
     eic_rej = None
     if P.eic_check:
@@ -485,6 +534,8 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
     rejected = None
     if keep_rejected:
         parts = [df[~ok].assign(reason="gate")]
+        if wide_rej is not None:
+            parts.append(wide_rej)
         if eic_rej is not None:
             parts.append(eic_rej)
         if sat_rej is not None:
