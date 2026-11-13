@@ -156,6 +156,16 @@
       arrays[k] = new T(buf, m.offset, m.length);
     }
     delete header.arrays;
+    const ids = header.ids;          // hit text columns stored as distinct values + a code per hit (bundle.pack)
+    if (ids && Array.isArray(ids.text_codes)) {
+      for (const c of ids.text_codes) {
+        const u = ids[c], k = arrays["id_tx_" + c], out = [];    // push, not new Array(n): a million-slot array
+        for (let i = 0; i < k.length; i++) out.push(u[k[i]]);  // made that way is slow to read (dictionary mode)
+        ids[c] = out;
+        delete arrays["id_tx_" + c];
+      }
+      delete ids.text_codes;
+    }
     return { header, a: arrays };
   }
   async function loadBundle(gzBytes) { return parseBundle(await gunzip(gzBytes)); }

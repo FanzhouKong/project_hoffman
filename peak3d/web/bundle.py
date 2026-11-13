@@ -37,8 +37,46 @@ MAX_CELLS = 4_000_000       # group x file cells stored for the per-file view
 
 
 # ------------------------------------------------------------------ packing ----
+LIVE_LEVEL = 1              # gzip level of the bundles the app sends its own viewer (a report file keeps level 6):
+                            # on a million-hit search 1.3 s instead of 5 s for a 9 % larger transfer
+TEXT_CODES = "id_tx_"       # array prefix of a dictionary-coded text column of header["ids"] (pack / unpack)
+
+
+def _encode_text(header: dict, arrays: dict) -> tuple[dict, dict]:
+    """header["ids"]'s per-hit text columns (ID_TEXT) as their distinct values in the header plus an int32 code per
+    hit in arrays[TEXT_CODES + column] (ids["text_codes"] lists them): a million hits repeat a few hundred thousand
+    library records' names and structures, and the JSON, its cleaning and its compression scale with the text"""
+    ids = header.get("ids")
+    if not isinstance(ids, dict):
+        return header, arrays
+    ids, arrays, coded = dict(ids), dict(arrays), []
+    for c in ID_TEXT:
+        v = ids.get(c)
+        if isinstance(v, list) and v:
+            codes, uniq = pd.factorize(np.asarray(v, dtype=object), sort=False, use_na_sentinel=False)
+            ids[c] = list(uniq)
+            arrays[TEXT_CODES + c] = codes.astype(np.int32)
+            coded.append(c)
+    if not coded:
+        return header, arrays
+    ids["text_codes"] = coded
+    return {**header, "ids": ids}, arrays
+
+
+def _decode_text(header: dict, arrays: dict) -> None:
+    """the inverse of _encode_text, in place (core.js parseBundle does the same in the viewer)"""
+    ids = header.get("ids")
+    if not isinstance(ids, dict) or "text_codes" not in ids:
+        return
+    for c in ids.pop("text_codes"):
+        u = ids[c]
+        ids[c] = [u[k] for k in arrays.pop(TEXT_CODES + c).tolist()]
+
+
 def pack(header: dict, arrays: dict) -> bytes:
-    """header + named numpy arrays -> one blob (see module docstring)"""
+    """header + named numpy arrays -> one blob (see module docstring); the hit text columns go dictionary-coded
+    (_encode_text)"""
+    header, arrays = _encode_text(header, arrays)
     meta, chunks, pos = {}, [], 0
     for name, a in arrays.items():
         a = np.ascontiguousarray(a)
@@ -62,6 +100,7 @@ def unpack(blob: bytes):
     start = 4 + n + ((-(4 + n)) % 8)
     arrays = {k: np.frombuffer(blob, dtype=np.dtype(m["dtype"]).newbyteorder("<"), count=m["length"],
                                offset=start + m["offset"]) for k, m in header.pop("arrays").items()}
+    _decode_text(header, arrays)
     return header, arrays
 
 
@@ -70,6 +109,8 @@ def _clean(x):
     if isinstance(x, dict):
         return {str(k): _clean(v) for k, v in x.items()}
     if isinstance(x, (list, tuple)):
+        if all(type(v) is str for v in x):          # text columns: nothing to clean, millions of items
+            return list(x)
         return [_clean(v) for v in x]
     if isinstance(x, (np.integer,)):
         return int(x)
@@ -583,7 +624,8 @@ def ms2_ids_blob(output) -> bytes:
     """gzip'd bundle holding only the MS2 and identification parts, for a viewer that already has the rest"""
     ids = pd.read_csv(Path(output) / "aligned_feature_table.tsv", sep="\t", usecols=["group_id"])["group_id"].to_numpy()
     head, arrays = ms2_ids(output, ids)
-    return gzip.compress(pack(_clean({"format": FORMAT, "kind": "peak3d-ms2", **head}), arrays), compresslevel=6, mtime=0)
+    return gzip.compress(pack(_clean({"format": FORMAT, "kind": "peak3d-ms2", **head}), arrays),
+                         compresslevel=LIVE_LEVEL, mtime=0)
 
 
 # ------------------------------------------------------------------ build ----

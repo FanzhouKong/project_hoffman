@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.2.7](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.7) (all releases:
+[Mosa v1.2.8](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.8) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
@@ -194,7 +194,11 @@ a comment, and give features red, blue or yellow stars to filter by. All of it i
 kept apart from the search results, and used in the report and the exported tables (`reviewed`, `stars`,
 `comment` columns). `peak3d identify OUT --library LIB [LIB ...]` searches again without re-processing; your notes are
 kept. In the app, the Identity search panel takes one library or several (Browse picks several at once); add
-another later and the search runs again, keeping the libraries already read in memory.
+another later and the search runs again, keeping the libraries already read in memory. Since 1.2.8 a search lists
+and writes its hits about twice as fast and keeps the cleaned spectra of a large library between searches (before,
+a library with more than 400,000 candidate spectra was cleaned again on every search): on 201 Q-TOF files against
+NIST23 (1.05 million listed hits) a search again took 16 s instead of 31 s and the app reloaded the hits in 7 s
+instead of 14 s, with the same files written, byte for byte.
 
 ### In the browser: `peak3d gui`
 

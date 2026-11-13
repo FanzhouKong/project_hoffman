@@ -203,7 +203,7 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_t
     and, with denoise, their denoised copies (denoise_copies, on workers processes). Returns the map (empty when the
     files had no MS2)."""
     from .consensus import build
-    from .library import write_msp_record
+    from .library import write_msp_record, write_tsv
     from .similarity import METHOD_CODE, clean, score
     from .pipeline import log
     output = Path(output)
@@ -292,7 +292,7 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_t
                 c.mz, np.round(c.inten / c.inten.max() * 1000.0, 3))
     m["in_consensus"] = in_cons
     m["consensus_status"] = status
-    m[MAP_COLUMNS].to_csv(output / "ms2_map.tsv", sep="\t", index=False, float_format="%.6g")
+    write_tsv(m[MAP_COLUMNS], output / "ms2_map.tsv")
     with open(output / "ms2_spectra.msp", "w", encoding="utf-8") as fh:
         for r in m[m["representative"] == 1].itertuples(index=False):
             ms = sets[r.file]

@@ -65,6 +65,25 @@ def test_pack_roundtrip():
         assert back[k].dtype == v.dtype and np.array_equal(back[k], v)
 
 
+def test_pack_codes_hit_text_columns():
+    """the per-hit text columns of header["ids"] travel as distinct values + int32 codes and come back as they were;
+    a blob without codes (older reports) unpacks as before"""
+    n = 1000
+    names = [f"compound {k % 7}" for k in range(n)]
+    ions = ["", "C6H13O6+"] * (n // 2)
+    head = {"ids": {"n": n, "method": "weighted_entropy", "name": names, "denoise_ion": ions, "smiles": ['a"b\tc'] * n,
+                    "libraries": [{"name": "x.msp"}]}, "ms2": {"n": 2, "scan": ["1", "2"]}}
+    arrays = {"id_row": np.arange(n, dtype=np.int32)}
+    blob = bundle.pack(bundle._clean(head), arrays)
+    h, a = bundle.unpack(blob)
+    assert h == head and set(a) == {"id_row"} and np.array_equal(a["id_row"], arrays["id_row"])
+    raw = json.loads(blob[4:4 + int.from_bytes(blob[:4], "little")])
+    assert raw["ids"]["text_codes"] == ["name", "smiles", "denoise_ion"] and len(raw["ids"]["name"]) == 7
+    assert raw["arrays"]["id_tx_name"]["dtype"] == "i4" and raw["ids"]["libraries"] == [{"name": "x.msp"}]
+    assert bundle.pack({"ids": None}, {}) and bundle.unpack(bundle.pack({"ids": None}, {}))[0] == {"ids": None}
+    assert bundle._clean({"v": ["a", float("nan"), np.int64(3)]}) == {"v": ["a", None, 3]}
+
+
 def _eic_reference(cloud, rt, target, tol, x0, dx, n_pts):
     lo_t, hi_t = x0 - 0.5 * dx, x0 + (n_pts - 0.5) * dx
     a = max(int(np.searchsorted(rt, lo_t)) - 1, 0)

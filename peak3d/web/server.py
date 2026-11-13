@@ -434,7 +434,7 @@ class App:
             return hit[1]
         blob = report.read_bundle(rep) if rep.exists() and key[1] >= key[0] else None
         if blob is None:
-            blob = gzip.compress(bundle.build(output), compresslevel=6, mtime=0)
+            blob = gzip.compress(bundle.build(output), compresslevel=bundle.LIVE_LEVEL, mtime=0)
         _remember(self._bundles, str(output), (key, blob))
         return blob
 

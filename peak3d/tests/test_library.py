@@ -575,3 +575,114 @@ def test_pkl_that_asks_for_code_is_refused(tmp_path):
     p.write_bytes(pickle.dumps({"metadata": Payload()}))
     with pytest.raises(pickle.UnpicklingError, match="builtins.print"):
         library.read_library(p)
+
+
+def _old_peak_lines(mz, inten):
+    return "".join(f"{m:.5f}\t{i:.6g}\n" for m, i in zip(mz, inten))
+
+
+def test_write_msp_record_peak_lines_unchanged(tmp_path):
+    """the one-format peak writer gives the f-string writer's text for float64/float32/int arrays and lists"""
+    rng = np.random.default_rng(3)
+    cases = [(rng.uniform(30, 2000, 200), rng.uniform(0, 1e7, 200).astype(np.float32)),
+             (np.array([55.0, 91.123456789, 1e-7, 0.0]), np.array([1.0, 1e-30, 123456789.0, 0.5])),
+             ([55, 91], [1, 2]), (np.zeros(0), np.zeros(0)), (np.array([100.5, 200.25]), np.array([3.0]))]
+    for mz, it in cases:
+        p = tmp_path / "x.msp"
+        with open(p, "w") as fh:
+            write_msp_record(fh, [("NAME", "x")], mz, it)
+        assert p.read_text() == f"NAME: x\nNum Peaks: {len(mz)}\n" + _old_peak_lines(mz, it) + "\n"
+
+
+def test_write_tsv_matches_to_csv(tmp_path, monkeypatch):
+    """write_tsv = DataFrame.to_csv(sep tab, float_format) byte for byte: NaN, signed zero, inf, huge/tiny values,
+    integer-valued floats, text that needs quoting, int and empty frames"""
+    rng = np.random.default_rng(5)
+    f = np.concatenate([[np.nan, -0.0, 0.0, np.inf, -np.inf, 1e-300, 1.5e300, 5.0, -5.0, 123456789.123, 0.1 + 0.2],
+                        np.round(rng.normal(0, 30, 300), 2), rng.uniform(50, 1500, 300)])
+    df = pd.DataFrame({"g": np.arange(len(f)), "x": f, "s": (["a\tb", 'q"uote', "", "plain"] * len(f))[:len(f)],
+                       "y": np.round(rng.uniform(0, 1, len(f)), 4), "z": np.full(len(f), np.nan)})
+    odd = ["", "x", 'say "hi"', "tab\there", "line\nbreak", "cr\rhere", "crlf\r\n", " lead", "trail ", None, np.nan,
+           1.5, 7, "ünïcödé β-alanine", '""', "\t", "\n"]
+    obj = pd.DataFrame({"i": np.arange(len(odd)), "o": np.array(odd, dtype=object), "b": np.arange(len(odd)) % 2 == 0,
+                        "u": np.arange(len(odd), dtype=np.uint32), "f": np.linspace(-1, 1, len(odd)),
+                        "e": [""] * len(odd)})
+    frames = [df, df.iloc[:0], pd.DataFrame(columns=["a", "b"]), df[["g", "s"]], obj,
+              obj[["o"]], obj[["e"]], obj.rename(columns={"u": "i"}),                              # to_csv itself
+              obj.astype({"i": "Int64"}), obj.assign(o=pd.array(["a", None] * (len(odd) // 2) + ["b"], dtype="string"))]
+    fast = {0, 1, 2, 3, 4, 9}                       # frames written without to_csv (the others fall back to it)
+    to_csv, rows = pd.DataFrame.to_csv, []
+    monkeypatch.setattr(pd.DataFrame, "to_csv", lambda self, *a, **k: (rows.append(len(self)), to_csv(self, *a, **k))[1])
+    for k, d in enumerate(frames):
+        for fmt in ("%.6g", "%.4f"):
+            a, b = tmp_path / f"a{k}.tsv", tmp_path / f"b{k}.tsv"
+            to_csv(d, a, sep="\t", index=False, float_format=fmt)
+            rows.clear()
+            library.write_tsv(d, b, fmt)
+            assert a.read_bytes() == b.read_bytes(), (k, fmt)
+            assert (rows == [0]) == (k in fast), (k, rows)        # fast: only the header line from to_csv
+    assert list(library.format_floats(np.array([-0.0, 0.0, np.nan, 2.0]))) == ["-0", "0", "", "2"]
+
+
+def test_write_msp_records_equals_one_by_one(tmp_path):
+    """the batch writer gives write_msp_record's text record by record, across block boundaries"""
+    rng = np.random.default_rng(11)
+    lens = rng.integers(0, 6, 25)
+    off = np.zeros(len(lens) + 1, np.int64)
+    np.cumsum(lens, out=off[1:])
+    mz = rng.uniform(40, 900, off[-1])
+    it = rng.uniform(0, 1e6, off[-1]).astype(np.float32)
+    fields = [[("NAME", f"rec {k}"), ("PRECURSORMZ", np.float64(100 + k / 3)), ("FORMULA", ""), ("X", None),
+               ("Y", float("nan")), ("Comment", f'library_index={k} library="a"')] for k in range(len(lens))]
+    a, b = tmp_path / "a.msp", tmp_path / "b.msp"
+    with open(a, "w") as fh:
+        for k in range(len(lens)):
+            write_msp_record(fh, fields[k], mz[off[k]:off[k + 1]], it[off[k]:off[k + 1]])
+    old = library.MSP_CHUNK
+    try:
+        library.MSP_CHUNK = 4
+        with open(b, "w") as fh:
+            library.write_msp_records(fh, fields, off, mz, it)
+    finally:
+        library.MSP_CHUNK = old
+    assert a.read_text() == b.read_text()
+    assert list(read_msp(b).names) == [f"rec {k}" for k in range(len(lens)) if lens[k]]     # empty records skipped
+
+
+def test_cleaned_library_cache(monkeypatch):
+    """the flat cleaned-record cache gives clean() of each record, in the order asked (repeats too), reuses what it
+    holds and starts over past CLEAN_CACHE peaks"""
+    rng = np.random.default_rng(9)
+    n = 60
+    lens = rng.integers(0, 30, n)
+    off = np.zeros(n + 1, np.int64)
+    np.cumsum(lens, out=off[1:])
+    mz = np.concatenate([np.sort(rng.uniform(40, 400, k)) for k in lens])
+    lib = library.Library(path="t.msp", names=[""] * n, precursor_mz=rng.uniform(300, 500, n), precursor_type=[""] * n,
+                          mode=np.ones(n, np.int8), formula=[""] * n, inchikey=[""] * n, smiles=[""] * n,
+                          comments=[""] * n, off=off, mz=mz, inten=rng.uniform(1, 100, len(mz)).astype(np.float32))
+
+    def check(idx):
+        o, m, i = library._cleaned_library(lib, 0.003, np.asarray(idx, np.int64))
+        assert len(o) == len(idx) + 1
+        for k, r in enumerate(idx):
+            em, ei = clean(lib.mz[off[r]:off[r + 1]], lib.inten[off[r]:off[r + 1]].astype(np.float64),
+                           lib.precursor_mz[r], 0.003)
+            assert np.array_equal(m[o[k]:o[k + 1]], em) and np.array_equal(i[o[k]:o[k + 1]], ei)
+
+    o, m, i = library._cleaned_library(lib, 0.003, np.zeros(0, np.int64))     # nothing asked, nothing cached
+    assert list(o) == [0] and len(m) == len(i) == 0 and not lib._clean
+    check([5, 3, 3, 40])
+    held = len(lib._clean[0.003]["mz"])
+    check([3, 40, 5])                                       # all cached: nothing added
+    assert len(lib._clean[0.003]["mz"]) == held
+    check(list(range(n)))
+    monkeypatch.setattr(library, "CLEAN_CACHE", 50)
+    library._cleaned_library(lib, 0.02, np.arange(10))        # another tolerance replaces the cache
+    assert list(lib._clean) == [0.02]
+    check([1, 2])                                            # back to 0.003, then past the cap: starts over
+    check([10, 11, 12, 13, 14, 15])
+    st = lib._clean[0.003]
+    held = set(np.flatnonzero(st["start"] >= 0).tolist())
+    assert held >= set(range(10, 16)) and (held == set(range(10, 16)) or len(st["mz"]) <= 50)
+

@@ -8,6 +8,8 @@ feature's m/z and whose ion mode agrees, with one of the scores in similarity.py
 tables. Importing this module stays light (numpy, pandas): the compiled readers and scores load on first use."""
 from __future__ import annotations
 
+import csv
+import io
 import json
 import math
 import pickle
@@ -230,8 +232,98 @@ def write_msp_record(fh, fields: list[tuple[str, object]], mz, inten) -> None:
         if s != "":
             fh.write(f"{k}: {s}\n")
     fh.write(f"Num Peaks: {len(mz)}\n")
-    fh.write("".join(f"{m:.5f}\t{i:.6g}\n" for m, i in zip(mz, inten)))
+    n = min(len(mz), len(inten))
+    if n:      # one %-format over the record ("%.5f" and "%.6g" format a float exactly as f"{m:.5f}", f"{i:.6g}")
+        fh.write(("%.5f\t%.6g\n" * n) % tuple(np.column_stack((np.asarray(mz)[:n], np.asarray(inten)[:n])).ravel()
+                                              .tolist()))
     fh.write("\n")
+
+
+MSP_CHUNK = 20_000           # records per block of write_msp_records
+
+
+def write_msp_records(fh, fields: list, off, mz, inten) -> None:
+    """write_msp_record for many records, the same text: record k has the fields fields[k] and the peaks
+    off[k]:off[k + 1] of mz / inten; a block of records is formatted and written at once"""
+    off = np.asarray(off, np.int64)
+    for a in range(0, len(fields), MSP_CHUNK):
+        b = min(a + MSP_CHUNK, len(fields))
+        p0, p1 = int(off[a]), int(off[b])
+        both = np.empty(2 * (p1 - p0))
+        both[0::2] = mz[p0:p1]
+        both[1::2] = inten[p0:p1]
+        vals = both.tolist()
+        parts = []
+        for k in range(a, b):
+            for key, v in fields[k]:
+                t = _fmt(v)
+                if t != "":
+                    parts.append(f"{key}: {t}\n")
+            n = int(off[k + 1] - off[k])
+            parts.append(f"Num Peaks: {n}\n")
+            if n:
+                s0 = 2 * (int(off[k]) - p0)
+                parts.append(("%.5f\t%.6g\n" * n) % tuple(vals[s0:s0 + 2 * n]))
+            parts.append("\n")
+        fh.write("".join(parts))
+
+
+def format_floats(values, fmt: str = "%.6g", na: str = "") -> np.ndarray:
+    """fmt % v for every value of a float array (na where NaN) as an object array, each distinct value formatted once
+    (keyed by its bits, so -0.0 and 0.0 stay apart): what DataFrame.to_csv(float_format=fmt, na_rep=na) writes"""
+    v = np.ascontiguousarray(values, np.float64)
+    codes, uniq = pd.factorize(v.view(np.int64), sort=False, use_na_sentinel=False)
+    text = np.array([na if x != x else fmt % x for x in uniq.view(np.float64).tolist()], dtype=object)
+    return text[codes]
+
+
+def _csv_cells(values, term: str) -> np.ndarray:
+    """the text DataFrame.to_csv(sep="\\t") writes for each cell of an object column: NaN / None empty, a value with
+    a tab, quote or line break quoted by the csv module itself (QUOTE_MINIMAL); each distinct value once"""
+    codes, uniq = pd.factorize(np.asarray(values, dtype=object), sort=False)
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter="\t", lineterminator=term, quoting=csv.QUOTE_MINIMAL, quotechar='"',
+                   doublequote=True, escapechar=None)
+    out = []
+    for v in uniq.tolist():
+        if isinstance(v, str) and not ("\t" in v or '"' in v or "\r" in v or "\n" in v):
+            out.append(v)
+        else:                         # [v, ""]: never the one-empty-field row the csv module writes as ""
+            buf.seek(0)
+            buf.truncate()
+            w.writerow([v, ""])
+            out.append(buf.getvalue()[:-(1 + len(term))])
+    return np.array(out + [""], dtype=object)[codes]          # code -1 (NaN, None): the "" appended last
+
+
+TSV_ROWS = 200_000           # lines per block of write_tsv
+
+
+def write_tsv(df: pd.DataFrame, path, float_format: str = "%.6g") -> None:
+    """df.to_csv(path, sep="\\t", index=False, float_format=float_format), byte for byte, written faster: every column
+    turned into its cell text first (floats and text per distinct value: format_floats, _csv_cells) and the lines
+    joined; a frame with one column, repeated names or other column types (nullable numbers, dates, ...) goes
+    through to_csv itself"""
+    plain = (df.shape[1] >= 2 and df.columns.is_unique and not isinstance(df.columns, pd.MultiIndex)
+             and all((isinstance(t, np.dtype) and t.kind in "fiubO") or isinstance(t, pd.StringDtype) for t in df.dtypes))
+    if not plain:
+        df.to_csv(path, sep="\t", index=False, float_format=float_format)
+        return
+    head = df.iloc[:0].to_csv(sep="\t", index=False)          # the header line, with pandas' line terminator
+    term = "\r\n" if head.endswith("\r\n") else "\n"
+    cols = []
+    for c in df.columns:
+        v = df[c].to_numpy()                                    # text (object or pandas str): an object array
+        if v.dtype.kind == "f":
+            cols.append(format_floats(v, float_format))
+        elif v.dtype.kind == "O":
+            cols.append(_csv_cells(v, term))
+        else:                                                   # int, unsigned, bool: str(), as the csv module
+            cols.append(np.array(list(map(str, v.tolist())), dtype=object))
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(head)
+        for a in range(0, len(df), TSV_ROWS):
+            fh.write(term.join(map("\t".join, zip(*(c[a:a + TSV_ROWS] for c in cols)))) + term)
 
 
 # ------------------------------------------------------------------ search ----
@@ -259,36 +351,61 @@ def candidate_pairs(q_mz, q_mode, lib_prec, lib_mode, ppm, da=None, index=None):
     return pq[ok].astype(np.int64), pl[ok].astype(np.int64)
 
 
-CLEAN_CACHE = 400_000
+CLEAN_CACHE = 100_000_000      # cleaned peaks kept per library (16 bytes each); past it the cache starts over
+
+
+def _csr_take(start, lens):
+    """(offsets, flat peak positions) of the CSR records that start at start with lens peaks, in that order"""
+    lens = np.asarray(lens, np.int64)
+    off = np.zeros(len(lens) + 1, np.int64)
+    np.cumsum(lens, out=off[1:])
+    return off, np.repeat(np.asarray(start, np.int64) - off[:-1], lens) + np.arange(off[-1], dtype=np.int64)
 
 
 def _cleaned_library(lib: Library, tol: float, idx: np.ndarray):
-    """cleaned CSR of the library records idx (cached for the last tolerance used, up to CLEAN_CACHE records: a
-    re-search only cleans records it has not seen); returns (off, mz, inten) over idx in that order"""
+    """cleaned CSR of the library records idx (cached for the last tolerance used as one flat peak list, up to
+    CLEAN_CACHE peaks: a re-search only cleans records it has not seen); returns (off, mz, inten) over idx in that
+    order"""
     from .similarity import clean_batch
     key = round(tol, 9)
-    if key not in lib._clean:
+    idx = np.asarray(idx, np.int64)
+    st = lib._clean.get(key)
+    if st is None:
         lib._clean.clear()
-    store = lib._clean.setdefault(key, {})
-    todo = np.array([i for i in idx.tolist() if i not in store], np.int64)
-    if len(store) + len(todo) > CLEAN_CACHE:          # bounded: start over rather than grow with every search
-        store.clear()
-        todo = np.asarray(idx, np.int64)
+    todo = np.unique(idx) if st is None else np.unique(idx[st["start"][idx] < 0])
     if len(todo):
         lens = lib.off[todo + 1] - lib.off[todo]
-        off = np.zeros(len(todo) + 1, np.int64)
-        np.cumsum(lens, out=off[1:])
-        take = np.concatenate([np.arange(lib.off[i], lib.off[i + 1]) for i in todo])
+        off, take = _csr_take(lib.off[todo], lens)
         c_off, c_mz, c_it = clean_batch(off, lib.mz[take], lib.inten[take].astype(np.float64),
                                         lib.precursor_mz[todo], tol)
-        for k, i in enumerate(todo.tolist()):
-            store[i] = (c_mz[c_off[k]:c_off[k + 1]].copy(), c_it[c_off[k]:c_off[k + 1]].copy())
-    parts = [store[i] for i in idx.tolist()]
-    off = np.zeros(len(parts) + 1, np.int64)
-    np.cumsum([len(p[0]) for p in parts], out=off[1:])
-    mz = np.concatenate([p[0] for p in parts]) if parts else np.zeros(0)
-    it = np.concatenate([p[1] for p in parts]) if parts else np.zeros(0)
-    return off, mz, it
+        if st is not None and len(st["mz"]) + len(c_mz) > CLEAN_CACHE:   # bounded: start over rather than grow
+            st = None
+            todo = np.unique(idx)
+            lens = lib.off[todo + 1] - lib.off[todo]
+            off, take = _csr_take(lib.off[todo], lens)
+            c_off, c_mz, c_it = clean_batch(off, lib.mz[take], lib.inten[take].astype(np.float64),
+                                            lib.precursor_mz[todo], tol)
+        if st is None:
+            st = {"start": np.full(len(lib), -1, np.int64), "len": np.zeros(len(lib), np.int64),
+                  "mz": np.zeros(0), "it": np.zeros(0)}
+        st["start"][todo] = len(st["mz"]) + c_off[:-1]
+        st["len"][todo] = np.diff(c_off)
+        st["mz"] = np.concatenate([st["mz"], c_mz])
+        st["it"] = np.concatenate([st["it"], c_it])
+        lib._clean[key] = st
+    if st is None:                                      # nothing asked, nothing held
+        return np.zeros(1, np.int64), np.zeros(0), np.zeros(0)
+    off, take = _csr_take(st["start"][idx], st["len"][idx])
+    return off, st["mz"][take], st["it"][take]
+
+
+def _record_text(libs, lib_n, rec, field: str) -> np.ndarray:
+    """one text field (Library attribute: names, formula, ...) of the records (lib_n, rec) as an object array,
+    each distinct record decoded once"""
+    key = np.asarray(lib_n, np.int64) * (1 << 40) + np.asarray(rec, np.int64)
+    codes, uniq = pd.factorize(key, sort=False)
+    vals = np.array([getattr(libs[k >> 40], field)[k & ((1 << 40) - 1)] for k in uniq.tolist()] or [""], dtype=object)
+    return vals[codes] if len(codes) else np.zeros(0, dtype=object)
 
 
 LIST_MIN = 0.1        # every hit scoring above this is listed; min_score only decides the default annotation
@@ -496,13 +613,13 @@ def identify(output, library_path, method: str = "weighted_entropy", precursor_p
                     dk["ion"].append(lib._ions.label(int(keys["key_ion"][key])))
                     dk["masks"].append(keys["keep"][keys["key_off"][key]:keys["key_off"][key + 1]])
         Q, N, R, ion, dkey = Q[sel], N[sel], R[sel], ion[sel], dkey[sel]
+        txt = {f: _record_text(libs, N, R, f) for f in ("names", "precursor_type", "formula", "inchikey", "smiles")}
         for c, name in enumerate(copy_names):
             hits = pd.DataFrame({"q": Q, "lib": first[N] + R, "score": SC[c][sel], "n_matched": NM[c][sel]})
             hits = hits.sort_values(["q", "score", "n_matched"], ascending=[True, False, False], kind="stable")
             hits["rank"] = hits.groupby("q", sort=False).cumcount() + 1
             o = hits.index.to_numpy()
             n_, r_ = N[o], R[o]
-            text = lambda f: [getattr(libs[a], f)[b] for a, b in zip(n_.tolist(), r_.tolist())]
             lp = np.empty(len(o))
             for a in np.unique(n_).tolist():
                 lp[n_ == a] = libs[a].precursor_mz[r_[n_ == a]]
@@ -510,15 +627,15 @@ def identify(output, library_path, method: str = "weighted_entropy", precursor_p
             parts.append(pd.DataFrame({
                 "group_id": q["group_id"][hits["q"].to_numpy()], "spectrum": name, "rank": hits["rank"].to_numpy(),
                 "score": hits["score"].round(4).to_numpy(), "n_matched": hits["n_matched"].to_numpy(),
-                "name": text("names"), "precursor_type": text("precursor_type"), "formula": text("formula"),
-                "inchikey": text("inchikey"), "smiles": text("smiles"), "library_precursor_mz": lp,
+                "name": txt["names"][o], "precursor_type": txt["precursor_type"][o], "formula": txt["formula"][o],
+                "inchikey": txt["inchikey"][o], "smiles": txt["smiles"][o], "library_precursor_mz": lp,
                 "ppm_error": np.round((q["prec_mz"][hits["q"].to_numpy()] - lp) / lp * 1e6, 2),
                 "library_index": hits["lib"].to_numpy(), "library": np.array(names, object)[n_],
                 "denoise_ion": ion[o] if search_copy else [""] * len(o),
                 "denoise_key": dkey[o] if search_copy else np.full(len(o), -1, np.int64)}))
     rows = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=ID_COLUMNS)
     rows = rows[ID_COLUMNS]
-    rows.to_csv(output / "identifications.tsv", sep="\t", index=False, float_format="%.6g")
+    write_tsv(rows, output / "identifications.tsv")
     (output / DENOISE_FILE).unlink(missing_ok=True)
     if denoise == "search":
         lens = np.array([len(m) for m in dk["masks"]], np.int64)
@@ -528,16 +645,34 @@ def identify(output, library_path, method: str = "weighted_entropy", precursor_p
             np.savez(fh, group_id=np.array(dk["group_id"], np.int64), copy=np.array(dk["copy"], np.uint8),
                      ion=np.array(dk["ion"], dtype=str), off=off,
                      keep=np.concatenate(dk["masks"]).astype(bool) if dk["masks"] else np.zeros(0, bool))
+    # the library spectrum of every listed record once, in order of first listing
+    recs = pd.unique(rows["library_index"].to_numpy(np.int64))
+    rn = np.searchsorted(first, recs, side="right") - 1
+    ri = recs - first[rn]
+    lens = np.zeros(len(recs), np.int64)
+    for a in np.unique(rn).tolist():
+        k = rn == a
+        lens[k] = libs[a].off[ri[k] + 1] - libs[a].off[ri[k]]
+    roff = np.zeros(len(recs) + 1, np.int64)
+    np.cumsum(lens, out=roff[1:])
+    used = np.unique(rn).tolist()
+    pk_mz = np.zeros(int(roff[-1]), np.result_type(np.float64, *[libs[a].mz.dtype for a in used]))
+    pk_it = np.zeros(int(roff[-1]), np.result_type(np.float32, *[libs[a].inten.dtype for a in used]))
+    for a in np.unique(rn).tolist():
+        k = np.flatnonzero(rn == a)
+        _, take = _csr_take(libs[a].off[ri[k]], lens[k])
+        _, put = _csr_take(roff[k], lens[k])
+        pk_mz[put], pk_it[put] = libs[a].mz[take], libs[a].inten[take]
+    fields = []
+    for g, n, i in zip(recs.tolist(), rn.tolist(), ri.tolist()):
+        lib = libs[n]
+        fields.append([("NAME", lib.names[i]), ("PRECURSORMZ", lib.precursor_mz[i]),
+                       ("PRECURSORTYPE", lib.precursor_type[i]), ("FORMULA", lib.formula[i]),
+                       ("INCHIKEY", lib.inchikey[i]), ("SMILES", lib.smiles[i]),
+                       ("IONMODE", {1: "Positive", 2: "Negative"}.get(int(lib.mode[i]), "")),
+                       ("Comment", f'library_index={g} library="{names[n].replace(chr(34), chr(39))}"')])
     with open(output / "identifications.msp", "w", encoding="utf-8") as fh:
-        for g in pd.unique(rows["library_index"].to_numpy(np.int64)).tolist():
-            n = int(np.searchsorted(first, g, side="right")) - 1
-            lib, i = libs[n], g - int(first[n])
-            write_msp_record(fh, [("NAME", lib.names[i]), ("PRECURSORMZ", lib.precursor_mz[i]),
-                                  ("PRECURSORTYPE", lib.precursor_type[i]), ("FORMULA", lib.formula[i]),
-                                  ("INCHIKEY", lib.inchikey[i]), ("SMILES", lib.smiles[i]),
-                                  ("IONMODE", {1: "Positive", 2: "Negative"}.get(int(lib.mode[i]), "")),
-                                  ("Comment", f'library_index={g} library="{names[n].replace(chr(34), chr(39))}"')],
-                             lib.mz[lib.off[i]:lib.off[i + 1]], lib.inten[lib.off[i]:lib.off[i + 1]])
+        write_msp_records(fh, fields, roff, pk_mz, pk_it)
     if denoise == "t0":
         default = ms2.default_copies(output)
     else:                         # search: a denoised copy exists wherever its raw one does; off: raw copies only
