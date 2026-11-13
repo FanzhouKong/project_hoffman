@@ -3,6 +3,7 @@ import gzip
 import json
 import os
 import pickle
+import shutil
 import subprocess
 import sys
 import threading
@@ -301,6 +302,76 @@ def test_demo_has_compound_groups(tmp_path):
     from peak3d.demo import write_demo
     d = write_demo(tmp_path / "demo")
     assert len(list(d.glob("*.mzML"))) == 3
+
+
+def _same_bundle(x, y):
+    (ha, aa), (hb, ab) = x, y
+    assert set(aa) == set(ab)
+    for k in aa:
+        assert aa[k].dtype == ab[k].dtype and np.array_equal(aa[k], ab[k], equal_nan=aa[k].dtype.kind == "f"), k
+    for h in (ha, hb):
+        h.pop("created", None)
+    assert ha == hb
+
+
+def test_report_ms2_block(processed, tmp_path):
+    """the report holds the MS2 part as its own block (the app's ms2_ids_blob); the viewer's merge of the two equals
+    the one-block bundle; a refresh rewrites that block and keeps the main one's text; a one-block report from
+    before is split on its first refresh, its content unchanged"""
+    import base64
+    _, out = processed
+    o = tmp_path / "o"
+    shutil.copytree(out, o, symlinks=True)
+    rep = o / "report.html"
+    report.write_report(o)
+    text = rep.read_bytes()
+    assert report.MS2_RE.search(text) and report.read_ms2(rep) is not None
+    main_h, main_a = bundle.unpack(gzip.decompress(report.read_bundle(rep)))
+    assert all(main_h[k] is None for k in bundle.MS2_KEYS) and not any(k.startswith(bundle.MS2_PREFIXES) for k in main_a)
+    one = bundle.unpack(bundle.build(o))                                  # everything in one bundle, as before
+    _same_bundle(report.read_full(rep), one)
+    # a refresh: only the MS2 block changes
+    main_text = report.DATA_RE.search(text).group(1)
+    blob = bundle.ms2_ids_blob(o)
+    assert report.refresh_ids(o, blob)
+    after = rep.read_bytes()
+    assert report.DATA_RE.search(after).group(1) == main_text and report.read_ms2(rep) == blob
+    assert report.refresh_ids(o) and report.read_ms2(rep) == blob          # built here when not given: the same
+    # a report from before 1.2.8: one block with everything (no MS2 block); still read whole, split on refresh
+    rep.write_text(report.render(gzip.compress(bundle.build(o), mtime=0), "Mosa · o").replace(
+        '<script id="peak3d-ms2" type="application/octet-stream"></script>\n', ""), encoding="utf-8")
+    assert report.MS2_RE.search(rep.read_bytes()) is None
+    _same_bundle(report.read_full(rep), bundle.unpack(bundle.build(o)))
+    assert report.refresh_ids(o)
+    assert report.MS2_RE.search(rep.read_bytes()) and report.read_ms2(rep) == bundle.ms2_ids_blob(o)
+    _same_bundle(report.read_full(rep), bundle.unpack(bundle.build(o)))
+    page = rep.read_text(encoding="utf-8")
+    assert "{{" not in page and base64.b64decode(report.MS2_RE.search(page.encode()).group(1))
+
+
+def test_lookup_is_dict_get():
+    m = {5: 0, 9: 1, 5 + 0: 2, -3: 7}                       # a repeated key keeps its last value, as a dict does
+    v = np.array([5, 9, 4, -3, 9, 0])
+    assert bundle._lookup(m, v).tolist() == [m.get(int(x), -1) for x in v] and bundle._lookup({}, v).tolist() == [-1] * 6
+
+
+def test_ms2_parts_follow_their_files(tmp_path):
+    """the spectra part kept in memory equals a fresh build and is rebuilt when its file changes"""
+    o = _ms2_output(tmp_path / "o")
+    ids = np.array([1, 2])
+    h1, a1 = bundle.ms2_ids(o, ids)
+    bundle._MEMO.clear()
+    h2, a2 = bundle.ms2_ids(o, ids)
+    assert h1 == h2 and set(a1) == set(a2) and all(np.array_equal(a1[k], a2[k], equal_nan=a1[k].dtype.kind == "f")
+                                                   for k in a1)
+    assert h1["ms2"]["n"] == 1 and a1["ms2_row"].tolist() == [0]
+    p = o / "ms2_spectra.msp"
+    p.write_text(p.read_text() + "NAME: feature_2\nPRECURSORMZ: 300.2\nRETENTIONTIME: 4.0\nIONMODE: Positive\n"
+                 "Comment: group_id=2 file=A scan=20 rt_s=240.0 tic=50 n_ms2=1\nNum Peaks: 1\n100.0\t5\n\n")
+    st = p.stat()
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))        # a newer file even on a coarse clock
+    h3, a3 = bundle.ms2_ids(o, ids)
+    assert h3["ms2"]["n"] == 2 and a3["ms2_row"].tolist() == [0, 1]
 
 
 def test_report_command_without_cache(processed, tmp_path):
@@ -832,7 +903,7 @@ def test_identity_search_through_the_server(gui):
         assert "Far precursor" not in h["ids"]["name"] and list(a["id_row"]) == [0] * len(a["id_row"])
         assert h["ids"]["spectra"] and np.allclose(a["id_mz"][:3], [m for m, _ in QUERY])
     # the report now carries the hits too
-    rh, _ = bundle.unpack(gzip.decompress(report.read_bundle(out / "report.html")))
+    rh, _ = report.read_full(out / "report.html")
     assert rh["ids"]["method"] == "reverse_entropy" and rh["ms2"]["n"] == 1
     # export: seconds, MS2 count and the best hit
     code, raw, _ = c.req("/api/results/table", {"path": str(out), "ids": [1, 2]})
@@ -853,7 +924,7 @@ def test_identity_search_through_the_server(gui):
     h, _ = bundle.unpack(gzip.decompress(c.req(f"/api/results/ms2ids?path={q}")[1]))
     assert h["ann"] == {"0": r["notes"]}
     assert c.req(f"/api/results/report?path={q}")[0] == 200            # opening the report applies waiting refreshes
-    rh, _ = bundle.unpack(gzip.decompress(report.read_bundle(out / "report.html")))
+    rh, _ = report.read_full(out / "report.html")
     assert rh["ann"]["0"]["annotation"]["status"] == "unknown"          # the report shows it too
     eff = pd.read_csv(out / "feature_annotations.tsv", sep="\t").set_index("group_id")
     assert eff.loc[1, "annotation"] == "unknown" and eff.loc[1, "source"] == "user" and eff.loc[1, "best_hit"] == "Glucose"

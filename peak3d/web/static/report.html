@@ -22,6 +22,7 @@
   </div>
 </div>
 <script id="peak3d-data" type="application/octet-stream">{{DATA}}</script>
+<script id="peak3d-ms2" type="application/octet-stream">{{MS2}}</script>
 <script>
 {{JS}}
 </script>
@@ -34,6 +35,13 @@
   try {
     const raw = P3.b64bytes(document.getElementById("peak3d-data").textContent);
     const bundle = await P3.loadBundle(raw);
+    const m2 = document.getElementById("peak3d-ms2");     // the MS2 spectra, hits and annotations, kept apart
+    if (m2 && m2.textContent.trim()) {
+      const m = await P3.loadBundle(P3.b64bytes(m2.textContent));
+      for (const k of Object.keys(bundle.a)) if (/^(ms2_|ms2c_|id_|mk_|dk_)/.test(k)) delete bundle.a[k];
+      Object.assign(bundle.a, m.a);
+      for (const k of ["ms2", "ms2c", "ids", "ann", "ms2_note"]) { if (k in m.header) bundle.header[k] = m.header[k]; else delete bundle.header[k]; }
+    }
     document.getElementById("subtitle").textContent = bundle.header.title;
     P3.viewer.mount(el, bundle, {});
   } catch (e) {

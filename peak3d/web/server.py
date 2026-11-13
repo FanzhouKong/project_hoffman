@@ -404,8 +404,8 @@ class App:
         elif pending_only:
             return
         with self.folder_lock(output):
-            try:
-                report.refresh_ids(output)
+            try:          # the MS2 blob the viewer gets too: built once per search (ms2_blob caches it)
+                report.refresh_ids(output, self.ms2_blob(output))
             except OSError:
                 pass                              # a read-only results folder: the GUI still shows the choices
 
@@ -434,7 +434,7 @@ class App:
             return hit[1]
         blob = report.read_bundle(rep) if rep.exists() and key[1] >= key[0] else None
         if blob is None:
-            blob = gzip.compress(bundle.build(output), compresslevel=bundle.LIVE_LEVEL, mtime=0)
+            blob = gzip.compress(bundle.build(output, with_ms2=False), compresslevel=bundle.LIVE_LEVEL, mtime=0)
         _remember(self._bundles, str(output), (key, blob))
         return blob
 

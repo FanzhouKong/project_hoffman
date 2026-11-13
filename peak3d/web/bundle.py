@@ -10,6 +10,7 @@ opens instantly. The exact numbers stay in the TSV tables next to it."""
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 import struct
@@ -47,7 +48,7 @@ def _encode_text(header: dict, arrays: dict) -> tuple[dict, dict]:
     hit in arrays[TEXT_CODES + column] (ids["text_codes"] lists them): a million hits repeat a few hundred thousand
     library records' names and structures, and the JSON, its cleaning and its compression scale with the text"""
     ids = header.get("ids")
-    if not isinstance(ids, dict):
+    if not isinstance(ids, dict) or "text_codes" in ids:          # nothing to code, or coded already
         return header, arrays
     ids, arrays, coded = dict(ids), dict(arrays), []
     for c in ID_TEXT:
@@ -544,6 +545,48 @@ def _denoise_masks(output: Path, hits: pd.DataFrame, row_of: dict, arrays: dict)
     return {"id_dkey": d.astype(np.int32), "dk_off": off.astype(np.int32), "dk_keep": keep.astype(np.uint8)}
 
 
+_MEMO: dict = {}             # (part, output folder) -> (key, value): ms2_ids parts built from files a search keeps
+MEMO_MAX = 20                # entries (five parts per folder)
+
+
+def _stat(*paths) -> tuple:
+    """(size, mtime_ns) of each path, None where it is missing: what a memo entry depends on"""
+    out = []
+    for p in paths:
+        try:
+            st = Path(p).stat()
+            out.append((st.st_size, st.st_mtime_ns))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+def _ids_key(group_ids) -> str:
+    return hashlib.blake2b(np.ascontiguousarray(np.asarray(group_ids), np.int64).tobytes(), digest_size=16).hexdigest()
+
+
+def _memo(part: str, output: Path, key, make):
+    """make() once per (part, output folder) while key is the same (the newest entry only)"""
+    k = (part, str(Path(output).resolve()))
+    hit = _MEMO.get(k)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    v = make()
+    _MEMO.pop(k, None)
+    _MEMO[k] = (key, v)
+    while len(_MEMO) > MEMO_MAX:                    # the folders opened last
+        _MEMO.pop(next(iter(_MEMO)))
+    return v
+
+
+def _lookup(mapping: dict, values) -> np.ndarray:
+    """mapping.get(int(v), -1) for every value, at once"""
+    keys = np.fromiter(mapping.keys(), np.int64, len(mapping))
+    vals = np.fromiter(mapping.values(), np.int64, len(mapping))
+    pos = pd.Index(keys).get_indexer(np.asarray(values, np.int64))
+    return np.where(pos >= 0, vals[np.maximum(pos, 0)] if len(vals) else -1, -1)
+
+
 def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
     """both MS2 copies of every group that has MS2 (ms2.read_representatives: the highest-TIC spectrum as ms2_*, the
     consensus as ms2c_*, each with the peaks its denoised copy kept as ms2_keep / ms2c_keep when the output has one),
@@ -558,20 +601,33 @@ def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
     from ..ms2 import DENOISED, SPECTRA, _comment, read_representatives
     output = Path(output)
     row_of = {int(g): i for i, g in enumerate(np.asarray(group_ids))}
+    gkey = _ids_key(group_ids)
     head, arrays = {"ms2": None, "ms2c": None, "ids": None, "ann": None}, {}
-    for which, key, prefix in (("single", "ms2", "ms2_"), ("consensus", "ms2c", "ms2c_")):
+
+    def spectra(which, prefix):
         reps = read_representatives(output, which)
-        if reps is not None and len(reps["group_id"]):
-            den = read_representatives(output, DENOISED[which])
-            if den is None and (output / SPECTRA[DENOISED[which]]).exists():
-                den = {"group_id": np.zeros(0, np.int64), "off": np.zeros(1, np.int64), "mz": np.zeros(0)}  # all removed
-            a, head[key] = _spectra(reps, row_of, prefix, den)
-            arrays.update(a)
+        if reps is None or not len(reps["group_id"]):
+            return None
+        den = read_representatives(output, DENOISED[which])
+        if den is None and (output / SPECTRA[DENOISED[which]]).exists():
+            den = {"group_id": np.zeros(0, np.int64), "off": np.zeros(1, np.int64), "mz": np.zeros(0)}  # all removed
+        return _spectra(reps, row_of, prefix, den)
+
+    # the MS2 spectra and where they were taken do not change with a search: kept while their files are the same
+    for which, key, prefix in (("single", "ms2", "ms2_"), ("consensus", "ms2c", "ms2c_")):
+        part = _memo(f"spectra:{which}", output,
+                     (gkey, _stat(output / SPECTRA[which], output / SPECTRA[DENOISED[which]])),
+                     lambda which=which, prefix=prefix: spectra(which, prefix))
+        if part is not None:
+            arrays.update(part[0])
+            head[key] = dict(part[1])
     if head["ms2"] is not None:
         if stems is None:
-            cols = pd.read_csv(output / "aligned_feature_table.tsv", sep="\t", nrows=0).columns
-            stems = [c for c in cols if c not in BASE_COLS]
-        arrays.update(_marks(output, row_of, stems))
+            stems = _memo("stems", output, _stat(output / "aligned_feature_table.tsv"), lambda: [
+                c for c in pd.read_csv(output / "aligned_feature_table.tsv", sep="\t", nrows=0).columns
+                if c not in BASE_COLS])
+        arrays.update(_memo("marks", output, (gkey, tuple(stems), _stat(output / "ms2_map.tsv")),
+                            lambda: _marks(output, row_of, stems)))
     hits = read_hits(output) if head["ms2"] is not None else None
     if hits is not None:
         hits = hits.copy()                      # read_hits keeps its frame for the next caller
@@ -584,12 +640,12 @@ def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
             info = [_comment(c) for c in lib.comments]
             if info and all("library_index" in d for d in info) and "library_index" in hits:   # one per library record
                 rec = {int(d["library_index"]): i for i, d in enumerate(info)}
-                hits["_rec"] = [rec.get(int(v), -1) for v in hits["library_index"]]
+                hits["_rec"] = _lookup(rec, hits["library_index"].to_numpy())
             elif len(lib.names) == len(hits):        # older searches: one record per hit, in the table's order
                 hits["_rec"] = np.arange(len(hits))
             if (hits["_rec"] < 0).any():             # written together; a mismatch means a damaged pair
                 lib = None
-        hits["_row"] = [row_of.get(int(g), -1) for g in hits["group_id"]]
+        hits["_row"] = _lookup(row_of, hits["group_id"].to_numpy())
         hits["_spec"] = hits["spectrum"].map(SPEC_CODE).fillna(1).astype(np.uint8)
         hits = hits[hits["_row"] >= 0].sort_values(["_row", "_spec", "rank"], kind="stable")
         num = lambda c, d=np.nan: hits[c].to_numpy(np.float64) if c in hits else np.full(len(hits), d)
@@ -622,10 +678,12 @@ def ms2_ids(output, group_ids, stems=None) -> tuple[dict, dict]:
 
 def ms2_ids_blob(output) -> bytes:
     """gzip'd bundle holding only the MS2 and identification parts, for a viewer that already has the rest"""
-    ids = pd.read_csv(Path(output) / "aligned_feature_table.tsv", sep="\t", usecols=["group_id"])["group_id"].to_numpy()
+    table = Path(output) / "aligned_feature_table.tsv"
+    ids = _memo("group_ids", output, _stat(table),
+                lambda: pd.read_csv(table, sep="\t", usecols=["group_id"])["group_id"].to_numpy())
     head, arrays = ms2_ids(output, ids)
-    return gzip.compress(pack(_clean({"format": FORMAT, "kind": "peak3d-ms2", **head}), arrays),
-                         compresslevel=LIVE_LEVEL, mtime=0)
+    header, arrays = _encode_text({"format": FORMAT, "kind": "peak3d-ms2", **head}, arrays)   # before the cleaning
+    return gzip.compress(pack(_clean(header), arrays), compresslevel=LIVE_LEVEL, mtime=0)
 
 
 # ------------------------------------------------------------------ build ----
@@ -678,10 +736,11 @@ def _mad(v):
 
 
 def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: int = EIC_FILES,
-          eic_points: int = EIC_POINTS, max_cells: int = MAX_CELLS, exclude=()) -> bytes:
+          eic_points: int = EIC_POINTS, max_cells: int = MAX_CELLS, exclude=(), with_ms2: bool = True) -> bytes:
     """bundle for one output folder (raw bytes; callers gzip). cache_dir defaults to <output>/.cache. exclude: file
     stems left out (subset.subset_frame: their columns, the features only they hold, their curves and anchors), named
-    in the header's "excluded" """
+    in the header's "excluded". with_ms2=False leaves the MS2 part out (MS2_KEYS None): it travels apart
+    (ms2_ids_blob: the report's second block, the app's /api/results/ms2ids)"""
     from . import subset
     output = Path(output)
     cache_dir = Path(cache_dir) if cache_dir else output / ".cache"
@@ -817,11 +876,13 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
             eic, extra = got
             arrays.update(extra)
 
-    try:
-        ms2_head, extra = ms2_ids(output, arrays["g_id"], stems)
-        arrays.update(extra)
-    except Exception as e:   # a damaged MS2 or identification file never costs the rest of the results
-        ms2_head = {**{k: None for k in MS2_KEYS}, "ms2_note": f"{type(e).__name__}: {e}"}
+    ms2_head = {k: None for k in MS2_KEYS}
+    if with_ms2:
+        try:
+            ms2_head, extra = ms2_ids(output, arrays["g_id"], stems)
+            arrays.update(extra)
+        except Exception as e:   # a damaged MS2 or identification file never costs the rest of the results
+            ms2_head = {**{k: None for k in MS2_KEYS}, "ms2_note": f"{type(e).__name__}: {e}"}
 
     header = {"format": FORMAT, "kind": "peak3d-results", "title": output.resolve().name,
               "kernel": params.get("kernel", "peak3d"), "kernel_label": params.get("kernel_label") or params.get("kernel", "peak3d"),
@@ -831,4 +892,5 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
               "params": _clean(params), "matrix": matrix, "matrix_note": matrix_note, "eic": eic,
               "eic_note": eic_note, "residuals": residuals, "compounds": compounds,
               "iso_rt_win": rt_win, "halogen_names": halogen_names, "excluded": excluded}
+    header, arrays = _encode_text(header, arrays)          # the hit text before the cleaning pass
     return pack(_clean(header), arrays)
