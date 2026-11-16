@@ -27,7 +27,7 @@ def basins_to_frame(b: Basins) -> pd.DataFrame:
     s = b.stats
     df = pd.DataFrame({name: s[:, i] for i, name in enumerate(K.COLS)})
     for c in ["apex_idx", "scan_apex", "scan_min", "scan_max", "scan_lo", "scan_hi", "n_points", "n_gaps",
-              "n_flat", "kflags", "n_valleys"]:
+              "n_flat", "kflags", "n_valleys", "n_sat"]:
         df[c] = df[c].astype(np.int64)
     # n_scans inside the bounds (present scans only)
     df["n_scans"] = (df["scan_hi"] - df["scan_lo"] + 1 - df["n_gaps"]).astype(np.int64)
@@ -380,6 +380,9 @@ def flag_strings(df: pd.DataFrame, P: Params) -> pd.Series:
         ("ridge", (cap & (df["prominence_rel"].values < 0.5)) | (df["ridge_ratio"].values > RIDGE_MAX if "ridge_ratio" in df else False)
                   | (df["background_ratio"].values > BACKGROUND_MAX if "background_ratio" in df else False)),
         ("flat_top", df["n_flat"].values >= 3),
+        # a scan of the peak lies where the file's centroids are distorted by detector saturation (the m/z error at
+        # least doubled): the top is clipped, so height and area are too low and not linear in the amount
+        ("saturated", df["n_sat"].values > 0 if "n_sat" in df else False),
         ("lumpy", df["n_valleys"].values >= 2),
         ("cap", cap),
         ("nohalf", (kf & (K.KF_NOHALF_L | K.KF_NOHALF_R)) > 0),

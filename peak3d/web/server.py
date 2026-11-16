@@ -47,6 +47,7 @@ KERNELS = ("peak3d", "asari", "masscube")      # peak3d runs `process`; the othe
 VARIANT_NOTE = " ".join(f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in VARIANT_SETS.items())
 # output files the viewer may download (by name, from a peak3d output folder)
 RESULT_FILES = ("aligned_feature_table.tsv", "aligned_feature_area.tsv", "aligned_feature_height.tsv", "filled_mask.tsv",
+                "saturated_mask.tsv",
                 "presence_mask.tsv", "params.json", "ms2_spectra.msp", "ms2_consensus.msp", "ms2_spectra_denoised.msp",
                 "ms2_consensus_denoised.msp", "ms2_map.tsv", "identifications.tsv", "feature_annotations.tsv")
 CACHED_OUTPUTS = 3      # results folders whose bundles the server keeps in memory
@@ -296,15 +297,15 @@ def _identity_columns(out: Path) -> dict:
 
 
 FILLED_COL = "gap_filled_files"     # export column after n_filled: the files whose value was gap-filled, ";"-separated
+SAT_COL = "saturated_files"         # ... and after it: the files in which the feature's peak is saturated
 
 
-def _gap_filled_files(out: Path, table: Path, cols) -> dict:
-    """{group_id as written: "stem;stem"} for the groups with gap-filled values in this aligned table: the files
-    filled_mask.tsv marks as not detected where the table holds a value above 0 (a cell gap filling found nothing in
-    stays 0 and is not listed); groups without any are left out"""
+def _mask_files(out: Path, table: Path, cols, mask_name: str) -> dict:
+    """{group_id as written: "stem;stem"} for the groups of this aligned table with files a group x file mask of the
+    output marks (above 0) where the table holds a value above 0; groups without any are left out"""
     import numpy as np
     import pandas as pd
-    mask_path = out / "filled_mask.tsv"
+    mask_path = out / mask_name
     with open(mask_path, encoding="utf-8") as fh:
         in_mask = set(fh.readline().rstrip("\r\n").split("\t"))
     stems = [s for s in bundle.table_stems(out, cols) if s in in_mask]
@@ -319,6 +320,17 @@ def _gap_filled_files(out: Path, table: Path, cols) -> dict:
     return {ids[i]: ";".join(names[filled[i]]) for i in np.flatnonzero(filled.any(axis=1))}
 
 
+def _gap_filled_files(out: Path, table: Path, cols) -> dict:
+    """the groups with gap-filled values in this aligned table (_mask_files): the files filled_mask.tsv marks as not
+    detected where the table holds a value above 0 (a cell gap filling found nothing in stays 0 and is not listed)"""
+    return _mask_files(out, table, cols, "filled_mask.tsv")
+
+
+def _saturated_files(out: Path, table: Path, cols) -> dict:
+    """the groups with saturated peaks in this aligned table (_mask_files): the files saturated_mask.tsv marks"""
+    return _mask_files(out, table, cols, "saturated_mask.tsv")
+
+
 def _without(cols, dropset):
     """for a table header without the columns dropset: the kept column indices, the kept names, and (index among the
     kept, position in subset.COUNTS) of each count column"""
@@ -327,10 +339,10 @@ def _without(cols, dropset):
     return keep_at, kcols, [(kcols.index(c), j) for j, c in enumerate(subset.COUNTS) if c in kcols]
 
 
-def _insert_filled(raw: bytes, filled: dict) -> bytes:
+def _insert_filled(raw: bytes, filled: dict, sat: dict | None = None) -> bytes:
     """an aligned table as written with the gap_filled_files column of _gap_filled_files after n_filled (at the end
-    without n_filled, as in Download table): every other byte as in the file, retention times in minutes, the file's
-    own line endings"""
+    without n_filled, as in Download table) and, with sat (_saturated_files), the saturated_files column after it:
+    every other byte as in the file, retention times in minutes, the file's own line endings"""
     lines = raw.decode("utf-8").split("\n")       # not splitlines: a line ends at \n only, as pandas reads it
     cols = lines[0].rstrip("\r").split("\t")
     at = cols.index("n_filled") + 1 if "n_filled" in cols else len(cols)
@@ -338,7 +350,10 @@ def _insert_filled(raw: bytes, filled: dict) -> bytes:
         body = line.rstrip("\r")
         if body:
             v = body.split("\t", at)
-            v.insert(at, FILLED_COL if i == 0 else filled.get(v[0], ""))
+            k = v[0]
+            v.insert(at, FILLED_COL if i == 0 else filled.get(k, ""))
+            if sat is not None:
+                v.insert(at + 1, SAT_COL if i == 0 else sat.get(k, ""))
             lines[i] = "\t".join(v) + line[len(body):]
     return "\n".join(lines).encode("utf-8")
 
@@ -467,18 +482,28 @@ class App:
         self._tables[str(path)] = (mtime, (header, rows))
         return header, rows
 
-    def gap_filled(self, output: Path, path: Path, cols) -> dict | None:
-        """_gap_filled_files of an aligned table, kept until the table or filled_mask.tsv changes"""
-        mask = output / "filled_mask.tsv"
+    def _mask_files(self, output: Path, path: Path, cols, mask_name: str) -> dict | None:
+        """_mask_files of an aligned table for one mask of the output, kept until the table or the mask changes; None
+        when the output has no such mask"""
+        mask = output / mask_name
         if not mask.exists():
             return None
         key = (path.stat().st_mtime_ns, mask.stat().st_mtime_ns)
-        hit = self._filled.get(str(path))
+        ck = f"{path}|{mask_name}"
+        hit = self._filled.get(ck)
         if hit and hit[0] == key:
             return hit[1]
-        value = _gap_filled_files(output, path, cols)
-        _remember(self._filled, str(path), (key, value))
+        value = _mask_files(output, path, cols, mask_name)
+        _remember(self._filled, ck, (key, value))
         return value
+
+    def gap_filled(self, output: Path, path: Path, cols) -> dict | None:
+        """_gap_filled_files of an aligned table, kept until the table or filled_mask.tsv changes"""
+        return self._mask_files(output, path, cols, "filled_mask.tsv")
+
+    def saturated(self, output: Path, path: Path, cols) -> dict | None:
+        """_saturated_files of an aligned table, kept until the table or saturated_mask.tsv changes"""
+        return self._mask_files(output, path, cols, "saturated_mask.tsv")
 
     def recount(self, output: Path, path: Path, cols, drop) -> dict:
         """subset.recount of an aligned table without the files drop, as {group_id as written: (n_detected, n_confirmed,
@@ -625,7 +650,7 @@ class Handler(BaseHTTPRequestHandler):
                     cols = data.split(b"\n", 1)[0].decode("utf-8").rstrip("\r").split("\t")
                     filled = self.app.gap_filled(out, out / name, cols)
                     if filled is not None:
-                        data = _insert_filled(data, filled)
+                        data = _insert_filled(data, filled, self.app.saturated(out, out / name, cols))
                 return self._send(200, data, ctype,
                                   {"Content-Disposition": _disposition("attachment", f"{out.name}_{name}")})
             if url.path == "/api/results/report":
@@ -829,7 +854,8 @@ class Handler(BaseHTTPRequestHandler):
     def _table(self, body):
         """the rows of an aligned table for the given group ids, in that order, as in the file except retention times
         in seconds (columns renamed rt_s, ...), the files whose value was gap-filled (gap_filled_files, after n_filled,
-        when the output has filled_mask.tsv), plus the MS2 count and best library hit when the output has them. "skip":
+        when the output has filled_mask.tsv) and those in which the peak is saturated (saturated_files, after it, when
+        the output has saturated_mask.tsv), plus the MS2 count and best library hit when the output has them. "skip":
         kinds of flagged files left out (subset): their columns go, the counts are over the other files, and a feature
         only the left-out files held is not listed"""
         out = self._output({"path": [body.get("path") or ""]})
@@ -846,10 +872,14 @@ class Handler(BaseHTTPRequestHandler):
         rt_at = [i for i, c in enumerate(kcols) if c in RT_COLS]
         extra = _identity_columns(out)
         filled = self.app.gap_filled(out, out / name, cols)
+        sat = self.app.saturated(out, out / name, cols)
         fill_at = kcols.index("n_filled") + 1 if "n_filled" in kcols else len(kcols)
+        sat_at = fill_at + (filled is not None)
         head = [f"{c}_s" if c in RT_COLS else c for c in kcols]
         if filled is not None:
             head.insert(fill_at, FILLED_COL)
+        if sat is not None:
+            head.insert(sat_at, SAT_COL)
         lines = ["\t".join(head + list(extra["header"])) + eol]
         for k in (str(int(i)) for i in body.get("ids") or []):
             if k not in rows or (counts is not None and k not in counts):
@@ -864,13 +894,16 @@ class Handler(BaseHTTPRequestHandler):
             if filled is not None:
                 f = filled.get(k, "")
                 v.insert(fill_at, ";".join(x for x in f.split(";") if x not in dropset) if dropset and f else f)
+            if sat is not None:
+                f = sat.get(k, "")
+                v.insert(sat_at, ";".join(x for x in f.split(";") if x not in dropset) if dropset and f else f)
             lines.append("\t".join(v + extra["rows"].get(int(k), extra["empty"])) + eol)
         self._send(200, "".join(lines).encode("utf-8"), "text/tab-separated-values; charset=utf-8")
 
     def _table_without(self, out: Path, name: str, drop) -> bytes:
         """an aligned table file as written (minutes), without the file columns drop: the counts over the other files,
-        the features only the left-out files held left out (subset.recount), and gap_filled_files after n_filled (as
-        _insert_filled) naming only the files kept"""
+        the features only the left-out files held left out (subset.recount), and gap_filled_files and saturated_files
+        after n_filled (as _insert_filled) naming only the files kept"""
         header, rows = self.app.table_lines(out / name)
         cols = header.rstrip("\r\n").split("\t")
         eol = header[len(header.rstrip("\r\n")):] or "\n"
@@ -879,10 +912,14 @@ class Handler(BaseHTTPRequestHandler):
         keep_at, kcols, cnt_at = _without(cols, dropset)
         counts = self.app.recount(out, out / name, cols, drop)
         filled = self.app.gap_filled(out, out / name, cols)
+        sat = self.app.saturated(out, out / name, cols)
         fill_at = kcols.index("n_filled") + 1 if "n_filled" in kcols else len(kcols)
+        sat_at = fill_at + (filled is not None)
         head = list(kcols)
         if filled is not None:
             head.insert(fill_at, FILLED_COL)
+        if sat is not None:
+            head.insert(sat_at, SAT_COL)
         parts = ["\t".join(head) + eol]
         for k, line in rows.items():
             c = counts.get(k)
@@ -895,6 +932,9 @@ class Handler(BaseHTTPRequestHandler):
             if filled is not None:
                 f = filled.get(k, "")
                 v.insert(fill_at, ";".join(x for x in f.split(";") if x not in dropset) if f else "")
+            if sat is not None:
+                f = sat.get(k, "")
+                v.insert(sat_at, ";".join(x for x in f.split(";") if x not in dropset) if f else "")
             parts.append("\t".join(v) + eol)
         return "".join(parts).encode("utf-8")
 

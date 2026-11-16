@@ -408,44 +408,53 @@ def test_not_an_output(tmp_path):
 RT = ("rt", "rt_min", "rt_max", "rt_sd")
 
 
-def _in_seconds(header, line, filled=None):
+def _in_seconds(header, line, filled=None, sat=None):
     """what /api/results/table makes of a table line: retention-time columns in seconds (header renamed *_s); with
-    filled ({group id: files}), the gap_filled_files column after n_filled"""
+    filled ({group id: files}), the gap_filled_files column after n_filled, and with sat the saturated_files column
+    after that"""
     cols = header.rstrip("\r\n").split("\t")
     eol = header[len(header.rstrip("\r\n")):]
     at = cols.index("n_filled") + 1
     if line is None:
         head = [c + "_s" if c in RT else c for c in cols]
-        return "\t".join(head[:at] + (["gap_filled_files"] if filled is not None else []) + head[at:]) + eol
+        return "\t".join(head[:at] + (["gap_filled_files"] if filled is not None else [])
+                         + (["saturated_files"] if sat is not None else []) + head[at:]) + eol
     v = line.rstrip("\r\n").split("\t")
     for i, c in enumerate(cols):
         if c in RT and v[i] not in ("", "nan"):
             v[i] = f"{float(v[i]) * 60:.6g}"
+    k = v[0]
+    if sat is not None:
+        v.insert(at, sat.get(k, ""))
     if filled is not None:
-        v.insert(at, filled.get(v[0], ""))
+        v.insert(at, filled.get(k, ""))
     return "\t".join(v) + eol
 
 
-def _filled_from_mask(out: Path, stems, table="aligned_feature_table.tsv"):
-    """{group id: "stem;stem"}, read as text: the files filled_mask.tsv marks with 1 where the table holds a value > 0"""
+def _filled_from_mask(out: Path, stems, table="aligned_feature_table.tsv", mask="filled_mask.tsv"):
+    """{group id: "stem;stem"}, read as text: the files filled_mask.tsv (or another group x file mask of the output)
+    marks with 1 where the table holds a value > 0"""
     def rows(name):
         lines = (out / name).read_text(encoding="utf-8").splitlines()
         head = lines[0].split("\t")
         return {ln.split("\t")[0]: dict(zip(head, ln.split("\t"))) for ln in lines[1:]}
-    table, mask = rows(table), rows("filled_mask.tsv")
+    table, mask = rows(table), rows(mask)
     res = {g: ";".join(s for s in stems if g in mask and mask[g][s] == "1" and float(r[s]) > 0) for g, r in table.items()}
     return {g: v for g, v in res.items() if v}
 
 
-def _menu_download(path: Path, filled):
+def _menu_download(path: Path, filled, sat=None):
     """what the Download menu's Feature table items serve with filled_mask.tsv: the file's lines as written (minutes,
-    line endings) with gap_filled_files after n_filled"""
+    line endings) with gap_filled_files after n_filled, and with sat (saturated_mask.tsv) saturated_files after that"""
     lines = path.read_bytes().decode("utf-8").splitlines(keepends=True)
     at = lines[0].rstrip("\r\n").split("\t").index("n_filled") + 1
     out = []
     for i, ln in enumerate(lines):
         v = ln.rstrip("\r\n").split("\t")
-        v.insert(at, "gap_filled_files" if i == 0 else filled.get(v[0], ""))
+        k = v[0]
+        if sat is not None:
+            v.insert(at, "saturated_files" if i == 0 else sat.get(k, ""))
+        v.insert(at, "gap_filled_files" if i == 0 else filled.get(k, ""))
         out.append("\t".join(v) + ln[len(ln.rstrip("\r\n")):])
     return "".join(out).encode("utf-8")
 
@@ -541,13 +550,13 @@ def test_server_guards(gui):
     assert c.req("/api/info", host="localhost:1")[0] == 200
     code, page, _ = c.req("/")
     assert code == 200 and b"t0ken" in page and b"/static/app.js" in page
-    assert b'id="variant"' in page and b">GLRSZW</span>" in page and b"narrow_rule=local_median" in page
+    assert b'id="variant"' in page and b">GLRSZWM</span>" in page and b"narrow_rule=local_median" in page
     assert b"sigma_sat=true" in page
     assert c.req("/static/app.js")[0] == 200 and c.req("/static/../server.py")[0] == 404
     assert c.req("/static/style.css")[2]["Content-Type"].startswith("text/css")
     code, info = c.json("/api/info")
     assert info["root"] == str(root.resolve()) and info["cpu_count"] >= 1
-    assert info["variant"] == "GLRSZW" and info["variant_sets"]["min_scans_rule"] == "local"
+    assert info["variant"] == "GLRSZWM" and info["variant_sets"]["min_scans_rule"] == "local"
     assert info["variant_sets"]["sigma_sat"] is True
     assert c.json("/api/ls?path=/")[0] == 403                               # outside --root
     assert c.req("/api/runs", {"input": str(root)}, token=False)[0] == 403
@@ -587,11 +596,13 @@ def test_server_run_and_results(gui):
     # downloads: whole files by name (the feature tables with gap_filled_files), and chosen rows exactly as in the file
     out_q = quote(str(root / "o"))
     code, raw, hdr = c.req(f"/api/results/file?path={out_q}&name=aligned_feature_table.tsv")
-    assert code == 200 and raw == _menu_download(root / "o" / "aligned_feature_table.tsv", _filled_from_mask(root / "o", ["S0", "S1"]))
+    sat = _filled_from_mask(root / "o", ["S0", "S1"], mask="saturated_mask.tsv")     # the demo holds no saturated peak
+    assert sat == {} and (root / "o" / "saturated_mask.tsv").exists()
+    assert code == 200 and raw == _menu_download(root / "o" / "aligned_feature_table.tsv", _filled_from_mask(root / "o", ["S0", "S1"]), sat)
     assert "attachment" in hdr["Content-Disposition"] and "o_aligned_feature_table.tsv" in hdr["Content-Disposition"]
     area = root / "o" / "aligned_feature_area.tsv"
     code, raw, _ = c.req(f"/api/results/file?path={out_q}&name=aligned_feature_area.tsv")
-    assert code == 200 and raw == _menu_download(area, _filled_from_mask(root / "o", ["S0", "S1"], area.name))
+    assert code == 200 and raw == _menu_download(area, _filled_from_mask(root / "o", ["S0", "S1"], area.name), sat)
     code, raw, _ = c.req(f"/api/results/file?path={out_q}&name=filled_mask.tsv")
     assert code == 200 and raw == (root / "o" / "filled_mask.tsv").read_bytes()
     assert c.req(f"/api/results/file?path={out_q}&name=../../x")[0] == 404
@@ -600,12 +611,12 @@ def test_server_run_and_results(gui):
     filled = _filled_from_mask(root / "o", ["S0", "S1"])
     ids = [int(lines[3].split("\t")[0]), int(lines[1].split("\t")[0]), 999999]
     code, raw, _ = c.req("/api/results/table", {"path": str(root / "o"), "ids": ids})
-    assert code == 200 and raw.decode() == "".join(_in_seconds(lines[0], ln, filled) for ln in (None, lines[3], lines[1]))
+    assert code == 200 and raw.decode() == "".join(_in_seconds(lines[0], ln, filled, sat) for ln in (None, lines[3], lines[1]))
     if filled:                                  # rows with gap-filled files come out with them
         g = sorted(filled, key=int)[0]
         line = next(ln for ln in lines[1:] if ln.split("\t")[0] == g)
         code, raw, _ = c.req("/api/results/table", {"path": str(root / "o"), "ids": [int(g)]})
-        assert raw.decode().splitlines(keepends=True)[1] == _in_seconds(lines[0], line, filled)
+        assert raw.decode().splitlines(keepends=True)[1] == _in_seconds(lines[0], line, filled, sat)
     assert c.json("/api/results/reveal", {"path": str(root.parent)})[0] == 403          # outside --root
     code, ex = c.json("/api/example", {})
     assert code == 200 and ex["n_mzml"] == 3 and Path(ex["input"]).parent == (root / "peak3d_example").resolve()
@@ -658,6 +669,54 @@ def test_export_lists_gap_filled_files(gui):
     assert "gap_filled_files" not in head and head[7:9] == ["n_filled", "mz_ppm_spread"] and float(rows[0]["A"]) == 30000
     viewer = (ROOT / "peak3d" / "web" / "static" / "viewer.js").read_text(encoding="utf-8")
     assert 'FILLED_COL = "gap_filled_files"' in viewer and "R.h.matrix.presence" in viewer
+
+
+def test_export_lists_saturated_files(gui):
+    """1.2.9: with saturated_mask.tsv, Download table and the Download menu's feature tables carry saturated_files
+    after gap_filled_files: the files in which the feature's peak is saturated; files left out are not named; the
+    report's bundle holds the same cells; no column without the mask (results of earlier versions)"""
+    c, root, _ = gui
+    out = root / "o"
+    out.mkdir()
+    pd.DataFrame({"group_id": [1, 2, 5], "mz": [180.0634, 300.2, 410.3], "rt": [2.0, 4.0, 5.0], "rt_min": [1.95, 3.95, 4.9],
+                  "rt_max": [2.05, 4.05, 5.1], "n_detected": [2, 3, 1], "n_confirmed": [0, 0, 1], "n_filled": [1, 0, 2],
+                  "mz_ppm_spread": [1.0, 0.5, np.nan], "rt_sd": [0.01, 0.02, np.nan], "iso_offset": [0, 0, 0],
+                  "charge": [1, 1, 1], "A": [8e6, 5e5, 3e4], "B": [7.5e6, 4e5, 9e5], "003": [0.0, 6e6, 7e3]}
+                 ).to_csv(out / "aligned_feature_table.tsv", sep="\t", index=False)
+    (out / "params.json").write_text("{}")
+    pd.DataFrame({"group_id": [1, 2, 5], "A": [0, 0, 1], "B": [0, 0, 0], "003": [1, 0, 1]}
+                 ).to_csv(out / "filled_mask.tsv", sep="\t", index=False)
+    pd.DataFrame({"group_id": [5, 2, 1], "003": [0, 1, 1], "B": [0, 0, 1], "A": [0, 0, 1]}     # 003 of group 1: no value
+                 ).to_csv(out / "saturated_mask.tsv", sep="\t", index=False)
+
+    def export(ids):
+        code, raw, _ = c.req("/api/results/table", {"path": str(out), "ids": ids})
+        assert code == 200
+        rows = [ln.split("\t") for ln in raw.decode().splitlines()]
+        return rows[0], [dict(zip(rows[0], r)) for r in rows[1:]]
+
+    head, rows = export([1, 2, 5])
+    assert head[7:11] == ["n_filled", "gap_filled_files", "saturated_files", "mz_ppm_spread"] and head[-3:] == ["A", "B", "003"]
+    assert [(r["group_id"], r["gap_filled_files"], r["saturated_files"]) for r in rows] == \
+        [("1", "", "A;B"), ("2", "", "003"), ("5", "A;003", "")]
+    code, raw, _ = c.req(f"/api/results/file?path={quote(str(out))}&name=aligned_feature_table.tsv")
+    lines = raw.decode().splitlines()
+    assert code == 200 and lines[0].split("\t")[7:10] == ["n_filled", "gap_filled_files", "saturated_files"]
+    assert [ln.split("\t")[9] for ln in lines[1:]] == ["A;B", "003", ""] and lines[1].split("\t")[2] == "2.0"   # minutes
+    assert server._insert_filled(b"group_id\tA\r\n1\t5\r\n2\t0", {"1": "A"}, {"2": "A"}) == \
+        b"group_id\tA\tgap_filled_files\tsaturated_files\r\n1\t5\tA\t\r\n2\t0\t\tA"
+    code, raw, _ = c.req(f"/api/results/file?path={quote(str(out))}&name=saturated_mask.tsv")
+    assert code == 200 and raw == (out / "saturated_mask.tsv").read_bytes()
+    # the report's bundle: the same cells, in the table's order
+    h, a = bundle.unpack(bundle.build(out))
+    assert a["m_sat"].reshape(3, 3).tolist() == [[1, 1, 1], [0, 0, 1], [0, 0, 0]]
+    viewer = (ROOT / "peak3d" / "web" / "static" / "viewer.js").read_text(encoding="utf-8")
+    assert 'SAT_COL = "saturated_files"' in viewer and "a.m_sat" in viewer
+    # no saturated_mask.tsv (results written before 1.2.9): no column, nothing in the bundle
+    (out / "saturated_mask.tsv").unlink()
+    head, rows = export([1])
+    assert "saturated_files" not in head and head[7:10] == ["n_filled", "gap_filled_files", "mz_ppm_spread"]
+    assert "m_sat" not in bundle.unpack(bundle.build(out))[1]
 
 
 def test_menu_feature_tables_list_gap_filled_files(gui):

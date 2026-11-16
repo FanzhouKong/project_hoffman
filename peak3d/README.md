@@ -119,6 +119,39 @@ same ion: on the validated IDSL003 peaks it cost 33 true peaks for 27 false ones
 The ridge and background gates judge only sides that the run edge leaves at least 3 scans long, so a
 feature at the run start or end is judged on the side it has.
 
+**Scans whose mass axis jumped (`scan_mz`, per file, before the estimation).** On a time-of-flight
+instrument the measured m/z of every ion of a scan can move together, by a + b / sqrt(m/z) ppm, whatever
+the ion's intensity: a few ppm from scan to scan, and tens of ppm for one or two scans while a compound
+saturates the detector (on Agilent Q-TOF plasma files -40 ppm at m/z 65, -27 at m/z 130, -18 at m/z 250
+and about 0 at m/z 900 in the scan after a saturated apex). Every trace that crosses such a scan is cut
+there. Each scan's (a, b) is measured on the file's long-lived ions (`scan_mz`): m/z seen
+in at least a quarter of the scans (up to 500, none with a second one within 120 ppm), each followed
+through the run and compared with its own median over the ~100 scans around; a centroid within a decade
+of the file's strongest is not used. The fit is robust (started from the medians of five slices of the
+m/z range, refitted on the ions within 3 sd) and weights each ion by the scatter of its own residuals
+over the run. A file is corrected when at least 3 scans jumped: a shift, significant at p < 0.01 / the
+number of scans and read off at least 12 ions, larger than the widest step the picker follows between
+scans (`tol_max_ppm`). Then every centroid of every measured scan is moved back, and the move is kept
+only if the file's strong eluting ions sit closer to their own trace in the jumped scans than before
+(`mz_scan_gain` < 1): the shifts are read off background ions, and a file whose eluting ions do not share
+them (a recorded background with simulated peaks laid over it) is left as it was. Files without jumped
+scans are not touched, and the error model (a, b) is the one fitted before the correction, so no
+tolerance gets tighter. The cache holds the corrected cloud, so gap filling and the chromatograms read
+the same m/z. Default on since 1.2.9 (variant GLRSZWM; `--set scan_mz=false` gives the 1.2.8 picker). On
+six Agilent Q-TOF plasma files (25 to 46 jumped scans each) the features above 1e6 counts left with a
+piece cut off went from 20 to 0, those at 1e5 to 1e6 from 130 to 37 (the strongest of the rest are pairs
+of different ions the centroider does not resolve), and in the aligned table the area CV over three
+injections of the same sample, rows above 1e6, from a median 0.144 to 0.112; none of the 1,035 files of
+the 23 benchmark runs has a jumped scan, so their output is unchanged; 0.2 s per file for the
+measurement, 0.5 s when the file is corrected.
+
+**Saturated peaks.** Where the file has saturation factors (`sat_f`), a peak with a scan at half its
+apex or more in an intensity bin with a factor above 1 takes its m/z from all its scans inside the
+bounds, each weighted by 1 / sd^2 (sd = the centroid's m/z error, factor included), instead of the
+intensity-weighted mean over the top half: the unsaturated flank scans decide it (the top scans of a
+saturated peak read 10 to 20 ppm high). A peak with a scan whose factor is at least 2 carries the flag
+`saturated` (`saturated_mask.tsv` in the aligned output).
+
 **The ion followed through an m/z wander (1D, per file).** The checks above read the ion within the
 tolerance around the candidate's own m/z (3 sd + 1 ppm, at least 5 ppm). A strong, constant background
 ion does not stay inside it: its measured m/z moves by 15 to 20 ppm for tens of seconds while a
@@ -182,6 +215,7 @@ Options: `--ppm 5`, `--rt-tol-max 0.25`, `--min-score 0.5`, `--min-presence 2`, 
 | `presence_mask.tsv` | every group before the presence rule: 2 detected, 1 confirmed peak in the gap-filled chromatogram, 0 absent, per file |
 | `aligned_feature_area.tsv` | same layout with areas |
 | `filled_mask.tsv` | 1 where a value was gap-filled rather than detected |
+| `saturated_mask.tsv` | 1 where the peak detected in that file carries the flag `saturated` (a scan of it lies where the file's m/z error at least doubles through detector saturation, `sat_f` >= 2): height and area are too low |
 | `features/<stem>.tsv` | per-file features: mz, rt, rt_apex, height, area, area_bsub, rt_min, rt_max, scans, n_scans, n_gaps, fwhm, asym, mz_sd_ppm, baseline (where the bounds walk stopped), baseline_lo, noise (cell floor, used in the S/N), snr, prominence_rel, persistence, gauss_r2, ridge_ratio, background_ratio, far_level, tv_ratio, n_valleys, tv_excess, noise_i (sigma at the apex under the file's noise law), iso_offset, charge, iso_parent, iso_ratio, score_rule, score_model, score, flags, rt_corr, rt_min_corr, rt_max_corr, is_anchor, group_id, group_kept, compound_id, role |
 | `features/<stem>.params.json` | every per-file estimated parameter, counts and stage timings |
 | `rt_correction/<stem>.tsv` | the warp: scan, rt_native, rt_corr |

@@ -200,3 +200,50 @@ def test_a_second_ion_in_the_window_is_not_saturation():
         P = estimate(cloud)
         assert P.sat_f == [], (seed, P.sat_f, P.sat_n)
         assert point_cap_factor(cloud.inten, P) is None
+
+
+def _pick_without_flank_mz(cloud, P):
+    """pick_cloud with the factors in the linking but none handed to the peak statistics (m/z as before 1.2.9)"""
+    import peak3d.pick as pick
+    keep = pick.point_sat_factor
+    pick.point_sat_factor = lambda inten, P: None
+    try:
+        return pick_cloud(cloud, P)
+    finally:
+        pick.point_sat_factor = keep
+
+
+def test_saturated_peak_takes_its_mz_from_the_flanks_and_is_flagged():
+    """the known peak's top scans sit 25-45 ppm high: the intensity-weighted mean over the top half reports that
+    shift; with the factors the m/z comes from the unsaturated flank scans, and the feature is flagged"""
+    cloud, truth = _study()
+    t = truth[(truth["peak_id"] == 0) & (truth["iso_n"] == 0)].iloc[0]
+    P = estimate(cloud)
+
+    def at_peak(b):
+        fe, _ = build_features(cloud, b)
+        m = (np.abs(fe["mz"] - t["mz"]) / t["mz"] * 1e6 < 80) & (np.abs(fe["rt"] - t["rt"]) < 0.15)
+        assert m.sum() == 1
+        return fe[m].iloc[0], fe
+
+    new, fe = at_peak(pick_cloud(cloud, P))
+    old, fe_old = at_peak(_pick_without_flank_mz(cloud, P))
+    err_new = (new["mz"] - t["mz"]) / t["mz"] * 1e6
+    err_old = (old["mz"] - t["mz"]) / t["mz"] * 1e6
+    assert err_old > 20.0 and abs(err_new) < 3.0
+    assert new["area"] == old["area"] and new["height"] == old["height"] and new["mz_min"] == old["mz_min"]
+    # the flag: every peak with a scan where the m/z error at least doubles, none below the synthetic ceiling
+    flagged = fe["flags"].str.contains("saturated")
+    assert "saturated" in new["flags"] and "saturated" not in old["flags"]
+    assert flagged.sum() >= 20 and fe.loc[flagged, "height"].min() > SAT_I
+    assert not fe_old["flags"].str.contains("saturated").any()
+    # peaks without a saturated scan keep their m/z to the last digit
+    same = fe.merge(fe_old, on=["scan_apex", "scan_min", "scan_max", "height"], suffixes=("", "_old"))
+    calm = ~same["flags"].str.contains("saturated") & (same["height"] < 10 ** (P.sat_lg_top - 1))
+    assert calm.sum() > 200 and (same.loc[calm, "mz"] == same.loc[calm, "mz_old"]).all()
+
+
+def test_unsaturated_file_has_no_saturated_flag():
+    cloud, _ = _study(saturate=False)
+    fe, _ = build_features(cloud, pick_cloud(cloud, estimate(cloud)))
+    assert not fe["flags"].str.contains("saturated").any()

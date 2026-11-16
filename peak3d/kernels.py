@@ -17,7 +17,7 @@ NB_SAME_L, NB_SAME_R, NB_LEFT, NB_RIGHT = 0, 1, 2, 3
 COLS = ["apex_idx", "scan_apex", "scan_min", "scan_max", "scan_lo", "scan_hi", "n_scans", "n_points",
         "n_gaps", "height", "mz", "mz_sd_ppm", "mz_min", "mz_max", "rt", "rt_apex", "rt_min", "rt_max",
         "area", "area_bsub", "baseline", "fwhm", "asym", "gauss_r2", "n_flat", "kflags", "baseline_lo",
-        "tv_ratio", "n_valleys", "tv_excess"]
+        "tv_ratio", "n_valleys", "tv_excess", "n_sat"]
 # kflags bits
 KF_CAP_L, KF_CAP_R, KF_NOHALF_L, KF_NOHALF_R, KF_RUN_START, KF_RUN_END = 1, 2, 4, 8, 16, 32
 C = {name: i for i, name in enumerate(COLS)}
@@ -632,7 +632,7 @@ def noise_at(level, floor, c, r):
 
 @njit(cache=True, parallel=True)
 def basin_stats(sel, order, boff, scan_of, nbr, mz, inten, eff, rt, noise_b, fwhm_med, max_width_fwhm,
-                noise_c, noise_r, k_valley, rep_raw, bridge_scans, bridge_frac):
+                noise_c, noise_r, k_valley, rep_raw, bridge_scans, bridge_frac, satf=None, sig=None, sat_flag=2.0):
     """descriptors for the selected basins; see COLS for the column order. The per-scan trace is
     the most intense point of the basin in that scan with its same-scan split neighbours summed
     (``eff``), never the sum of every basin point, which would count background centroids.
@@ -645,7 +645,13 @@ def basin_stats(sel, order, boff, scan_of, nbr, mz, inten, eff, rt, noise_b, fwh
     the trace / (2 x its single rise and fall), exactly 1 for a unimodal trace; ``n_valleys`` =
     local minima at least k_valley expected noise sd (noise_at, on the difference of the two
     levels) below the maxima on both sides; ``tv_excess`` = total variation beyond the single rise
-    and fall, in units of the summed expected scan-to-scan noise."""
+    and fall, in units of the summed expected scan-to-scan noise.
+    ``satf``, ``sig`` (per centroid, optional, together): the saturation factor of the m/z error model at the
+    centroid's intensity (pick.point_sat_factor) and its m/z sd in ppm, factor included (pick.point_sigma). ``mz`` is
+    the intensity-weighted mean over the scans at half the apex or more; when one of those scans lies where the
+    file's centroids are distorted (factor > 1), the peak's m/z is the inverse-variance weighted mean (1 / sd^2) over
+    all its scans inside the bounds instead: the unsaturated flank scans decide it, not the distorted top, which
+    counts 1 / factor^2 as much. ``n_sat``: scans inside the bounds whose factor is at least sat_flag."""
     out = np.zeros((len(sel), NCOL), np.float64)
     S = len(rt)
     for ib in prange(len(sel)):
@@ -781,21 +787,45 @@ def basin_stats(sel, order, boff, scan_of, nbr, mz, inten, eff, rt, noise_b, fwh
             if v >= 0.98 * apex:
                 n_flat += 1.0
         rt_c = num / den if den > 0 else ta
-        # m/z: intensity-weighted over per-scan maxima >= 50% apex
+        # m/z: intensity-weighted over per-scan maxima >= 50% apex; with a saturated scan among them, over every
+        # scan inside the bounds, weight 1 / sd^2 (sd = the centroid's m/z error, saturation factor included)
+        n_sat = 0.0
+        flank = False
+        if satf is not None and sig is not None:
+            for k in range(klo, khi + 1):
+                if trace[k] > 0:
+                    f = satf[tidx[k]]
+                    if f >= sat_flag:
+                        n_sat += 1.0
+                    if f > 1.0 and trace[k] >= 0.5 * apex:
+                        flank = True
         num = 0.0
         den = 0.0
-        for k in range(klo, khi + 1):
-            v = trace[k]
-            if v >= 0.5 * apex:
-                num += v * mz[tidx[k]]
-                den += v
-        mzw = num / den
-        var = 0.0
-        for k in range(klo, khi + 1):
-            v = trace[k]
-            if v >= 0.5 * apex:
-                d = (mz[tidx[k]] - mzw) / mzw * 1e6
-                var += v * d * d
+        if flank:
+            for k in range(klo, khi + 1):
+                if trace[k] > 0:
+                    w = 1.0 / (np.float64(sig[tidx[k]]) ** 2)
+                    num += w * mz[tidx[k]]
+                    den += w
+            mzw = num / den
+            var = 0.0
+            for k in range(klo, khi + 1):
+                if trace[k] > 0:
+                    d = (mz[tidx[k]] - mzw) / mzw * 1e6
+                    var += d * d / (np.float64(sig[tidx[k]]) ** 2)
+        else:
+            for k in range(klo, khi + 1):
+                v = trace[k]
+                if v >= 0.5 * apex:
+                    num += v * mz[tidx[k]]
+                    den += v
+            mzw = num / den
+            var = 0.0
+            for k in range(klo, khi + 1):
+                v = trace[k]
+                if v >= 0.5 * apex:
+                    d = (mz[tidx[k]] - mzw) / mzw * 1e6
+                    var += v * d * d
         mz_sd = np.sqrt(var / den)
         # gaussian r2 of log intensity over scans >= 10% apex inside the bounds
         n = 0
@@ -887,6 +917,7 @@ def basin_stats(sel, order, boff, scan_of, nbr, mz, inten, eff, rt, noise_b, fwh
         o[27] = tv_ratio
         o[28] = n_valleys
         o[29] = tv_excess
+        o[30] = n_sat
     return out
 
 
@@ -1345,3 +1376,213 @@ def window_level(off, mz, inten, q_mz, q_tol, s_lo, s_hi, q):
         vals.sort()
         out[i] = vals[min(len(vals) - 1, int(q * (len(vals) - 1) + 0.5))]
     return out
+
+
+# ---------------------------------------------------------------- per-scan m/z shift (estimate.scan_mz_shifts)
+@njit(cache=True)
+def bin_scan_counts(off, mz, inten, thr, lmz0, inv_w, nb):
+    """per bin of a logarithmic m/z grid (bin = floor((ln m/z - lmz0) x inv_w), nb bins): the number of scans holding
+    a centroid of at least thr in it"""
+    cnt = np.zeros(nb, np.int32)
+    last = np.full(nb, -1, np.int32)
+    for s in range(len(off) - 1):
+        for p in range(off[s], off[s + 1]):
+            if inten[p] >= thr:
+                k = int((np.log(mz[p]) - lmz0) * inv_w)
+                if k >= 0 and k < nb and last[k] != s:
+                    last[k] = s
+                    cnt[k] += 1
+    return cnt
+
+
+@njit(cache=True, parallel=True)
+def ref_traces(off, mz, inten, ions, ppm, thr, i_max):
+    """(len(ions), n_scans) float64: per ion and scan the m/z of the most intense centroid within ppm of the ion,
+    nan when there is none or it is weaker than thr or at least i_max (too strong to be trusted as a reference)"""
+    n = len(ions)
+    S = len(off) - 1
+    M = np.full((n, S), np.nan)
+    for i in prange(n):
+        t = ions[i]
+        tol = t * ppm * 1e-6
+        for s in range(S):
+            lo = off[s]
+            hi = off[s + 1]
+            b = hi
+            while lo < hi:
+                m = (lo + hi) >> 1
+                if mz[m] < t - tol:
+                    lo = m + 1
+                else:
+                    hi = m
+            best = np.float32(0.0)
+            k = -1
+            p = lo
+            while p < b and mz[p] <= t + tol:
+                if inten[p] > best:
+                    best = inten[p]
+                    k = p
+                p += 1
+            if k >= 0 and best >= thr and best < i_max:
+                M[i, s] = mz[k]
+    return M
+
+
+@njit(cache=True, parallel=True)
+def rolling_ref(M, half, stride, cover):
+    """per ion (row) and scan: the median of the row's values in the scans within half of the nearest multiple of
+    stride (the window moves in steps of stride scans: a reference m/z changes slowly), nan when fewer than cover x
+    the window's scans hold a value"""
+    n, S = M.shape
+    R = np.full((n, S), np.nan)
+    for i in prange(n):
+        buf = np.empty(2 * half + 1)
+        c = 0
+        while c < S:
+            a = max(0, c - half)
+            b = min(S, c + half + 1)
+            k = 0
+            for s in range(a, b):
+                v = M[i, s]
+                if v == v:
+                    buf[k] = v
+                    k += 1
+            if k >= cover * (b - a) and k > 0:
+                med = np.median(buf[:k])
+                s0 = max(0, c - stride // 2)
+                s1 = S if c + stride >= S else c + stride - stride // 2
+                for s in range(s0, s1):
+                    R[i, s] = med
+            c += stride
+    return R
+
+
+@njit(cache=True, parallel=True)
+def fit_scan_shifts(dev, x, sd, min_two, min_one):
+    """per scan (column of dev: the reference ions' deviations in ppm, nan = none), the robust fit dev = a + b x over
+    the ions (x = 1 / sqrt(m/z)): weighted least squares, weight 1 / sd_i^2, refitted five times on the points within
+    3 sd_i of the last fit, starting from the line through the medians of five slices of the x range (sd_i <= 0 for
+    every ion: unweighted, a point is kept within 3 robust sd of that scan's residuals). With fewer than min_two points kept the fit is the constant a (b = 0), with
+    fewer than min_one there is none. Returns per scan (a, b, points kept, the inverse covariance of (a, b) as
+    Sw, Sx, Sxx (weights taken as inverse variances), smallest and largest x kept)."""
+    n, S = dev.shape
+    out = np.zeros((S, 8))
+    known = False
+    for i in range(n):
+        if sd[i] > 0:
+            known = True
+    for s in prange(S):
+        y = np.empty(n)
+        xx = np.empty(n)
+        w = np.empty(n)
+        sg = np.empty(n)
+        m = 0
+        for i in range(n):
+            v = dev[i, s]
+            if v == v:
+                y[m] = v
+                xx[m] = x[i]
+                sg[m] = sd[i] if known else 1.0
+                w[m] = 1.0 / (sg[m] * sg[m])
+                m += 1
+        if m < min_one:
+            continue
+        # start: the line through the medians of five equal slices of the x range (a median over all ions would
+        # follow whichever m/z region holds the most of them, and the ions elsewhere would then count as outliers)
+        a = np.median(y[:m])
+        b = 0.0
+        x0 = xx[:m].min()
+        x1 = xx[:m].max()
+        if m >= min_two and x1 > x0:
+            bx = np.empty(5)
+            by = np.empty(5)
+            nbin = 0
+            buf = np.empty(m)
+            for j in range(5):
+                lo_x = x0 + (x1 - x0) * j / 5.0
+                hi_x = x0 + (x1 - x0) * (j + 1) / 5.0
+                c = 0
+                sx_ = 0.0
+                for i in range(m):
+                    if xx[i] >= lo_x and (xx[i] < hi_x or j == 4):
+                        buf[c] = y[i]
+                        sx_ += xx[i]
+                        c += 1
+                if c >= 3:
+                    bx[nbin] = sx_ / c
+                    by[nbin] = np.median(buf[:c])
+                    nbin += 1
+            if nbin >= 2:
+                mx_ = bx[:nbin].mean()
+                my_ = by[:nbin].mean()
+                den = ((bx[:nbin] - mx_) ** 2).sum()
+                if den > 0:
+                    b = ((bx[:nbin] - mx_) * (by[:nbin] - my_)).sum() / den
+                    a = my_ - b * mx_
+        keep = np.ones(m, np.bool_)
+        r = np.empty(m)
+        nk = m
+        sw = sx = sxx = 0.0
+        xlo = xhi = 0.0
+        for it in range(6):
+            for i in range(m):
+                r[i] = y[i] - a - b * xx[i]
+            # the gate: 3 sd_i; without known sd_i, and for the first fit (the start is rough), 3 robust sd of the
+            # kept residuals when that is wider
+            scale = 0.0
+            if (not known or it == 0) and nk > 0:
+                scale = max(1.4826 * np.median(np.abs(r[:m][keep[:m]])), 0.05)
+            nk = 0
+            for i in range(m):
+                keep[i] = abs(r[i]) <= 3.0 * (max(sg[i], scale) if known else scale)
+                if keep[i]:
+                    nk += 1
+            if nk < min_one or it == 5:
+                break
+            sw = sx = sxx = sy = sxy = 0.0
+            xlo = 1e300
+            xhi = -1e300
+            for i in range(m):
+                if keep[i]:
+                    sw += w[i]
+                    sx += w[i] * xx[i]
+                    sxx += w[i] * xx[i] * xx[i]
+                    sy += w[i] * y[i]
+                    sxy += w[i] * xx[i] * y[i]
+                    if xx[i] < xlo:
+                        xlo = xx[i]
+                    if xx[i] > xhi:
+                        xhi = xx[i]
+            det = sw * sxx - sx * sx
+            if nk >= min_two and det > 1e-12 * sw * sxx:
+                b = (sw * sxy - sx * sy) / det
+                a = (sy - b * sx) / sw
+            else:
+                b = 0.0
+                a = sy / sw
+                sx = 0.0          # a alone: its inverse variance is sw
+                sxx = 0.0
+        if nk < min_one or sw <= 0:
+            continue
+        o = out[s]
+        o[0] = a
+        o[1] = b
+        o[2] = nk
+        o[3] = sw
+        o[4] = sx
+        o[5] = sxx
+        o[6] = xlo
+        o[7] = xhi
+    return out
+
+
+@njit(cache=True, parallel=True)
+def apply_scan_shifts(off, mz, a, b, m_lo, m_hi):
+    """in place: every centroid of scan s moved by -(a[s] + b[s] / sqrt(m)) ppm, m = its m/z held inside
+    [m_lo[s], m_hi[s]] (the range the scan's shift was measured over); the map is increasing, so a scan stays sorted"""
+    for s in prange(len(off) - 1):
+        if a[s] == 0.0 and b[s] == 0.0:
+            continue
+        for p in range(off[s], off[s + 1]):
+            m = min(max(mz[p], m_lo[s]), m_hi[s])
+            mz[p] *= 1.0 - (a[s] + b[s] / np.sqrt(m)) * 1e-6

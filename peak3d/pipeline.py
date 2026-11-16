@@ -58,6 +58,19 @@ def _warm_jit():
                           n_scans=200, dt=0.005, floor=50.0, n_noise=2000, thresh=20.0)
     b = pick_cloud(cloud)
     build_features(cloud, b)
+    # a file with saturation factors hands the kernels per-centroid arrays where this small cloud hands None: compile
+    # those variants here too, once, not in every worker
+    from dataclasses import replace
+    Pw = replace(b.params, sat_lg_top=float(np.log10(cloud.inten.max())), sat_f=[2.0, 1.0, 1.0, 1.0])
+    build_features(cloud, pick_cloud(cloud, Pw))
+    # ... and the per-scan m/z shift (Params.scan_mz), on a cloud with ions that last the whole run
+    from .estimate import scan_mz_shifts
+    from . import kernels as _K
+    c2, _ = make_cloud([Peak(100.0 + 90.0 * i, 0.5, 2e4, 1e4) for i in range(8)] + [Peak(455.0, 0.5, 5e6, 0.05)],
+                       n_scans=200, dt=0.005, floor=50.0, n_noise=2000, thresh=20.0)
+    sh = scan_mz_shifts(c2)
+    if sh is not None:
+        _K.apply_scan_shifts(c2.off, c2.mz, sh["a"], sh["b"], sh["m_lo"], sh["m_hi"])
     # the wide-view gates (Params.wide_background / plateau_edge) run only on candidates that pass the basin gates:
     # compile their kernel whether or not this small cloud has one
     from . import kernels as K
@@ -100,7 +113,7 @@ def _pick_one(job):
     if spectra:
         save_ms2(from_collected(spectra, cloud.polarity), Path(ms2_dir) / f"{stem}.npz")
     tic = time.perf_counter()
-    P = estimate(cloud, overrides=overrides)
+    P = estimate(cloud, overrides=overrides)     # with scan_mz: the scans' m/z shifts are taken out of the cloud here
     t["estimate"] = time.perf_counter() - tic
     if P.scan_gain:
         # correct the scan-wide gain before anything else, then refit what it changes (floor, noise law) on the
@@ -326,6 +339,8 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
                                    "mz_native": df["mz"].values, "scan_lo": df["scan_min"].values.astype(np.int64),
                                    "scan_hi": df["scan_max"].values.astype(np.int64),
                                    "scan_apex": df["scan_apex"].values.astype(np.int64),
+                                   "sat": (df["flags"].fillna("").astype(str).str.contains("saturated").values
+                                           if "flags" in df else np.zeros(len(df), bool)),
                                    "sig": sigma_ppm(a_, b_, np.maximum(df["height"].values, 1e-9),
                                                     fp.get("sat_lg_top", 0.0), fp.get("sat_f") or [])}))
     A = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
@@ -507,6 +522,15 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
               text_formats=MZ_TEXT)
     write_tsv(pd.concat([base[["group_id"]], pd.DataFrame((~detected).astype(np.int8), columns=stems)], axis=1)[keep_g],
               output / "filled_mask.tsv")
+    # saturated: the peak detected in that file has a scan where the file's centroids are distorted by detector
+    # saturation (the "saturated" flag of its features table): its height and area are too low
+    saturated = np.zeros((G, N), bool)
+    if N > 0 and "sat" in A:
+        m = A["sat"].values.astype(bool)
+        saturated[gid[m], A["file"].values[m]] = True
+    write_tsv(pd.concat([base[["group_id"]], pd.DataFrame(saturated.astype(np.int8), columns=stems)], axis=1)[keep_g],
+              output / "saturated_mask.tsv")
+    stage_times["n_saturated_cells"] = int(saturated[keep_g].sum())
     stage_times["n_groups_all"] = int(G)
     stage_times["n_groups_kept"] = int(keep_g.sum())
     return res, cons, stage_times

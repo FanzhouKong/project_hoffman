@@ -14,7 +14,7 @@ This repository holds two things:
 Mosa is the app for `peak3d`: the same program, with a window and a browser interface.
 
 Download the file for your computer from the current release,
-[Mosa v1.2.8](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.8) (all releases:
+[Mosa v1.2.9](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.2.9) (all releases:
 [releases page](https://github.com/FanzhouKong/project_hoffman/releases)). Nothing else to install.
 
 | Computer | File | Start |
@@ -134,6 +134,7 @@ reuse the compiled code.
 | `compound_pairs.tsv` | with `--compounds`: every co-eluting pair that was tested: shape correlation, intensity correlation, mass relation, joined or not |
 | `aligned_feature_area.tsv` | the same table with peak areas |
 | `filled_mask.tsv` | 1 where a value was gap-filled rather than detected |
+| `saturated_mask.tsv` | 1 where the peak detected in that file is saturated: some of its scans are at the detector's ceiling, so its height and area are too low and not proportional to the amount (the feature also carries the flag `saturated` in `features/<file>.tsv`) |
 | `isomer_pairs.tsv` | features at the same m/z proven to be different compounds (isomers): both picked as separate peaks in the same files, in a consistent order; each gap-fills only from its own side of `boundary` (min), so a missing isomer is not filled with its neighbour's peak |
 | `features/<file>.tsv` | every feature of each file, with shape, S/N and quality descriptors |
 | `rt_correction/` | per-file RT warps and a summary of the correction |
@@ -259,8 +260,9 @@ times in seconds and, after `n_filled`, a `gap_filled_files` column: the files w
 than detected, separated by `;` (from `filled_mask.tsv`; a file gap filling found nothing in keeps 0 and is not
 listed). Results of external kernels have no such column. Since 1.2.1 the **Download** menu's **Feature table
 (heights)** and **(areas)** carry the same column after `n_filled`, each from its own values; otherwise they are the
-files as written (all features, retention times in minutes). The tables in the output folder themselves stay
-unchanged.
+files as written (all features, retention times in minutes). Since 1.2.9 a `saturated_files` column follows it in
+all of these: the files in which the feature's peak is saturated (from `saturated_mask.tsv`), whose value is too
+low to quantify with. The tables in the output folder themselves stay unchanged.
 
 **Download candidates** (Features tab, beside Download table; the report has it too) saves the identity-search
 candidates of the listed features that have MS2 as a JSON array of MassWiki search records, the `data` of each row of a
@@ -300,8 +302,15 @@ behaviour). Since 1.2.7 two checks remove pieces of a constant background ion th
 stretch whose measured m/z shifts by 10 to 20 ppm for some seconds (as happens while a saturating compound elutes),
 and the last piece of the ion's plateau before it drops (for example when the sample front arrives). Both follow the
 ion through its m/z shift and reject the candidate when the ion is continuous beside it
-(`--set wide_background=false --set plateau_edge=false` gives the earlier behaviour). The options you are most
-likely to need:
+(`--set wide_background=false --set plateau_edge=false` gives the earlier behaviour). Since 1.2.9 scans whose
+whole mass axis jumped are corrected: on Q-TOF data every ion of a scan can read tens of ppm off for one or two
+scans while a compound saturates the detector, which cut every peak that crossed such a scan into pieces. The shift
+of each scan is measured on the file's background ions and taken out before picking; a file is corrected only when
+at least three scans jumped further than the picker follows an ion from scan to scan, and only if its strong peaks
+then sit closer to their own m/z in those scans (`mz_scan_n`, `mz_scan_jumps`, `mz_scan_gain` in each file's
+`features/*.params.json`; `--set scan_mz=false` gives the earlier behaviour). A saturated peak now reports the m/z
+of its unsaturated flank scans (its top scans read 10 to 20 ppm high) and is marked: the flag `saturated` in the
+file's features table, `saturated_mask.tsv`, and `saturated_files` in the downloaded tables. The options you are most likely to need:
 
 | option | default | meaning |
 |---|---|---|

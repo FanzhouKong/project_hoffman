@@ -20,13 +20,33 @@ SAT_SAME_ION = 3.0     # a trace's calm centroids are one ion when each lies wit
 #                        tolerance, in sd of a difference, beyond which the picker itself refuses a link)
 
 
+# the per-scan m/z shift (scan_mz_shifts)
+MZ_REF_PPM = 60.0      # a reference ion is followed this far from its m/z (a scan's shift reaches 50 ppm at m/z 60)
+MZ_REF_BIN_PPM = 10.0  # m/z grid on which the long-lived ions are found
+MZ_REF_COVER = 0.25    # a reference ion is seen in at least this fraction of the scans ...
+MZ_REF_LOCAL = 0.5     # ... and, to be used in a scan, in half of the scans around it
+MZ_REF_WINDOW = 101    # scans over which an ion's reference m/z is its median (the window moves 10 scans at a time)
+MZ_REF_STRIDE = 10
+MZ_REF_MAX = 500       # reference ions per file, the best covered first
+MZ_REF_FLOOR = 5.0     # a reference centroid is at least this many times the file's intensity floor
+MZ_SCAN_MIN_TWO = 12   # reference ions a scan needs for the two-term shift a + b / sqrt(m/z) ...
+MZ_SCAN_MIN_ONE = 5    # ... and for a constant shift; fewer: the scan is left as it is
+MZ_SCAN_ALPHA = 0.01   # a scan's shift is significant when the chi-square of its (a, b) against no shift (2 d.o.f.)
+#                        has p < MZ_SCAN_ALPHA / the number of scans measured: a file whose mass axis is steady shows
+#                        one such scan by chance once in a hundred files
+MZ_SCAN_MIN_JUMPS = 3  # a file is corrected when this many scans jumped: a significant shift, measured on at least
+#                        MZ_SCAN_MIN_TWO reference ions, larger than the widest m/z step the picker follows from one
+#                        scan to the next in this file (tol_max_ppm): such a scan cuts every trace that crosses it
+
+
 # the benchmark name of the Params defaults (manifest/peak3d_variants.tsv) and the switches that make it on top of the
 # base picker: G scan_gain, L link_da 2 mDa, R narrow_rule local_median, S min_scans_rule local, Z sigma_sat (the m/z
-# error model's saturation factor), W the two wide-view gates wide_background and plateau_edge. The GUI shows it and
-# params.json records it; rename it whenever a default change moves the picker's output
-VARIANT = "GLRSZW"
+# error model's saturation factor), W the two wide-view gates wide_background and plateau_edge, M scan_mz (the m/z
+# shift of scans whose mass axis jumped is taken out). The GUI shows it and params.json records it; rename it
+# whenever a default change moves the picker's output
+VARIANT = "GLRSZWM"
 VARIANT_SETS = {"scan_gain": True, "link_da": 0.002, "narrow_rule": "local_median", "min_scans_rule": "local",
-                "sigma_sat": True, "wide_background": True, "plateau_edge": True}
+                "sigma_sat": True, "wide_background": True, "plateau_edge": True, "scan_mz": True}
 
 
 @dataclass
@@ -61,6 +81,36 @@ class Params:
     sat_f: list = field(default_factory=list)
     sat_n: list = field(default_factory=list)
     sat_base: float = float("nan")
+    # scan_mz: the mass axis of a single scan can sit several ppm (tens, while a compound saturates the detector) from
+    # that of its neighbours: every ion of the scan moves together, by a + b / sqrt(m/z) ppm, whatever its intensity,
+    # and every trace that crosses the scan is cut there. With scan_mz each scan's (a, b) is measured on the file's
+    # long-lived ions (background ions seen in at least a quarter of the scans: each one's m/z in the scan against
+    # its median over the ~100 scans around; scan_mz_shifts). A file is corrected when at least 3 scans jumped, i.e.
+    # are shifted, significantly (12 reference ions or more, p < 0.01 / the number of scans), by more than the widest
+    # step the picker follows between scans (tol_max_ppm): then every centroid of every measured scan is moved back,
+    # in place (estimate; the cache holds the corrected cloud), provided the file's strongest ions in the jumped scans
+    # then sit closer to their own traces than before: the shifts are read off background ions, and a file whose
+    # eluting ions do not share them is left alone (mz_scan_gain: their median distance from the trace in the jumped
+    # scans with the correction / without; kept below 1, and 1 when no strong ion crosses a jumped scan). A file
+    # without jumped scans is left exactly as it is (the scan-to-scan jitter of a steady instrument is part of its
+    # error model already), and the error model (a, b) stays the one fitted before the correction: no tolerance gets
+    # tighter.
+    # mz_scan_n: scans corrected (0 = file untouched), mz_scan_fit: scans with enough reference ions, mz_scan_jumps:
+    # scans that jumped, mz_scan_sd / mz_scan_max: robust sd and largest size of the scans' shifts (ppm, each at the
+    # end of its m/z range where it is larger), n_mz_ref: reference ions
+    # Default on since 2026-11-16 (variant GLRSZWM, Mosa 1.2.9: on six Agilent Q-TOF plasma files, 25 to 46 jumped
+    # scans each, the features above 1e6 counts left with a piece cut off went from 20 to 0 and the area CV of the
+    # strongest features over three injections of one sample from a median 0.144 to 0.112; none of the 1,035 files of
+    # the 23 benchmark runs has a jumped scan, so their output and every truth score are unchanged; 0.2 s per file
+    # for the measurement, 0.5 s when the file is corrected)
+    scan_mz: bool = True
+    mz_scan_n: int = 0
+    mz_scan_fit: int = 0
+    mz_scan_jumps: int = 0
+    mz_scan_sd: float = 0.0
+    mz_scan_max: float = 0.0
+    mz_scan_gain: float = 1.0
+    n_mz_ref: int = 0
     # derived
     tol_max_ppm: float = 10.0
     K: int = 2
@@ -661,6 +711,152 @@ def satellite_offsets(cloud: Cloud, seeds: np.ndarray, scan_of: np.ndarray, reac
     return float(np.percentile(found, 95)), len(found)
 
 
+def scan_mz_shifts(cloud: Cloud):
+    """The shift of every MS1 scan's mass axis against the scans around it, read off the file's long-lived ions.
+    Reference ions: m/z (10 ppm grid) holding a centroid of at least MZ_REF_FLOOR x the intensity floor in at least
+    MZ_REF_COVER of the scans, the best covered MZ_REF_MAX of them, none with another within 2 x MZ_REF_PPM (its
+    window would hold two ions). Each is followed through the run (per scan the most intense centroid within
+    MZ_REF_PPM; a centroid within a decade of the file's strongest is not used, its own m/z may be distorted by
+    saturation), and its reference m/z in a scan is the median over the MZ_REF_WINDOW scans around it, where it is
+    seen in at least MZ_REF_LOCAL of them. A scan's shift is the robust fit of the ions' deviations (ppm) to
+    a + b / sqrt(m/z): what a time-of-flight axis does when its offset (b) and its scale (a) move. The fit is done
+    twice: unweighted first, then each ion weighted by 1 / sd^2 of its own residuals over the run (a weak or
+    interfered ion counts for less), so the covariance of (a, b), and with it the significance of a scan's shift,
+    comes from the file. Scans with fewer than MZ_SCAN_MIN_TWO usable ions get a constant, fewer than
+    MZ_SCAN_MIN_ONE none.
+    Returns None when the file has too few reference ions, else a dict: a, b (per scan, 0 = no fit), n (ions used),
+    chi2 (of (a, b) against no shift), m_lo, m_hi (the m/z range the scan's ions span: the shift is not extrapolated
+    beyond it), size (the shift in ppm at the end of that range where it is larger), n_ref."""
+    from . import kernels as K
+    S, N = cloud.n_scans, cloud.n_points
+    if S < MZ_REF_WINDOW or N == 0 or not cloud.mz.min() > 0:      # the m/z grid is logarithmic
+        return None
+    off, mz, inten = cloud.off, cloud.mz, cloud.inten
+    thr = MZ_REF_FLOOR * float(np.percentile(inten, 1))
+    lmz0 = float(np.log(mz.min()))
+    w = MZ_REF_BIN_PPM * 1e-6
+    nb = int((np.log(mz.max()) - lmz0) / w) + 2
+    cnt = K.bin_scan_counts(off, mz, inten, np.float32(thr), lmz0, 1.0 / w, nb).astype(np.int64)
+    c3 = cnt.copy()
+    c3[1:] += cnt[:-1]
+    c3[:-1] += cnt[1:]
+    peak = (c3 >= MZ_REF_COVER * S) & (cnt >= np.r_[0, cnt[:-1]]) & (cnt > np.r_[cnt[1:], 0])
+    k = np.flatnonzero(peak)
+    if len(k) > MZ_REF_MAX:
+        k = np.sort(k[np.argsort(-c3[k], kind="stable")[:MZ_REF_MAX]])
+    ions = np.exp(lmz0 + (k + 0.5) * w)
+    if len(ions) > 1:
+        gap = np.diff(ions) / ions[1:] * 1e6 > 2.0 * MZ_REF_PPM
+        ions = ions[np.r_[True, gap] & np.r_[gap, True]]
+    if len(ions) < MZ_SCAN_MIN_ONE:
+        return None
+    M = K.ref_traces(off, mz, inten, ions, MZ_REF_PPM, np.float32(thr), np.float32(0.1 * float(inten.max())))
+    R = K.rolling_ref(M, MZ_REF_WINDOW // 2, MZ_REF_STRIDE, MZ_REF_LOCAL)
+    dev = (M - R) / R * 1e6
+    x = 1.0 / np.sqrt(ions)
+    fit = K.fit_scan_shifts(dev, x, np.zeros(len(ions)), MZ_SCAN_MIN_TWO, MZ_SCAN_MIN_ONE)
+    res = dev - fit[:, 0][None, :] - fit[:, 1][None, :] * x[:, None]
+    res[:, fit[:, 2] == 0] = np.nan
+    ok = np.isfinite(res).sum(axis=1) >= 20
+    if ok.sum() < MZ_SCAN_MIN_ONE:
+        return None
+    with np.errstate(all="ignore"):
+        sd = 1.4826 * np.nanmedian(np.abs(res[ok]), axis=1)
+    sd = np.maximum(sd, 0.05)
+    dev, x, ions = dev[ok], x[ok], ions[ok]
+    fit = K.fit_scan_shifts(dev, x, sd, MZ_SCAN_MIN_TWO, MZ_SCAN_MIN_ONE)
+    a, b, n = np.ascontiguousarray(fit[:, 0]), np.ascontiguousarray(fit[:, 1]), fit[:, 2].astype(np.int64)
+    chi2 = fit[:, 3] * a * a + 2.0 * fit[:, 4] * a * b + fit[:, 5] * b * b
+    done = n > 0
+    m_lo = np.where(done, 1.0 / np.maximum(fit[:, 7], 1e-12) ** 2, 0.0)
+    m_hi = np.where(done, 1.0 / np.maximum(fit[:, 6], 1e-12) ** 2, 0.0)
+    lo, hi = a + b * fit[:, 7], a + b * fit[:, 6]              # the shift at the low and the high end of the m/z range
+    size = np.where(np.abs(lo) >= np.abs(hi), lo, hi)
+    return dict(a=a, b=b, n=n, chi2=chi2, m_lo=m_lo, m_hi=m_hi, size=size, n_ref=int(len(ions)))
+
+
+def correct_scan_mz(cloud: Cloud, jump_ppm: float, check=None) -> dict:
+    """Params.scan_mz: measure every scan's m/z shift (scan_mz_shifts) and, when at least MZ_SCAN_MIN_JUMPS scans
+    jumped (a significant shift of more than jump_ppm somewhere in the scan's m/z range, read off at least
+    MZ_SCAN_MIN_TWO reference ions), move the centroids of every measured scan back, in place. check (optional): a
+    function of the jumped scans (boolean per scan) returning (deviation, n) of the file's strongest ions in those
+    scans (jump_deviation); it is called before and after the move, and the move is undone unless the deviation got
+    smaller: the reference ions are background ions, and the correction is only right when the ions that elute
+    share their scans' shifts (no strong ion in any jumped scan: nothing to test, the move stays). A file without
+    jumps is left untouched. Returns the Params fields that record it (mz_scan_*, n_mz_ref)."""
+    from . import kernels as K
+    info = dict(mz_scan_n=0, mz_scan_fit=0, mz_scan_jumps=0, mz_scan_sd=0.0, mz_scan_max=0.0, mz_scan_gain=1.0, n_mz_ref=0)
+    sh = scan_mz_shifts(cloud)
+    if sh is None:
+        return info
+    done = sh["n"] > 0
+    info["n_mz_ref"], info["mz_scan_fit"] = sh["n_ref"], int(done.sum())
+    if not done.any():
+        return info
+    size = sh["size"][done]
+    chi2_min = 2.0 * np.log(done.sum() / MZ_SCAN_ALPHA)            # p = exp(-chi2 / 2) with 2 d.o.f.
+    jumped = done & (sh["chi2"] > chi2_min) & (sh["n"] >= MZ_SCAN_MIN_TWO) & (np.abs(sh["size"]) > jump_ppm)
+    info["mz_scan_jumps"] = int(jumped.sum())
+    info["mz_scan_sd"] = float(1.4826 * np.median(np.abs(size - np.median(size))))
+    info["mz_scan_max"] = float(np.abs(size).max())
+    if info["mz_scan_jumps"] < MZ_SCAN_MIN_JUMPS:
+        return info
+    if check is None:
+        K.apply_scan_shifts(cloud.off, cloud.mz, sh["a"], sh["b"], sh["m_lo"], sh["m_hi"])
+    else:
+        before, n = check(jumped)
+        raw = cloud.mz.copy()
+        K.apply_scan_shifts(cloud.off, cloud.mz, sh["a"], sh["b"], sh["m_lo"], sh["m_hi"])
+        if n:
+            after, _ = check(jumped)
+            info["mz_scan_gain"] = after / before if before > 0 else float("inf")
+            if not after < before:
+                cloud.mz[:] = raw
+                return info
+    info["mz_scan_n"] = int(done.sum())
+    return info
+
+
+def jump_deviation(cloud: Cloud, seed_idx: np.ndarray, scan_of_seed: np.ndarray, reach_scans: np.ndarray,
+                   jumped: np.ndarray, ppm: float = SAT_PPM):
+    """How far the strongest eluting ions' centroids in the jumped scans (boolean per scan) sit from their own trace:
+    each strong ion is followed in a +/- ppm window (the contiguous scans around its apex), its m/z is the median of
+    its centroids in the scans that did not jump (at least 3), and every centroid of it in a jumped scan gives one
+    deviation. Only ions that rise and fall count (the trace reaches a tenth of its apex or less): a constant ion is
+    a background ion like those the shifts were measured on, and would only confirm them. Returns (median |deviation| in ppm, number of centroids); (0, 0) when no strong ion crosses a jumped
+    scan. Before the correction this is the size of the jumps, after it what is left of them, if the eluting ions
+    share their scan's shift."""
+    S = cloud.n_scans
+    out = []
+    for p, s, reach in zip(seed_idx, scan_of_seed, reach_scans):
+        s0, s1 = max(0, int(s) - int(reach)), min(S, int(s) + int(reach) + 1)
+        if not jumped[s0:s1].any():
+            continue
+        idx = cloud.eic_argmax(cloud.mz[p], ppm, s0, s1)
+        k = int(s) - s0
+        if idx[k] < 0:
+            continue
+        lo = k
+        while lo - 1 >= 0 and idx[lo - 1] >= 0:
+            lo -= 1
+        hi = k
+        while hi + 1 < len(idx) and idx[hi + 1] >= 0:
+            hi += 1
+        j = jumped[s0 + lo:s0 + hi + 1]
+        if not j.any() or (~j).sum() < 3:
+            continue
+        I = cloud.inten[idx[lo:hi + 1]]
+        if I.min() > 0.1 * I.max():           # no rise and fall: a background ion, as the reference ions are
+            continue
+        mzs = cloud.mz[idx[lo:hi + 1]]
+        ref = float(np.median(mzs[~j]))
+        out.append(np.abs(mzs[j] - ref) / ref * 1e6)
+    if not out:
+        return 0.0, 0
+    d = np.concatenate(out)
+    return float(np.median(d)), int(len(d))
+
+
 def seed_ions(cloud: Cloud, n_seeds: int = 2000):
     """the strongest distinct ions (estimate's seeds) and their apex scans"""
     seeds = strongest_distinct(cloud, n_seeds)
@@ -673,8 +869,9 @@ def apply_scan_gains(cloud: Cloud, gains: np.ndarray) -> None:
 
 
 def prepare(cloud: Cloud, overrides: dict | None = None) -> Params:
-    """the picker's parameters for this cloud (estimate), and with scan_gain on: every scan divided by its gain, in
-    place, then the floor and noise law refit on the corrected cloud. Call before pick_cloud."""
+    """the picker's parameters for this cloud (estimate, which with scan_mz on takes the scans' m/z shifts out of the
+    cloud, in place), and with scan_gain on: every scan divided by its gain, in place, then the floor and noise law
+    refit on the corrected cloud. Call before pick_cloud."""
     P = estimate(cloud, overrides=overrides)
     if P.scan_gain:
         g, g_sd, g_n = scan_gains(cloud, P)
@@ -735,7 +932,8 @@ def variant_label(overrides: dict | None = None) -> str:
 
 def estimate(cloud: Cloud, n_seeds: int = 2000, overrides: dict | None = None) -> Params:
     """overrides: fixed Params fields to change before estimation (derived values follow them); a field
-    the file's own measurements set cannot be overridden"""
+    the file's own measurements set cannot be overridden. With scan_mz the cloud's m/z are corrected in place
+    (correct_scan_mz) when the file has scans whose mass axis jumped; nothing else here changes the cloud."""
     overrides = dict(overrides or {})
     P = Params(**overrides)
     S = cloud.n_scans
@@ -763,6 +961,14 @@ def estimate(cloud: Cloud, n_seeds: int = 2000, overrides: dict | None = None) -
     reach = np.where(reach == 8.0, max(8.0, 3.0 * P.fwhm_scans), reach)
     traces = trace_deviations(cloud, seeds, scan_of, reach)
     P.sig_a, P.sig_b, P.n_sigma_points = fit_sigma(cloud, seeds, scan_of, reach, traces=traces)
+    if P.scan_mz:
+        # scans whose mass axis jumped further than the picker follows an ion from scan to scan (the cap derived
+        # below from a and b): take every scan's shift out of the cloud (in place), and keep that only when the
+        # strongest ions' centroids in the jumped scans then sit closer to their own traces. a and b stay as fitted.
+        cap = float(np.clip(4 * sigma_ppm(P.sig_a, P.sig_b, P.floor), 5.0, 30.0))
+        info = correct_scan_mz(cloud, cap, lambda jumped: jump_deviation(cloud, seeds, scan_of, reach, jumped))
+        for k, v in info.items():
+            setattr(P, k, v)
     P.noise_s0, P.noise_c, P.noise_r, P.n_noise_pts, P.n_noise_bins = fit_intensity_noise(cloud, seeds, scan_of, reach)
     if P.sigma_sat:
         P.sat_lg_top, P.sat_f, P.sat_n, P.sat_base = fit_saturation(cloud, seeds, scan_of, reach, P.sig_a, P.sig_b)

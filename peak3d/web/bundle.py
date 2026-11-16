@@ -835,6 +835,11 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
             status = np.where(p == 2, 3, np.where(p == 1, 2, status)).astype(np.uint8)
         arrays["m_q"] = qv.astype(np.uint16).reshape(-1)
         arrays["m_status"] = status.reshape(-1)
+        # saturated: 1 where the peak detected in that file is saturated (saturated_mask.tsv, written since 1.2.9)
+        sm = _read(output / "saturated_mask.tsv")
+        if sm is not None and all(s in sm for s in stems):
+            arrays["m_sat"] = (sm.set_index("group_id").reindex(arrays["g_id"])[stems].fillna(0).to_numpy(np.int8) > 0) \
+                .astype(np.uint8).reshape(-1)
         # presence: the status tells detected cells (3) from gap-filled ones (1, 2); without presence_mask.tsv
         # (external kernels) every cell with a value is 1
         matrix = {"log10_lo": lo, "log10_hi": hi, "presence": bool(from_mask)}

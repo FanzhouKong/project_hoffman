@@ -48,9 +48,9 @@ def test_estimate_rules_for_narrow_peaks():
 
 def test_defaults_are_the_named_variant():
     P = Params()
-    assert VARIANT == "GLRSZW" and {k: getattr(P, k) for k in VARIANT_SETS} == VARIANT_SETS
-    assert variant_label() == variant_label({"narrow_rule": "local_median"}) == "GLRSZW"     # a default is no change
-    assert variant_label({"scan_gain": False, "merge_test": "noise"}) == "GLRSZW + merge_test=noise scan_gain=False"
+    assert VARIANT == "GLRSZWM" and {k: getattr(P, k) for k in VARIANT_SETS} == VARIANT_SETS
+    assert variant_label() == variant_label({"narrow_rule": "local_median"}) == "GLRSZWM"     # a default is no change
+    assert variant_label({"scan_gain": False, "merge_test": "noise"}) == "GLRSZWM + merge_test=noise scan_gain=False"
 
 
 def test_pick_one_estimates_each_file_once(tmp_path, monkeypatch):

@@ -83,6 +83,19 @@ def point_sigma(inten, P) -> np.ndarray:
     return sig
 
 
+SAT_FLAG = 2.0         # a peak is flagged saturated when a scan of it lies where the file's m/z error at least doubles
+
+
+def point_sat_factor(inten, P):
+    """per centroid, the saturation factor of the m/z error model at its intensity (float32; 1 below the top decade);
+    None in a file without factors"""
+    if not len(P.sat_f):
+        return None
+    f = np.ones(len(inten), np.float32)
+    K.apply_sat_factor(f, inten, P.sat_lg_top, np.asarray(P.sat_f, np.float64), SAT_BINS)
+    return f
+
+
 def point_cap_factor(inten, P):
     """per centroid, the factor on the neighbour search cap in a file with saturation factors (Params.sigma_sat): its
     own factor, the search reaching SAT_PPM at most (further than that no trace was looked at when the factors were
@@ -163,7 +176,8 @@ def pick_cloud(cloud: Cloud, params: Params | None = None) -> Basins:
     sel = np.flatnonzero((smax2 - smin2 + 1 >= ms) & (npts2 >= ms))
     order, boff = K.sort_by_label(lab2, B2)
     stats = K.basin_stats(sel, order, boff, scan_of, nbr, mz, inten, eff, rt, noise2, P.fwhm_med, MAX_WIDTH_FWHM,
-                          P.noise_c, P.noise_r, P.k_valley, P.rep_raw, P.bridge_scans, P.bridge_frac)
+                          P.noise_c, P.noise_r, P.k_valley, P.rep_raw, P.bridge_scans, P.bridge_frac,
+                          point_sat_factor(inten, P), sig, SAT_FLAG)
     t["stats"] = time.perf_counter() - tic
     t["n_edges"] = int(n_edges)
     return Basins(stats=stats, persistence=persistence[sel], noise=noise2[sel], basin_id=sel, lab=lab2,

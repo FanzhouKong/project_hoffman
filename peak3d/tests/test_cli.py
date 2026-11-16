@@ -54,7 +54,7 @@ def test_end_to_end_process_and_align(tmp_path):
     out = tmp_path / "out"
     r = _run("process", "--input", str(d), "--output", str(out), "--cores", "2", "--keep-cache", "--holdout")
     assert r.returncode == 0, r.stderr + r.stdout
-    for f in ["aligned_feature_table.tsv", "aligned_feature_area.tsv", "filled_mask.tsv", "params.json",
+    for f in ["aligned_feature_table.tsv", "aligned_feature_area.tsv", "filled_mask.tsv", "saturated_mask.tsv", "params.json",
               "features/S0.tsv", "features/S1.tsv", "features/S2.tsv", "features/manifest.tsv",
               "rt_correction/S0.tsv", "rt_correction/summary.tsv", "rt_correction/anchors.tsv",
               "qc/drift_curves.png", "qc/anchor_residuals.png", "qc/presence_hist.png", "qc/holdout.tsv"]:
@@ -78,7 +78,7 @@ def test_end_to_end_process_and_align(tmp_path):
     others = s[s["role"] != "medoid"]
     assert (others["mad_after_s"] < others["mad_before_s"]).all()
     p = json.loads((out / "params.json").read_text())
-    assert p["alignment"] == "ok" and "stage_times_s" in p and p["variant"] == "GLRSZW"
+    assert p["alignment"] == "ok" and "stage_times_s" in p and p["variant"] == "GLRSZWM"
     # heights are untouched by alignment: features table height equals the matrix entry
     f0 = pd.read_csv(out / "features/S0.tsv", sep="\t")
     g = f0.iloc[0]
@@ -88,7 +88,7 @@ def test_end_to_end_process_and_align(tmp_path):
     r = _run("align", "--output", str(out2), "--no-rt-correction", "--no-gap-fill")
     assert r.returncode == 0, r.stderr + r.stdout
     p2 = json.loads((out / "params.json").read_text())
-    assert p2["alignment"] == "disabled" and p2["variant"] == "GLRSZW"     # align keeps the variant that picked
+    assert p2["alignment"] == "disabled" and p2["variant"] == "GLRSZWM"     # align keeps the variant that picked
     m = pd.read_csv(out / "filled_mask.tsv", sep="\t")
     t2 = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
     assert ((t2[["S0", "S1", "S2"]].values == 0) >= m[["S0", "S1", "S2"]].values.astype(bool)).all()
@@ -145,3 +145,39 @@ def test_demo(tmp_path):
     assert set(best) == {c.name for c in COMPOUNDS}
     leu = ids[(ids["spectrum"] == "consensus_denoised") & ids["name"].isin(["L-Leucine", "L-Isoleucine"])]
     assert leu.sort_values("rank")["name"].tolist() == ["L-Leucine", "L-Isoleucine"]
+
+
+def test_saturated_peak_in_the_aligned_output(tmp_path):
+    """1.2.9: a peak whose top scans sit at the detector's ceiling (their m/z 25-45 ppm high) is one row of the aligned
+    table at its flank m/z, flagged "saturated" in each file's features table and marked in saturated_mask.tsv"""
+    rng = np.random.default_rng(0)
+    peaks = [Peak(205.0972, 1.5, 7.0e6, 0.02)]
+    peaks += [Peak(float(rng.uniform(100, 900)), float(rng.uniform(0.2, 2.8)), float(10 ** rng.uniform(3.0, 5.5)), 0.02)
+              for _ in range(300)]
+    peaks += [Peak(float(rng.uniform(100, 900)), float(rng.uniform(0.2, 2.8)), float(10 ** rng.uniform(5.6, 6.9)), 0.02)
+              for _ in range(160)]
+    d = tmp_path / "data"
+    d.mkdir()
+    for k in range(3):
+        cloud, _ = make_cloud(peaks, n_scans=600, dt=DT, sig_a=3.0, sig_b=150.0, thresh=150.0, floor=200.0, n_noise=20000,
+                              seed=k, name=f"S{k}", sat_I=2.0e6, sat_ppm=60.0)
+        write_mzml(cloud, d / f"S{k}.mzML")
+    out = tmp_path / "out"
+    r = _run("process", "--input", str(d), "--output", str(out), "--cores", "2")
+    assert r.returncode == 0, r.stderr + r.stdout
+    t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
+    m = pd.read_csv(out / "saturated_mask.tsv", sep="\t")
+    stems = ["S0", "S1", "S2"]
+    assert list(m.columns) == ["group_id", *stems] and list(m["group_id"]) == list(t["group_id"])
+    row = t[(np.abs(t["mz"] - 205.0972) / 205.0972 * 1e6 < 60) & (np.abs(t["rt"] - 1.5) < 0.1)]
+    assert len(row) == 1 and abs(row["mz"].iloc[0] - 205.0972) / 205.0972 * 1e6 < 3.0
+    assert (row[stems].values > 6.0e6).all()
+    assert m.loc[row.index[0], stems].tolist() == [1, 1, 1]
+    # only strong peaks are marked, and only where a peak was detected
+    marked = m[stems].values.astype(bool)
+    assert 20 * 3 <= marked.sum() < 0.5 * marked.size
+    assert t[stems].values[marked].min() > 2.0e6
+    f0 = pd.read_csv(out / "features" / "S0.tsv", sep="\t")
+    sat = f0["flags"].fillna("").str.contains("saturated")
+    assert sat.sum() == marked[:, 0].sum() or sat.sum() >= marked[:, 0].sum()      # a flagged feature of a dropped group is not in the mask
+    assert f0.loc[sat, "height"].min() > 2.0e6
