@@ -1,4 +1,4 @@
-"""Command line: peak3d {process,pick,align,identify,external,demo,report,gui} ...   (or python -m peak3d ...)
+"""Command line: peak3d {process,pick,align,identify,external,gc,demo,report,gui} ...   (or python -m peak3d ...)
 
 process:  pick every mzML in --input, align the runs on their own credible features, group them
           into one table, gap-fill, map MS2 spectra to the features, write QC and report.html -> --output
@@ -7,6 +7,8 @@ pick:     per-file feature tables only
 align:    re-run alignment/grouping/gap-fill from an existing output (features/ + .cache/)
 identify: (re)run the identity search of an existing output against an .msp or .pkl library
 external: run asari or MassCube instead of the peak3d picker, into the same output layout
+gc:       GC-MS (electron ionisation), on an existing output: deconvolve each run's ions into compounds and their
+          spectra, match them across files, retention index from an alkane or FAME ladder, EI library search -> OUT/gc/
 demo:     write three small synthetic LC-MS/MS runs and a library, and process them (checks an installation)
 report:   (re)write report.html for an existing output
 gui:      local web app: choose folders, run, and browse results in the browser
@@ -46,6 +48,8 @@ def _unit(v):
     return x
 
 
+MODE_CHOICES = ["lc", "gc"]     # estimate.PROFILES (not imported here: the parser is built without numba)
+
 NO_KEEP_CACHE = ("delete the point-cloud cache (.cache/, about the size of the mzML data) at the end; by default it is "
                  "kept for the viewer's Show MS1 and for `peak3d align`")
 
@@ -62,6 +66,10 @@ def build_parser():
                        help="keep only this polarity (required for polarity-switching files)")
         p.add_argument("--model", type=Path, default=None, help="pickled re-scorer (optional)")
         p.add_argument("--keep-rejected", action="store_true", help="also write rejected candidates")
+        p.add_argument("--mode", choices=MODE_CHOICES, default="lc",
+                       help="acquisition mode: lc (default), or gc for GC-MS with electron ionisation, where a "
+                            "fragment ion riding on a continuous background of the same ion is kept as a peak "
+                            "(a --set goes on top of the mode's settings)")
         p.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
                        help="override a fixed picker parameter, e.g. --set merge_test=noise (repeatable)")
 
@@ -203,6 +211,31 @@ def build_parser():
                         "folder when that one is not writable); a file converted there earlier is reused")
     p.add_argument("--cores", type=_positive(int), default=1, help="conversions at a time (default 1)")
 
+    p = sub.add_parser("gc", help="GC-MS (EI) stages on an existing output: deconvolution into compounds, retention "
+                                   "index, EI library search (writes <output>/gc/)")
+    p.add_argument("output", type=Path, help="a peak3d output folder (features/ and .cache/ of process or pick)")
+    p.add_argument("--cores", type=_positive(int), default=1, help="worker processes (default 1)")
+    p.add_argument("--cache-dir", type=Path, default=None, help="point-cloud cache (default <output>/.cache)")
+    p.add_argument("--ri-ladder", choices=["alkane", "fame"], default=None,
+                   help="find this retention-index ladder in the runs: n-alkanes (RI = 100 x carbons) or the FiehnLib "
+                        "FAME markers")
+    p.add_argument("--ri-carbons", default=None, metavar="LIST",
+                   help='carbon numbers of the ladder, e.g. "10-40" or "8,9,10,12-30:2" (default: C8-C30 FiehnLib set '
+                        "for fame; for alkane, only compounds whose molecular ion names their carbon number)")
+    p.add_argument("--ri-table", type=Path, default=None,
+                   help="a ladder table instead of finding one: columns rt (minutes) or rt_s, and ri or carbon")
+    p.add_argument("--library", type=Path, nargs="+", action="extend", default=None,
+                   help="EI spectral library, .msp (unit-mass or accurate-mass); several are searched in turn")
+    p.add_argument("--min-similarity", type=_unit, default=0.7,
+                   help="match score at which a compound's best hit becomes its annotation (default 0.7)")
+    p.add_argument("--ri-tol", type=_positive(float), default=None,
+                   help="retention-index window of the search (default 20 for alkane, 3000 for FAME indices)")
+    p.add_argument("--ri-type", choices=["semi", "std", "polar"], default="semi",
+                   help="which index of a NIST record to use: semi-standard non-polar (default), standard non-polar, polar")
+    p.add_argument("--min-presence", type=_positive(int), default=2,
+                   help="a compound is reported when found in at least this many files (capped at the file count; "
+                        "default 2)")
+
     p = sub.add_parser("demo", help="process three synthetic LC-MS/MS runs and search a demo library (checks an installation)")
     p.add_argument("--output", type=Path, required=True, help="writes OUT/demo_mzml/, OUT/demo_library.msp and OUT/peak3d_out/")
     p.add_argument("--cores", type=_positive(int), default=1)
@@ -334,6 +367,28 @@ def main(argv=None):
         return
     if args.cmd == "convert":
         return _convert_command(args)
+    if args.cmd == "gc":
+        from .gc import pipeline as gc_pipeline
+        t0 = time.perf_counter()
+        if not (args.output / "features").is_dir():
+            sys.exit(f"not a peak3d output folder: {args.output}")
+        for lib in args.library or []:
+            if not lib.expanduser().is_file():
+                sys.exit(f"--library: no such file: {lib}")
+        try:
+            picked = json.loads((args.output / "params.json").read_text()).get("mode", "lc")
+        except (OSError, ValueError):
+            picked = None
+        if picked not in (None, "gc"):
+            print(f"[peak3d] gc: this output was picked in {picked} mode; `peak3d process --mode gc` also keeps "
+                  "fragment peaks that ride on a background of the same ion", flush=True)
+        try:
+            gc_pipeline.run(args.output, args.cores, args.cache_dir, args.ri_ladder, args.ri_carbons, args.ri_table,
+                            args.library, args.min_similarity, args.ri_tol, args.ri_type, args.min_presence)
+        except (FileNotFoundError, ValueError) as e:
+            sys.exit(str(e))
+        print(f"[peak3d] gc: {args.output / 'gc' / 'compounds.tsv'}; done in {time.perf_counter() - t0:.1f} s", flush=True)
+        return
     if args.cmd == "addon":
         from . import addons
         if args.action == "status":

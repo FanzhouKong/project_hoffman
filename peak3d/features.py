@@ -110,7 +110,7 @@ def ridge_ratio(df: pd.DataFrame, cloud: Cloud, P: Params) -> dict:
     n = len(df)
     if n == 0:
         return {"ridge_ratio": np.zeros(0), "background_ratio": np.zeros(0), "ripple_ratio": np.zeros(0),
-                "far_level": np.zeros(0)}
+                "far_level": np.zeros(0), "floor_rel": np.zeros(0), "ridge_net": np.zeros(0)}
     # window scale: the feature's own width, floored at the file's median width and capped at ridge_w_cap
     # median widths, so a ridge segment many widths long is judged right beside itself
     dt = df["dt_local"].values if "dt_local" in df else P.dt      # width_rule "time": the local scan interval
@@ -122,6 +122,31 @@ def ridge_ratio(df: pd.DataFrame, cloud: Cloud, P: Params) -> dict:
     far = np.maximum(near + 2, np.round(RIDGE_FAR * w)).astype(np.int64)
     L = K.side_levels(cloud.off, cloud.mz, cloud.inten, q_mz, q_tol, sa, near, far)
     return ratios_from_levels(L, df["height"].values)
+
+
+NET_COLUMNS = ("floor_rel", "ridge_net")       # of ratios_from_levels; columns only under background_rule "net"
+
+
+def net_width(df: pd.DataFrame, cloud: Cloud, P: Params) -> np.ndarray:
+    """FWHM (minutes) of each candidate above its ion's own level (Params.background_rule "net"): the width of its
+    chromatogram at floor + half of (height - floor), floor = floor_rel x height, the trace followed up to six
+    widths of ridge_ratio's window scale to either side. NaN where it does not come down to that level on both
+    sides."""
+    if len(df) == 0:
+        return np.zeros(0)
+    dt = df["dt_local"].values if "dt_local" in df else P.dt
+    w = np.minimum(np.maximum(df["fwhm"].values, P.fwhm_med), P.ridge_w_cap * P.fwhm_med) / dt
+    q_mz = df["mz"].values.astype(np.float64)
+    q_tol = q_mz * np.maximum(3.0 * df["sig_apex"].values + 1.0, RIDGE_MIN_PPM) * 1e-6
+    h = df["height"].values.astype(np.float64)
+    half = h * (0.5 + 0.5 * df["floor_rel"].values)
+    reach = np.maximum(3, np.round(RIDGE_FAR * w)).astype(np.int64)
+    X = K.net_half_width(cloud.off, cloud.mz, cloud.inten, q_mz, q_tol, df["scan_apex"].values.astype(np.int64), half, reach)
+    scans = np.arange(cloud.n_scans, dtype=np.float64)
+    ok = np.isfinite(X).all(axis=1)
+    out = np.full(len(df), np.nan)
+    out[ok] = np.interp(X[ok, 1], scans, cloud.rt) - np.interp(X[ok, 0], scans, cloud.rt)
+    return out
 
 
 WIDE_FOREIGN_MAX = 0.2   # a second ion in more than this share of the candidate's scans: the wide view is not judged
@@ -162,7 +187,9 @@ def wide_gate(cand: pd.DataFrame, P: Params) -> np.ndarray:
     if P.plateau_edge:
         why[alone & (cand["plateau_level"].values >= PLATEAU_LEVEL) & (cand["plateau_dip"].values >= PLATEAU_DIP)] = "plateau_edge"
     if P.wide_background:
-        why[alone & (cand["background_wide"].values > BACKGROUND_MAX)] = "wide_background"
+        # a peak kept above its ion's own level (on_background) has that level beside it by construction
+        own = cand["on_background"].values.astype(bool) if "on_background" in cand else np.zeros(len(cand), bool)
+        why[alone & (cand["background_wide"].values > BACKGROUND_MAX) & ~own] = "wide_background"
     return why
 
 
@@ -192,8 +219,12 @@ def ratios_from_levels(L: np.ndarray, height: np.ndarray) -> dict:
     # localisation: the ion's typical level where it is present, 2 to 6 widths out on the cleaner side
     mednz = np.where(usable, L[:, :, K.SL_MEDNZ], np.inf)
     far_level = np.where(usable.any(axis=1), np.min(mednz, axis=1), 0.0) / h
+    # the peak above the ion's own level (background_rule "net"): that level, and how often the trace on that side
+    # rises above it by a share of the peak's own rise
+    q90 = np.where(any_side, L[rows, c, K.SL_Q90], 0.0)
+    ridge_net = np.where(rise > 0, (q90 - lvl) / np.where(rise > 0, rise, 1.0), np.inf)
     return {"ridge_ratio": lower_side(K.SL_Q90), "background_ratio": lower_side(K.SL_Q25),
-            "ripple_ratio": ripple, "far_level": far_level}
+            "ripple_ratio": ripple, "far_level": far_level, "floor_rel": lvl / h, "ridge_net": ridge_net}
 
 
 def eic_check(df: pd.DataFrame, cloud: Cloud, P: Params) -> pd.DataFrame:
@@ -339,7 +370,10 @@ def gate(df: pd.DataFrame, P: Params) -> pd.Series:
         narrow = ~(df["fwhm"] + slack >= 0.3 * P.fwhm_med)
         if P.narrow_rule in ("local", "local_median"):
             fn = local_narrow_threshold if P.narrow_rule == "local" else local_median_threshold
-            thr = fn(df, _gate_other(df, P).values & ok.values, P)
+            ref = _gate_other(df, P).values & ok.values
+            if "on_background" in df:       # their FWHM at half the apex height includes the floor: not a reference width
+                ref &= ~df["on_background"].values
+            thr = fn(df, ref, P)
             if thr is not None:
                 df["narrow_thr"] = thr
                 narrow = ~(df["fwhm"] + slack >= thr)
@@ -348,25 +382,40 @@ def gate(df: pd.DataFrame, P: Params) -> pd.Series:
     return ok
 
 
+def level_gates(df: pd.DataFrame, P: Params) -> pd.Series:
+    """the gates on the ion's level 2-6 peak widths from the apex, against the apex height (background_rule "level")"""
+    # a trace still above half its apex six peak widths away on both sides is background, not a peak
+    cap_both = (df["kflags"] & K.KF_CAP_L) > 0
+    cap_both &= (df["kflags"] & K.KF_CAP_R) > 0
+    ok = ~(cap_both & (df["prominence_rel"] < 0.5))
+    if "ridge_ratio" in df:
+        ok &= df["ridge_ratio"] <= RIDGE_MAX
+    if "background_ratio" in df:
+        ok &= df["background_ratio"] <= BACKGROUND_MAX
+    if "far_level" in df and P.far_level_max < 1.0:
+        ok &= df["far_level"] <= P.far_level_max
+    return ok
+
+
+def net_gates(df: pd.DataFrame, P: Params) -> pd.Series:
+    """a peak above the ion's own level (background_rule "net"; columns ripple_ratio, ridge_net, net_fwhm)"""
+    return (df["ripple_ratio"] >= P.net_ripple_k) & (df["ridge_net"] <= P.net_ridge_max) \
+        & (df["net_fwhm"] >= P.net_fwhm_min * P.fwhm_med)
+
+
 def _gate_other(df: pd.DataFrame, P: Params) -> pd.Series:
     """the gates that do not depend on the peak's scan count, m/z scatter, S/N or width"""
     ok = df["prominence_rel"] >= P.min_prominence_rel
     if "fragment" in df:
         ok &= ~df["fragment"]
-    # a trace still above half its apex six peak widths away on both sides is background, not a peak
-    cap_both = (df["kflags"] & K.KF_CAP_L) > 0
-    cap_both &= (df["kflags"] & K.KF_CAP_R) > 0
-    ok &= ~(cap_both & (df["prominence_rel"] < 0.5))
-    if "ridge_ratio" in df:
-        ok &= df["ridge_ratio"] <= RIDGE_MAX
-    if "background_ratio" in df:
-        ok &= df["background_ratio"] <= BACKGROUND_MAX
+    level = level_gates(df, P)
+    if "on_background" in df:           # background_rule "net": set by build_features
+        level |= df["on_background"]
+    ok &= level
     if "ripple_ratio" in df and P.ripple_k > 0:
         ok &= df["ripple_ratio"] >= P.ripple_k
     if P.max_valleys >= 0:
         ok &= df["n_valleys"] <= P.max_valleys
-    if "far_level" in df and P.far_level_max < 1.0:
-        ok &= df["far_level"] <= P.far_level_max
     return ok
 
 
@@ -386,6 +435,8 @@ def flag_strings(df: pd.DataFrame, P: Params) -> pd.Series:
         ("lumpy", df["n_valleys"].values >= 2),
         ("cap", cap),
         ("nohalf", (kf & (K.KF_NOHALF_L | K.KF_NOHALF_R)) > 0),
+        # kept as a peak above its ion's own level (background_rule "net"): the height includes that level
+        ("on_background", df["on_background"].values if "on_background" in df else False),
     ]
     out = np.full(len(df), "", dtype=object)
     for name, m in conds:
@@ -398,7 +449,15 @@ def rule_score(df: pd.DataFrame, P: Params, iso_support: np.ndarray | None = Non
     t_snr = np.clip((np.log2(snr) - np.log2(3.0)) / (np.log2(50.0) - np.log2(3.0)), 0, 1)
     t_shape = np.clip(df["gauss_r2"].values, 0, 1)
     t_mz = np.clip(1.0 - df["mz_sd_ppm"].values / (3.0 * df["sig_apex"].values + 1.0), 0, 1)
-    t_prom = np.clip(df["prominence_rel"].values, 0, 1)
+    prom, far = df["prominence_rel"].values, (df["far_level"].values if "far_level" in df else None)
+    if "on_background" in df and df["on_background"].values.any():
+        # a peak kept above its ion's own level is scored above that level: prominence and far level of the rise
+        own = df["on_background"].values
+        rise = np.maximum(1.0 - df["floor_rel"].values, 1e-9)
+        prom = np.where(own, prom / rise, prom)
+        if far is not None:
+            far = np.where(own, (far - df["floor_rel"].values) / rise, far)
+    t_prom = np.clip(prom, 0, 1)
     # width_rule "scans": no width term (a narrow peak is not penalised for the file's typical width); "time": the
     # file's median width counted in the local scans
     if P.width_rule == "time":
@@ -408,7 +467,7 @@ def rule_score(df: pd.DataFrame, P: Params, iso_support: np.ndarray | None = Non
     if P.score_loc_rip and "far_level" in df and "tv_ratio" in df:
         # localisation: a peak returns to (near) nothing a few widths away, a background ion does not;
         # unimodality: one rise and one fall inside the bounds (total variation ratio 1), not a lumpy hump
-        t_loc = np.clip(1.0 - df["far_level"].values, 0, 1)
+        t_loc = np.clip(1.0 - far, 0, 1)
         t_rip = np.clip(1.0 / np.maximum(df["tv_ratio"].values, 1e-9), 0, 1)
         if t_scans is not None:
             score = (t_snr * t_shape * t_mz * t_prom * t_scans * t_loc * t_rip) ** (1.0 / 7.0)
@@ -481,8 +540,17 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
     if P.narrow_rule == "local":
         df["m1_partner"] = m1_partner(df, cloud, P)
     df["fragment"] = mark_fragments(df, cloud, P)
+    net = P.background_rule == "net"
     for name, vals in ridge_ratio(df, cloud, P).items():
-        df[name] = vals
+        if net or name not in NET_COLUMNS:
+            df[name] = vals
+    if net:
+        # candidates the level gates reject are measured above their ion's own level
+        low = ~level_gates(df, P).values
+        df["net_fwhm"] = np.nan
+        if low.any():
+            df.loc[low, "net_fwhm"] = net_width(df[low], cloud, P)
+        df["on_background"] = low & net_gates(df, P).values
     ok = gate(df, P)
     df["gate"] = ok.values
     cand = df[ok].reset_index(drop=True)

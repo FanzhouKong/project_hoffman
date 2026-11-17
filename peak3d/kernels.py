@@ -1023,6 +1023,59 @@ def side_levels(off, mz, inten, q_mz, q_tol, s_apex, near, far):
     return out
 
 
+@njit(cache=True)
+def _ion_at(off, mz, inten, s, lo_mz, hi_mz):
+    """most intense centroid of scan s within [lo_mz, hi_mz] (0 if none)"""
+    lo = off[s]
+    b = off[s + 1]
+    hi = b
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if mz[mid] < lo_mz:
+            lo = mid + 1
+        else:
+            hi = mid
+    best = 0.0
+    while lo < b and mz[lo] <= hi_mz:
+        if inten[lo] > best:
+            best = inten[lo]
+        lo += 1
+    return best
+
+
+@njit(cache=True, parallel=True)
+def net_half_width(off, mz, inten, q_mz, q_tol, s_apex, half, reach):
+    """Where each query's chromatogram (most intense centroid within +/- q_tol per scan) crosses the level half[i]
+    on either side of its apex scan, walking at most reach[i] scans: float64[n, 2] = the left and right crossing in
+    fractional scan numbers (linear between the two scans around it), NaN where the apex scan is below the level or
+    the trace does not fall below it within the reach or the run."""
+    n = len(q_mz)
+    S = len(off) - 1
+    out = np.full((n, 2), np.nan)
+    for i in prange(n):
+        lo_mz = q_mz[i] - q_tol[i]
+        hi_mz = q_mz[i] + q_tol[i]
+        s0 = s_apex[i]
+        y0 = _ion_at(off, mz, inten, s0, lo_mz, hi_mz)
+        if y0 < half[i]:
+            continue
+        for side in range(2):
+            step = -1 if side == 0 else 1
+            s = s0
+            y = y0
+            for _ in range(reach[i]):
+                t = s + step
+                if t < 0 or t >= S:
+                    break
+                v = _ion_at(off, mz, inten, t, lo_mz, hi_mz)
+                if v < half[i]:
+                    out[i, side] = s + step * (y - half[i]) / (y - v)
+                    break
+                s = t
+                y = v
+    return out
+
+
 def gaussian_kernel(fwhm_scans):
     """normalised Gaussian smoothing kernel with the given FWHM in scans, truncated at 4 sd (odd length)"""
     sd = max(float(fwhm_scans), 1e-6) / 2.3548200450309493

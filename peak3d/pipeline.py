@@ -21,7 +21,7 @@ import pandas as pd
 from . import __version__
 from .align import AlignParams, AlignResult, FileAlignment, align_run, anchors_table, summary_table
 from .features import COLUMNS, MZ_TEXT, build_features, precise_mz, write_features
-from .estimate import (apply_scan_gains, estimate, parse_overrides, refit_after_gains, scan_gains, sigma_ppm,
+from .estimate import (apply_scan_gains, estimate, mode_overrides, refit_after_gains, scan_gains, sigma_ppm,
                        variant_label)
 from .gapfill import fill_file
 from .grouping import consensus, group_features, merge_complementary
@@ -169,7 +169,7 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
         if s in RESERVED:
             raise ValueError(f"file stem {s!r} collides with a reserved column name")
         (ms2_dir / f"{s}.npz").unlink(missing_ok=True)      # a re-run must not inherit an earlier run's spectra
-    overrides = parse_overrides(getattr(args, "set", None))   # fail before any work on a bad --set
+    overrides = mode_overrides(getattr(args, "mode", None), getattr(args, "set", None))   # fail before any work on a bad --set
     n_workers = max(1, min(len(files), args.cores))
     threads = max(1, args.cores // n_workers)
     _limit_library_threads(threads)
@@ -543,15 +543,17 @@ def _write_params(output: Path, args, res: AlignResult | None, stage_times: dict
              pandas=pd.__version__, command=" ".join(sys.argv), options={k: (str(v) if isinstance(v, Path) else v)
                                                                             for k, v in vars(args).items() if k != "cmd"},
              input_files=[str(f) for f in files], stage_times_s=stage_times)
-    if hasattr(args, "set"):    # process / pick: the picker variant behind these tables
-        p["variant"] = variant_label(parse_overrides(args.set))
-    else:                       # align regroups tables picked earlier: keep the variant that picked them
+    if hasattr(args, "set"):    # process / pick: the mode and picker variant behind these tables
+        p["mode"] = getattr(args, "mode", None) or "lc"
+        p["variant"] = variant_label(mode_overrides(p["mode"], args.set))
+    else:                       # align regroups tables picked earlier: keep the mode and variant that picked them
         try:
-            old = json.loads((output / "params.json").read_text()).get("variant")
+            old = json.loads((output / "params.json").read_text())
         except (OSError, ValueError):
-            old = None
-        if old:
-            p["variant"] = old
+            old = {}
+        for k in ("mode", "variant"):
+            if old.get(k):
+                p[k] = old[k]
     if res is not None:
         p.update(alignment=("skipped (single file)" if res.skipped and len(res.files) == 1 else
                             ("disabled" if args.no_rt_correction else "ok")),

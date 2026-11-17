@@ -89,6 +89,16 @@ DATASETS = [
              "scripts/05_download_pr002464.sbatch (centroid mzML only); spiked-standard truth by "
              "bench/spiketruth.py. GC-MS ST003934 and the Q-ToF studies are not used yet.",
     ),
+    # --- GC ------------------------------------------------------------------
+    dict(
+        id="MRH_GC_ORBITRAP", priority=2, source="zenodo", accession="18596747",
+        instrument="Thermo Q Exactive GC Orbitrap (EI), profile mode",
+        truth=["spike_ratio"],
+        note="MRH test dataset (RECETOX, Barton & Codling): flame-retardant standard mixes at 11 "
+             "levels, 0.1-1000 ng/mL, one profile mzML per level with groundtruth_corrected_<level>.csv "
+             "ion lists (predicted ions moved to the closest local maximum of the raw data). First "
+             "GC set: measures where ion-level picking breaks on co-eluting EI fragments.",
+    ),
     # --- lower priority -----------------------------------------------------
     dict(
         id="MASSCUBE_SI", priority=3, source="zenodo", accession="14159704",

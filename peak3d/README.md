@@ -232,6 +232,8 @@ RT is in minutes everywhere; residuals in the QC files are in seconds.
 `pick.py` (orchestration), `features.py` / `isotopes.py` (descriptors, gates, score),
 `warp.py` / `anchors.py` / `align.py` (RT correction), `grouping.py`, `gapfill.py`, `qc.py`,
 `pipeline.py`, `__main__.py`, `synth.py` (synthetic data = test oracle), `tests/`.
+`gc/` holds the GC-MS (EI) stages run by `peak3d gc OUT` on an existing output: deconvolution into compounds,
+retention index, EI library search ([`gc/README.md`](gc/README.md)); the LC pipeline does not import it.
 
 Tests: `pytest peak3d/tests -m "not perf"` after `pip install -e ".[test]"` (`-m perf` for the speed budget
 test, which needs a quiet machine).

@@ -237,6 +237,24 @@ class Params:
                                     # falling 20 % in between: the last piece of a plateau before it drops, not a peak
     far_level_max: float = 0.5      # gate: reject when the ion's typical level 2-6 widths out on the cleaner side exceeds
                                     # this fraction of the apex (a bump on a tail or ridge; 1.0 = off)
+    # background_rule: how the gates that ask "is this ion still there 2-6 peak widths from the apex" (ridge,
+    # background, far_level, bounds capped on both sides) judge a candidate.
+    #   "level"  against the apex height: an ion that stays at a third to a half of the apex out there is a background
+    #            ion and the candidate a piece of it (LC: solvent and contaminant ions present through the run).
+    #   "net"    a candidate those gates reject is kept when it is a peak above the ion's own level out there (the
+    #            median of the cleaner side): the rise is at least net_ripple_k times that trace's scan-to-scan noise,
+    #            bumps of net_ridge_max of the rise are not common out there (90th percentile above the level), and
+    #            the width at half the rise is at least net_fwhm_min median peak widths, reached on both sides.
+    #            GC-EI: the small fragment ions are shared by many compounds and by the column background, so a
+    #            compound's fragment is a peak on a floor of the same ion. Kept candidates carry the flag
+    #            on_background; their height includes the floor.
+    #            MRH GC-Orbitrap set, 11 files, dry run on the picker's candidates: 91 of 106 truth ions the level
+    #            gates reject are kept, with 2,680 more candidates per file (24 % of the features), 73 % of them with
+    #            three or more picked ions at the same apex (27 % of all candidates the level gates reject).
+    background_rule: str = "level"
+    net_ripple_k: float = 5.0
+    net_ridge_max: float = 0.5
+    net_fwhm_min: float = 0.5
     k_noise: float = 3.0
     min_snr: float = 3.0
     min_prominence_rel: float = 0.2
@@ -894,7 +912,12 @@ def refit_after_gains(cloud: Cloud, P: Params, n_seeds: int = 2000) -> Params:
 
 MODES = {"merge_test": ("frac", "noise", "noise_raw", "own"), "eic_noise": ("max", "law", "law_trace", "own"),
          "width_rule": ("fwhm", "scans", "time"), "narrow_rule": ("median", "local", "local_median", "off"),
-         "min_scans_rule": ("file", "local")}
+         "min_scans_rule": ("file", "local"), "background_rule": ("level", "net")}
+
+# Acquisition modes (the CLI's --mode): the Params fields a mode sets before the file's own estimation; a --set goes
+# on top of them. lc is the Params defaults. gc: the background gates judge the peak above the ion's own level
+# (background_rule). params.json records the mode; the variant label shows what it changed.
+PROFILES = {"lc": {}, "gc": {"background_rule": "net"}}
 
 
 def parse_overrides(items) -> dict:
@@ -921,6 +944,14 @@ def parse_overrides(items) -> dict:
         if name in MODES and out[name] not in MODES[name]:
             raise ValueError(f"--set {it!r}: {name} must be one of {', '.join(MODES[name])}")
     return out
+
+
+def mode_overrides(mode: str | None = None, items=None) -> dict:
+    """the Params overrides of a run: the mode's profile (PROFILES; None = lc) with the --set items on top"""
+    mode = mode or "lc"
+    if mode not in PROFILES:
+        raise ValueError(f"--mode {mode!r}: must be one of {', '.join(PROFILES)}")
+    return {**PROFILES[mode], **parse_overrides(items)}
 
 
 def variant_label(overrides: dict | None = None) -> str:
