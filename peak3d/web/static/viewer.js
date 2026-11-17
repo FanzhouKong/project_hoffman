@@ -20,6 +20,7 @@
     ["kernel_s", "{k}"], ["read_s", "Reading files"], ["ms2_s", "MS2 mapping"], ["identify_s", "Identity search"]];
 
   // ---------------------------------------------------------------- data access
+  const MS2_PREFIX = /^(ms2_|ms2c_|id_|mk_|dk_)/, MS2_HEAD = ["ms2", "ms2c", "ids", "ann"];   // bundle.MS2_PREFIXES, MS2_KEYS
   class Results {
     constructor({ header, a }) {
       this.h = header;
@@ -52,8 +53,15 @@
     // both MS2 copies of each group (the consensus of all its spectra, m2c; the highest-TIC spectrum, m2) with the
     // peaks their denoising kept (ms2c_keep, ms2_keep), where their spectra were taken (marks), the hits of the last
     // identity search on every copy, raw and denoised (every hit above 0.1 on either, so each hit has a partner on the
-    // other) and the user's annotations, all by table row; a new search hands in a bundle with only these parts
+    // other) and the user's annotations, all by table row; a new search hands in a bundle with only these parts,
+    // which replace the old ones in this.a and this.h (kept otherwise for as long as the view is open)
     setMs2({ header, a }) {
+      if (a !== this.a) {
+        for (const k of Object.keys(this.a)) if (MS2_PREFIX.test(k)) delete this.a[k];
+        Object.assign(this.a, a);
+        for (const k of MS2_HEAD) this.h[k] = header[k];
+        ({ h: header, a } = this);
+      }
       this.m2 = header.ms2 ? { h: header.ms2, a } : null;
       this.m2c = header.ms2 && header.ms2c ? { h: header.ms2c, a } : null;
       this.id = header.ms2 && header.ids ? { h: header.ids, a } : null;
@@ -473,8 +481,13 @@
       starF: { red: false, blue: false, yellow: false }, cidF: null, skip: new Set(opts.skip || []) };
     let detailRefs = null, repaintRows = null;    // the Features page's detail parts and table, while it is shown
     let showSiblingsOf = null, clearCidF = null;  // the Features page's compound filter (list one compound's features)
-    const track = (c) => { charts.push(c); return c; };
+    // alive: false once the app closes this view (destroy). An answer that arrives later (a search, an annotation,
+    // the MS1 spectrum) then draws nothing: a chart made for a closed view would stay registered for theme changes
+    // (P3.onTheme) and keep the whole view, its data included, in memory until the page is closed
+    let alive = true;
+    const track = (c) => { if (alive) charts.push(c); else c.destroy(); return c; };
     const clearCharts = () => { while (charts.length) charts.pop().destroy(); };
+    const destroy = () => { alive = false; clearCharts(); };
 
     root.replaceChildren();
     root.classList.add("viewer");
@@ -485,6 +498,7 @@
     root.append(h("div.tabbar", tabs), body);
 
     function show(id) {
+      if (!alive) return;
       state.tab = id;
       detailRefs = null;
       repaintRows = null;
@@ -958,6 +972,7 @@
       const soon = () => { clearTimeout(timer); timer = setTimeout(run, 400); };
       async function run() {
         clearTimeout(timer);
+        if (!alive) return;                                       // a change made just before the view was closed
         st.method = sel.value;
         if (state.idBusy) { state.idAgain = true; return; }       // searched with the change when this search is done
         const [stEl, goEl] = state.idShown;                     // the panel on the page (it may have been drawn anew)
@@ -973,6 +988,7 @@
           [["method", st.method], ["ppm", st.precursor_ppm], ["ftol", st.fragment_tol], ["fppm", st.fragment_ppm], ["min", st.min_score]]
             .forEach(([k, v]) => P3.storeSet("peak3d-id-" + k, String(v)));
           state.idBusy = false;
+          if (!alive) return;            // the search is saved in the results folder; the next view reads it
           R.setMs2(res);
           P3.saveLibraries(R.libraries().map((d) => d.path));     // as the server read them: full paths, each once
           if (!state.idAgain) st.libraries = R.libraries().map((d) => d.path);
@@ -981,6 +997,7 @@
           show("features");            // the table, chips and detail with the new hits; filters, sort and selection stay
         } catch (e) {
           state.idBusy = false;
+          if (!alive) return;
           const [el, btn] = state.idShown;
           el.classList.add("err");
           el.textContent = String(e.message || e);
@@ -1379,6 +1396,7 @@
         st.textContent = "Saving…";
         try {
           const r = await opts.note(R.a.g_id[g], { comment: v });
+          if (!alive) return;
           saved = v;
           R.setNotes(g, r.notes);
           st.textContent = "Saved";
@@ -1394,6 +1412,7 @@
     async function setAnnotation(g, hit) {
       try {
         const r = await opts.annotate(R.a.g_id[g], hit);
+        if (!alive) return;
         R.setNotes(g, r.notes);
         const x = R.annotation(g);
         P3.snack(hit === null ? "Back to the library result" : hit === "unknown" ? "Marked unknown" : x && x.confirmed ? `Confirmed ${x.name}` : `Annotated as ${x ? x.name : "?"}`);
@@ -1408,6 +1427,7 @@
       const now = R.stars(g), next = now.includes(c) ? now.filter((x) => x !== c) : now.concat(c);
       try {
         const r = await opts.note(R.a.g_id[g], { stars: next });
+        if (!alive) return;
         R.setNotes(g, r.notes);
         if (repaintRows) repaintRows();
         if (shown === g && headEl) renderHead(g);
@@ -1525,8 +1545,8 @@
           const progress = () => wholeBtn.replaceChildren(P3.spinner(14), `Reading ${int(done)} of ${int(stems.length)}`);
           progress();
           wholeNote.replaceChildren();
-          await eicLimited(e.traces, async (t) => { await eicGet(R.stems[t.file], qOf(t)); done++; if (shown === g) progress(); }, () => shown === g);
-          if (shown !== g) return;
+          await eicLimited(e.traces, async (t) => { await eicGet(R.stems[t.file], qOf(t)); done++; if (shown === g) progress(); }, () => alive && shown === g);
+          if (!alive || shown !== g) return;
           wholeBtn.disabled = false;
           wholeBtn.replaceChildren(icon("show_chart"), "Whole run");
           const badT = e.traces.filter((t) => { const v = peek(t); return !v || v.error; });
@@ -1808,10 +1828,10 @@
         box.replaceChildren(h("p.body-small.muted.ms1-wait", P3.spinner(14), h("span", " Reading the MS1 spectrum…")));
         try {
           const r = await opts.ms1(R.a.g_id[g], stem);
-          if (shown !== g || !open || file !== stem) return;
+          if (!alive || shown !== g || !open || file !== stem) return;
           box.replaceChildren(...ms1Panel(g, r, load));
         } catch (e) {
-          if (shown === g && open) box.replaceChildren(banner(e.message || String(e), "error"));
+          if (alive && shown === g && open) box.replaceChildren(banner(e.message || String(e), "error"));
         }
       };
       button.addEventListener("click", () => {
@@ -1917,8 +1937,7 @@
         label: (si) => (R.files[si] && R.files[si].role === "medoid" ? "medoid: " : "") + series[si].label,
         tip: (si, k) => `<b>${esc(series[si].label)}</b><br>RT ${fixed(series[si].x[k], 1)} s · shift ${fixed(series[si].y[k], 2)} s`,
       }));
-      const off = P3.onTheme(() => { recolor(); dc.draw(); });
-      charts.push({ destroy: off });
+      track({ destroy: P3.onTheme(() => { recolor(); dc.draw(); }) });
       if (res) {
         const nb = res.before.length, w = 2 * res.lim / nb;
         const x = Float32Array.from({ length: nb }, (_, i) => -res.lim + (i + 0.5) * w);
@@ -1966,7 +1985,7 @@
     }
 
     show(opts.tab || "overview");
-    return { results: R, show, destroy: clearCharts };
+    return { results: R, show, destroy };
   }
 
   P3.viewer = { mount, Results, bundleTable, candidatesJson };
