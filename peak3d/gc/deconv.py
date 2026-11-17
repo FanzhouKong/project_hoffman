@@ -20,6 +20,9 @@ both produce the same ion.
    the per-scan median of its strongest tight members' normalised chromatograms (one member distorted by a
    neighbour does not bend it); every ion is then placed with the model it correlates with best among the
    components within its tolerance, or stays a loose member of the nearest one.
+   Delayed copies (_delayed): fragments formed after the column follow their compound through a lag; their
+   component, a little after the compound's and smaller, joins it when the lag, and not a later elution, explains
+   its profile.
 4. Composite components. An ion shared by two compounds that elute within a peak width is picked as one peak with
    its apex between theirs, where the two contributions put it, so each shared ion (with its isotopes) forms a small
    component of its own. A component of a few ions whose model is a non-negative mix of the models of the nearest
@@ -73,6 +76,10 @@ class DeconvParams:
     attach: bool = True                # an ion at a component's apex time whose chromatogram does not fit stays with
                                        # that component as a loose member (False: it starts a component of its own)
     min_features: int = 1              # a component with fewer picked ions that fit its model is not reported
+    delay: bool = True                 # a component that is a delayed copy of the one before it joins that one
+    delay_f: float = 5.0               # ... when a shift improves the fit of the lagged profile by less than this F
+                                       # (about the 5 % point of F with 1 and 15-30 degrees of freedom)
+    delay_reach: float = 1.0           # ... and its apex is at most this many peak widths later
 
 
 @dataclass
@@ -91,6 +98,7 @@ class Deconv:
     feature_shared: np.ndarray
     info: dict
     feature_loose: np.ndarray = None    # at its component's apex time, chromatogram not fitting the model
+    feature_delayed: np.ndarray = None  # member of a delayed copy that joined this component
 
     def spectrum(self, c: int):
         a, b = self.off[c], self.off[c + 1]
@@ -394,6 +402,187 @@ def _reassign(off, mz, inten, f_mz, f_tol, f_t, f_tau, f_rcut, f_skip, c_t, c_ta
 
 
 @njit(cache=True)
+def _lagged(pa, tau, y):
+    """pa passed through a first-order lag of time constant tau scans, into y"""
+    W = len(pa)
+    if tau <= 0.0:
+        for k in range(W):
+            y[k] = pa[k]
+        return
+    al = np.exp(-1.0 / tau)
+    acc = 0.0
+    for k in range(W):
+        acc = (1.0 - al) * pa[k] + al * acc
+        y[k] = acc
+
+
+@njit(cache=True)
+def _rss_shifted(y, pb, syy, dl):
+    """residual sum of squares of pb fitted by y moved dl scans later, amplitude free and positive"""
+    W = len(y)
+    sxx = 0.0
+    sxy = 0.0
+    for k in range(W):
+        u = k - dl
+        v = 0.0
+        if u >= 0.0:
+            j = int(u)
+            fr = u - j
+            if j + 1 < W:
+                v = y[j] + fr * (y[j + 1] - y[j])
+            elif fr == 0.0:
+                v = y[j]
+        sxx += v * v
+        sxy += v * pb[k]
+    return syy - sxy * sxy / sxx if (sxx > 0.0 and sxy > 0.0) else syy
+
+
+@njit(cache=True)
+def _lag_stats(pa, pb, d_shift, d_tau):
+    """Profile pb fitted, amplitude free, by profile pa (i) passed through a first-order lag (time constant
+    0..d_tau scans, 30 steps), (ii) moved later (0..d_shift scans, 20 steps), (iii) both. Returns the residual sums
+    of squares of the best fit of each (lag, move, both), the total sum of squares of pb about its mean, and the
+    number of scans where either profile is above 5 % of its maximum."""
+    W = len(pa)
+    y = np.empty(W)
+    syy = 0.0
+    mean = 0.0
+    npts = 0
+    for k in range(W):
+        syy += pb[k] * pb[k]
+        mean += pb[k]
+        if max(pa[k], pb[k]) >= 0.05:
+            npts += 1
+    mean /= max(W, 1)
+    tot = syy - W * mean * mean
+    nt = 31
+    nd = 21
+    st = d_tau / (nt - 1)
+    sd = d_shift / (nd - 1)
+    best_lag = syy
+    best_move = syy
+    best = syy
+    for it in range(nt):
+        _lagged(pa, it * st, y)
+        for i_d in range(nd):
+            r = _rss_shifted(y, pb, syy, i_d * sd)
+            if i_d == 0 and r < best_lag:
+                best_lag = r
+            if it == 0 and r < best_move:
+                best_move = r
+            if r < best:
+                best = r
+    return best_lag, best_move, best, tot, npts
+
+
+@njit(cache=True)
+def _is_delayed_copy(rss_lag, rss_move, rss_both, tot, npts, r_min, n_prof, f_max):
+    """The decision on _lag_stats. F = (rss_0 - rss_1) / (max(rss_1, noise) / (points - 3)); noise = the share of a
+    profile's variance that is its own uncertainty: one ion's chromatogram may differ from its compound's by
+    1 - r_min^2 of its variance (r_min: the shape cut, calibrated on isotope pairs), and the profile is the median
+    of n_prof ions. Without that floor two profiles that agree to their noise give large F from small differences.
+    (1) the lag describes the profile: correlation >= r_min
+    (2) the lag is needed: it fits better than the best move alone, F >= f_max. When neither is better the profiles
+        are the same within their noise, and the apex times, which are measured more finely, said two components.
+    (3) no move is needed on top of the lag: F < f_max"""
+    if tot <= 0.0:
+        return False
+    r2 = 1.0 - rss_lag / tot
+    if r2 <= 0.0 or np.sqrt(r2) < r_min:
+        return False
+    dof = max(npts - 3, 1)
+    noise = tot * (1.0 - r_min * r_min) / max(n_prof, 1)
+    if (rss_move - rss_lag) / (max(rss_lag, noise) / dof) < f_max:
+        return False
+    return (rss_lag - rss_both) / (max(rss_both, noise) / dof) < f_max
+
+
+@njit(cache=True)
+def _profile(off, mz, inten, f_mz, f_tol, mem_off, mem_idx, c, s0, s1, k_top):
+    """elution profile of component c on scans s0..s1-1: per-scan median (mean below three) of the chromatograms of
+    its k_top strongest tight members, each divided by its maximum there; maximum 1 (all zero: no signal)"""
+    W = s1 - s0
+    k = min(k_top, mem_off[c + 1] - mem_off[c])
+    T = np.zeros((max(k, 1), W))
+    kk = 0
+    for q in range(k):
+        j = mem_idx[mem_off[c] + q]
+        y = eic_kernel(off, mz, inten, f_mz[j], f_tol[j], s0, s1)
+        top = 0.0
+        for w in range(W):
+            if y[w] > top:
+                top = y[w]
+        if top <= 0.0:
+            continue
+        for w in range(W):
+            T[kk, w] = y[w] / top
+        kk += 1
+    out = np.zeros(W)
+    if kk == 0:
+        return out
+    top = 0.0
+    for w in range(W):
+        out[w] = np.median(T[:kk, w]) if kk >= 3 else T[:kk, w].mean()
+        top = max(top, out[w])
+    if top > 0.0:
+        for w in range(W):
+            out[w] /= top
+    return out
+
+
+@njit(cache=True)
+def _delayed(off, mz, inten, f_mz, f_tol, mem_off, mem_idx, k_top, c_t, c_apex, c_lo, c_hi, c_alive, c_rcut,
+             m_off, m_val, dt, reach, f_max):
+    """parent[b] = the component b is a delayed copy of (-1: none). A fragment formed after the column (in the
+    ion source, on a surface) follows its compound through a lag: its signal starts when the compound's does and
+    peaks and tails later. A second compound that elutes later starts later. So b, whose apex is at most `reach`
+    of a's peak widths after a's, is a's delayed copy when a's profile passed through a first-order lag describes
+    b's profile as well as b's own ions describe one another (correlation >= b's shape cut), better than a's
+    profile moved later does, and moving it later on top improves that by less than F = f_max (_lag_stats,
+    _is_delayed_copy). Profiles: _profile on a window from three widths before
+    a's apex to six after b's. Components are sorted by apex time. A copy is tested against the component itself,
+    never against another copy: a second compound just after a compound's delayed fragments resembles those more
+    than it resembles the compound (BDE 153, its two late ions and TBBPA on the MRH set). A copy has fewer tight
+    ions than the component it follows: delayed fragments are a few of a compound's ions, and a lone ion picked
+    between two compounds (a shared ion, broader than either) would otherwise take both as its copies.
+    A lag much shorter than the peak is a shift to first order, so two compounds a small fraction of a scan apart
+    pass as well: they are within the apex tolerance of strong ions and cannot be told apart by time either."""
+    C = len(c_t)
+    S = len(off) - 1
+    parent = np.full(C, -1, np.int64)
+    width = np.zeros(C)
+    for c in range(C):
+        for k in range(m_off[c], m_off[c + 1]):
+            if m_val[k] >= 0.5:
+                width[c] += 1.0
+    for b in range(C):
+        if not c_alive[b] or mem_off[b + 1] == mem_off[b]:
+            continue
+        best_a = -1
+        best_r = np.inf
+        for a in range(b - 1, max(-1, b - 13), -1):          # the dozen components before b, by apex time
+            if not c_alive[a] or width[a] <= 0 or c_hi[a] < c_lo[b] or parent[a] >= 0:
+                continue
+            if mem_off[a + 1] - mem_off[a] <= mem_off[b + 1] - mem_off[b]:
+                continue                  # the delayed fragments are the smaller part of their compound
+            d_scans = (c_t[b] - c_t[a]) / dt
+            if d_scans <= 0.0 or d_scans > reach * width[a]:
+                continue
+            w = int(width[a] + 0.5)
+            s0 = max(0, c_apex[a] - 3 * w)
+            s1 = min(S, c_apex[b] + 6 * w + 1)
+            pa = _profile(off, mz, inten, f_mz, f_tol, mem_off, mem_idx, a, s0, s1, k_top)
+            pb = _profile(off, mz, inten, f_mz, f_tol, mem_off, mem_idx, b, s0, s1, k_top)
+            lag, move, both, tot, npts = _lag_stats(pa, pb, d_scans + 1.0, min(1.5 * width[a], 3.0 * d_scans + 1.0))
+            n_prof = min(k_top, mem_off[b + 1] - mem_off[b])
+            if _is_delayed_copy(lag, move, both, tot, npts, c_rcut[b], n_prof, f_max) and lag < best_r:
+                best_r = lag
+                best_a = a
+        parent[b] = best_a
+    return parent
+
+
+@njit(cache=True)
 def _solve(G, g, idx, m):
     """least squares on the columns idx[:m] from the Gram matrix: coefficients and the explained sum of squares;
     ok False when the system is singular"""
@@ -457,10 +646,11 @@ def _fit_nonneg(G, g, yy, models, nm):
 
 
 @njit(cache=True)
-def _fit_ions(off, mz, inten, cand, cand_tol, s0, s1, X, f_min, min_points, max_models):
+def _fit_ions(off, mz, inten, cand, cand_tol, s0, s1, X, f_min, min_points, max_models, n_own):
     """Every candidate centroid (index cand[k] in the apex scan, window cand_tol[k]) fitted over scans s0..s1-1 with
-    the columns of X: 0 the constant, 1 this component's model, 2.. its neighbours'. Returns per candidate the
-    abundance in this component (0: not its ion), the number of models in the fit and the intensity-weighted m/z."""
+    the columns of X: 0 the constant, 1..n_own this component's models (its own and its delayed copies'), then its
+    neighbours'. Returns per candidate the abundance in this component (the sum over its models; 0: not its ion),
+    one plus the number of neighbour models in the fit, and the intensity-weighted m/z."""
     n = len(cand)
     W = s1 - s0
     K = X.shape[1] - 1
@@ -557,11 +747,17 @@ def _fit_ions(off, mz, inten, cand, cand_tol, s0, s1, X, f_min, min_points, max_
                 coef[q] = best_x[q]
             sse = best_sse
             npar = np_new
+        own = 0.0
+        n_for = 0
         for q in range(ns):
-            if sel[q] == 1:
-                ab[k] = coef[q]
-                nmod[k] = ns
-                mzw[k] = swm / sw
+            if sel[q] <= n_own:
+                own += coef[q]
+            else:
+                n_for += 1
+        if own > 0.0:
+            ab[k] = own
+            nmod[k] = 1 + n_for
+            mzw[k] = swm / sw
     return ab, nmod, mzw
 
 
@@ -661,10 +857,12 @@ def deconvolve(cloud: Cloud, feats: pd.DataFrame, P: Params, D: DeconvParams | N
     f_hi = np.clip(feats["scan_max"].values.astype(np.int64), 0, max(S - 1, 0))
     f_apex = np.clip(feats["scan_apex"].values.astype(np.int64), 0, max(S - 1, 0))
     f_tol = ion_tol(f_mz, f_h, P)
-    cols = ["rt", "rt_min", "rt_max", "scan_apex", "scan_min", "scan_max", "n_features", "n_loose", "n_ions", "n_shared_ions",
+    cols = ["rt", "rt_min", "rt_max", "scan_apex", "scan_min", "scan_max", "n_features", "n_loose", "n_delayed", "n_ions",
+            "n_shared_ions",
             "base_mz", "base_height", "quant_mz", "quant_height", "tic", "model_r", "apex_tol_s"]
     empty = Deconv(pd.DataFrame({c: [] for c in cols}), np.zeros(1, np.int64), np.zeros(0), np.zeros(0), np.zeros(0, bool),
-                   np.full(n, -1, np.int64), np.zeros(n), np.zeros(n, bool), dict(n_components=0), np.zeros(n, bool))
+                   np.full(n, -1, np.int64), np.zeros(n), np.zeros(n, bool), dict(n_components=0), np.zeros(n, bool),
+                   np.zeros(n, bool))
     if n == 0 or S < 3:
         return empty
     half = int(np.ceil(2.0 * P.fwhm_med / P.dt)) + 2
@@ -703,60 +901,91 @@ def deconvolve(cloud: Cloud, feats: pd.DataFrame, P: Params, D: DeconvParams | N
     n_mem = np.diff(mem_off)
     f_loose = _attach(f_t, f_tau, f_shared, comp, c_t, c_tau, alive) if D.attach else np.zeros(n, bool)
     n_loose = np.bincount(comp[f_loose], minlength=C) if f_loose.any() else np.zeros(C, np.int64)
+    # delayed copies join the component they follow: its ions, its spectrum, a second model profile
+    parent = _delayed(off, mz, inten, f_mz, f_tol, mem_off, mem_idx, D.model_ions, c_t, c_apex, c_lo, c_hi, alive,
+                      f_rcut[seeds], m_off, m_val, float(P.dt), float(D.delay_reach), float(D.delay_f)) \
+        if D.delay and C > 1 else np.full(C, -1, np.int64)
+    # a group = a component and its copies; it is reported at its member with the most tight ions
+    group = [[int(c)] for c in range(C)]
+    for b in np.flatnonzero(parent >= 0):
+        group[parent[b]].append(int(b))
+    n_own = n_mem.copy()
+    for c in range(C):
+        if len(group[c]) > 1:
+            group[c].sort(key=lambda d: -n_own[d])
+            n_mem[c] = int(n_own[group[c]].sum())
+            n_loose[c] = int(n_loose[group[c]].sum())
+    f_delayed = (comp >= 0) & (parent[np.maximum(comp, 0)] >= 0)
 
     # spectra
     live = np.flatnonzero(alive)
     new_id = np.full(C, -1, np.int64)
     new_id[live] = 0
-    spec_mz, spec_ab, spec_sh, counts, rows = [], [], [], [], []
-    for pos, c in enumerate(live):
-        if n_mem[c] < D.min_features:
-            new_id[c] = -3
+    spec_mz, spec_ab, spec_sh, counts, rows, row_of = [], [], [], [], [], []
+    for pos, c0 in enumerate(live):
+        if parent[c0] >= 0:                # reported with the component it is a delayed copy of
+            new_id[c0] = -4
             continue
-        lo, hi = int(c_lo[c]), int(c_hi[c])
+        if n_mem[c0] < D.min_features:
+            new_id[c0] = -3
+            continue
+        own = group[c0]
+        c = own[0]                         # the member the group is reported at: the one with the most tight ions
+        lo, hi = int(min(c_lo[d] for d in own)), int(max(c_hi[d] for d in own))
         # overlapping live neighbours, nearest in apex time first
-        nb = [int(d) for d in live[max(0, pos - D.max_neighbours):pos + D.max_neighbours + 1]
-              if d != c and c_hi[d] >= lo and c_lo[d] <= hi]
+        reach = D.max_neighbours + len(own)
+        nb = [int(d) for d in live[max(0, pos - reach):pos + reach + 1]
+              if d not in own and c_hi[d] >= lo and c_lo[d] <= hi]
         nb = sorted(nb, key=lambda d: abs(c_t[d] - c_t[c]))[:D.max_neighbours]
-        X = np.column_stack([np.ones(hi - lo + 1), _on_window(c, lo, hi, c_lo, m_off, m_val)] +
-                            [_on_window(d, lo, hi, c_lo, m_off, m_val) for d in nb])
-        X = X[:, np.concatenate([[True, True], X[:, 2:].max(axis=0) > 0])] if X.shape[1] > 2 else X
+        X = np.column_stack([np.ones(hi - lo + 1)] + [_on_window(d, lo, hi, c_lo, m_off, m_val) for d in own + nb])
+        k_own = 1 + len(own)
+        X = X[:, np.concatenate([np.ones(k_own, bool), X[:, k_own:].max(axis=0) > 0])] if X.shape[1] > k_own else X
         a, b = int(off[c_apex[c]]), int(off[c_apex[c] + 1])
         cand = np.arange(a, b, dtype=np.int64)
         ab, nmod, mzw = _fit_ions(off, mz, inten, cand, ion_tol(mz[a:b], inten[a:b], P), lo, hi + 1, X, D.f_min,
-                                  D.min_points, 3)
+                                  D.min_points, 3, len(own))
         keep = ab > 0
         if keep.any():
             keep &= ab >= D.min_rel * ab.max()
         if keep.sum() < D.min_ions:
-            new_id[c] = -2
+            new_id[c0] = -2
             continue
         m_, a_, s_ = mzw[keep], ab[keep], nmod[keep] > 1
         k = np.argsort(m_, kind="stable")
         m_, a_, s_ = m_[k], a_[k], s_[k]
-        spec_mz.append(m_); spec_ab.append(a_); spec_sh.append(s_); counts.append(len(m_))
+        spec_mz.append(m_); spec_ab.append(a_); spec_sh.append(s_); counts.append(len(m_)); row_of.append(int(c0))
         base = int(np.argmax(a_)) if len(a_) else -1
         uniq = np.flatnonzero(~s_)
         quant = int(uniq[np.argmax(a_[uniq])]) if len(uniq) else base
         members = mem_idx[mem_off[c]:mem_off[c + 1]]
         rows.append(dict(rt=c_t[c], rt_min=rt[lo], rt_max=rt[hi], scan_apex=int(c_apex[c]), scan_min=lo, scan_max=hi,
-                         n_features=int(n_mem[c]), n_loose=int(n_loose[c]), n_ions=len(m_), n_shared_ions=int(s_.sum()),
+                         n_features=int(n_mem[c0]), n_loose=int(n_loose[c0]), n_delayed=len(own) - 1, n_ions=len(m_),
+                         n_shared_ions=int(s_.sum()),
                          base_mz=m_[base] if base >= 0 else np.nan, base_height=a_[base] if base >= 0 else 0.0,
                          quant_mz=m_[quant] if quant >= 0 else np.nan, quant_height=a_[quant] if quant >= 0 else 0.0,
                          tic=float(a_.sum()), model_r=float(np.median(f_r[members])) if len(members) else np.nan,
                          apex_tol_s=60.0 * float(c_tau[c])))
+    # by apex time (a group reported at a copy can come after the next component's)
+    order = np.argsort(np.array([r["rt"] for r in rows]), kind="stable") if rows else np.zeros(0, np.int64)
+    rows = [rows[i] for i in order]
+    spec_mz, spec_ab, spec_sh = [spec_mz[i] for i in order], [spec_ab[i] for i in order], [spec_sh[i] for i in order]
+    counts = [counts[i] for i in order]
     comps = pd.DataFrame(rows, columns=cols)
     comps.insert(0, "component_id", np.arange(len(comps), dtype=np.int64))
     n_small, n_few = int((new_id == -2).sum()), int((new_id == -3).sum())
-    kept = np.flatnonzero(new_id >= 0)
-    new_id[kept] = np.arange(len(kept))
+    for k, i in enumerate(order):
+        new_id[row_of[i]] = k
+    for b in np.flatnonzero(new_id == -4):          # a delayed copy's ions are its parent's
+        new_id[b] = new_id[parent[b]] if new_id[parent[b]] >= 0 else -1
     new_id[new_id < -1] = -1
     f_comp = np.where(comp >= 0, new_id[np.maximum(comp, 0)], -1)
     f_loose = f_loose & (f_comp >= 0)
+    f_delayed = f_delayed & (f_comp >= 0)
     info.update(n_components=int(len(comps)), n_composite=int((~alive).sum()), n_below_min_ions=n_small,
                 n_below_min_features=n_few, n_features=int(n), n_assigned=int((f_comp >= 0).sum()),
-                n_loose=int(f_loose.sum()), params=asdict(D))
+                n_loose=int(f_loose.sum()), n_delayed_copies=int((parent >= 0).sum()), n_delayed=int(f_delayed.sum()),
+                params=asdict(D))
     return Deconv(comps, np.concatenate([[0], np.cumsum(counts)]).astype(np.int64),
                   np.concatenate(spec_mz) if spec_mz else np.zeros(0), np.concatenate(spec_ab) if spec_ab else np.zeros(0),
                   np.concatenate(spec_sh) if spec_sh else np.zeros(0, bool),
-                  f_comp, f_r, f_shared, info, f_loose)
+                  f_comp, f_r, f_shared, info, f_loose, f_delayed)

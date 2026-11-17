@@ -210,3 +210,64 @@ def test_min_features_drops_components_resting_on_few_picked_ions(run):
     assert (d3.components["n_features"] >= 3).all()
     assert len(d3.components) <= len(run["d"].components)
     assert d3.info["n_below_min_features"] == len(run["d"].components) - len(d3.components) or d3.info["n_below_min_features"] >= 0
+
+
+def _late_run(late, seed=13):
+    """T, 40 scattered compounds, and `late`: a function of T giving one more Compound"""
+    rng = np.random.default_rng(seed)
+    comps = [Compound(f"X{k}", 0.3 + 4.4 * rng.random(), 10 ** rng.uniform(3.8, 5.3), *random_spectrum(rng, 15), FWHM) for k in range(40)]
+    T = Compound("T", 2.52, 2e5, *random_spectrum(rng, 20), FWHM)
+    L = late(T, rng)
+    cloud, feats, P, _ = _picked(comps + [T, L], seed=4)
+    return cloud, feats, P, T, L
+
+
+def _near(d, rt, tol_s):
+    return np.flatnonzero(np.abs(d.components["rt"].values - rt) * 60 <= tol_s)
+
+
+def _lag_apex_shift(fwhm, tau):
+    """how much later a Gaussian peak passed through a first-order lag has its apex (synth puts the apex at rt)"""
+    from scipy.stats import exponnorm
+    sigma = fwhm / 2.3548200450309493
+    g = np.linspace(-6 * sigma, 6 * sigma + 8 * tau, 40001)
+    return float(g[np.argmax(exponnorm.pdf(g, tau / sigma, loc=0.0, scale=sigma))])
+
+
+def test_delayed_fragments_join_their_compound():
+    # eight more ions of T leave the source through a lag of 1 s: they start with T, their apex and tail are later
+    tau = 1.0 / 60
+    cloud, feats, P, T, L = _late_run(lambda T, rng: Compound("T_late", T.rt + _lag_apex_shift(FWHM, tau), 1e5,
+                                                                *random_spectrum(rng, 8), FWHM, tau=tau))
+    assert 0.3 < (L.rt - T.rt) * 60 < 0.8
+    off = DC.deconvolve(cloud, feats, P, DC.DeconvParams(delay=False))
+    assert len(_near(off, T.rt, 1.0)) == 2                                   # without the test: two components
+    d = DC.deconvolve(cloud, feats, P)
+    k = _near(d, T.rt, 1.0)
+    assert len(k) == 1 and d.components["n_delayed"][k[0]] >= 1
+    assert abs(d.components["rt"][k[0]] - T.rt) * 60 < 0.1                   # reported at the larger group: T itself
+    m, a = d.spectrum(int(k[0]))
+    for c in (T, L):
+        strong = [(mz, rel) for mz, rel in zip(c.mz, c.rel) if rel * c.height > 5000]
+        assert len(strong) >= 4
+        for mz, rel in strong:
+            got = _abundance(d, int(k[0]), mz)
+            assert 0.5 < got / (rel * c.height) < 1.15, (c.name, mz, got, rel * c.height)
+    i = np.flatnonzero((np.abs(feats["mz"].values[:, None] - L.mz[None, :]) < 0.003).any(axis=1) & (np.abs(feats["rt"].values - L.rt) < 0.02))
+    assert len(i) >= 4 and (d.feature_component[i] == k[0]).all()
+    assert d.feature_delayed[i].sum() >= len(i) - 2              # a weak one may fit T's own model as well
+    assert d.info["n_delayed_copies"] == d.components["n_delayed"][k[0]]     # nothing else in the run was folded
+
+
+def test_a_second_compound_just_after_stays_a_component():
+    # the same eight ions as a compound of its own, 0.5 s later with T's shape: everything is later, the start too
+    cloud, feats, P, T, L = _late_run(lambda T, rng: Compound("U", T.rt + 0.5 / 60, 1e5, *random_spectrum(rng, 8), FWHM))
+    d = DC.deconvolve(cloud, feats, P)
+    k = _near(d, T.rt + 0.25 / 60, 1.0)
+    assert len(k) == 2 and (d.components["n_delayed"][k] == 0).all()
+    ku = int(k[np.argmax(d.components["rt"].values[k])])
+    assert abs(d.components["rt"][ku] - L.rt) * 60 < 0.1
+    for mz, rel in zip(L.mz, L.rel):
+        if rel * L.height > 5000:
+            assert abs(_abundance(d, ku, mz) / (rel * L.height) - 1.0) < 0.15
+    assert d.info["n_delayed_copies"] == 0

@@ -10,7 +10,7 @@ from bench.gc import mrh_score as M
 def main():
     R = Path("/quobyte/metabolomicsgrp/fanzhou/hoffmann/results/gc_mrh")
     tag = sys.argv[1]
-    variants = {"v2": {}, "v2_min3": dict(min_features=3)}
+    variants = {"v2": dict(delay=False), "v2_min3": dict(min_features=3, delay=False), "v3": {}}
     want = sys.argv[2:] or list(variants)
     for mode, src in (("lc", "peak3d"), ("gc", "peak3d_gc")):
         for name in want:

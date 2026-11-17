@@ -127,8 +127,9 @@ def main(argv=None):
     levels = [lv for lv in (a.levels or LEVELS) if (a.output / "features" / f"NEWSTD_{lv}.tsv").exists()]
     jobs = [(a.output, a.score, lv, sets) for lv in levels]
     if a.cores > 1 and len(jobs) > 1:
-        with ProcessPoolExecutor(min(a.cores, len(jobs))) as ex:
-            res = list(ex.map(_one, jobs))
+        first = _one(jobs[0])              # compiles and caches the kernels once: workers compiling together corrupt the cache
+        with ProcessPoolExecutor(min(a.cores, len(jobs) - 1)) as ex:
+            res = [first] + list(ex.map(_one, jobs[1:]))
     else:
         res = [_one(j) for j in jobs]
     infos = [r[0] for r in res]

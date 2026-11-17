@@ -61,6 +61,14 @@ the same ion.
    tight members; every ion then goes to the model it fits best among the components within its tolerance.
    `n_features` counts tight members, `n_loose` the others; `min_features` (default 1) can require more picked
    ions per component.
+3b. Delayed copies. Some fragments are formed after the column (in the ion source, on a surface): their signal
+   starts when their compound's does and peaks and tails later, by 0.15-0.45 s on the MRH set, past the apex
+   tolerance, so they made a component of their own. A second compound that elutes later starts later. A
+   component b whose apex is within one peak width after a larger component a is a's delayed copy when
+   a's profile passed through a first-order lag describes b's profile (correlation >= b's shape cut), does so
+   better than a's profile moved later (F >= 5), and moving it later on top is not needed (F < 5). F uses a noise
+   floor from the shape cut, so two profiles that agree within their noise are left as the apex times had them.
+   The copy's ions join a; the spectrum is fitted with both profiles; `n_delayed` counts the copies.
 4. An ion shared by two compounds less than a peak width apart is picked as one peak between them. A component of
    at most six ions whose model is a mix of the models of the nearest larger component on each side is dissolved,
    and its ions are marked shared. (Shape alone cannot tell this from a small compound eluting between two large
@@ -111,19 +119,21 @@ stay candidates. Ranked by `match`; a best hit at `--min-similarity` (0.7) or mo
 `bench/gc/deconv_eval.py` scores the clustering on picked ions (a truth compound is whole when all its found ions
 sit in one component; a pair of truth compounds less than two peak widths apart must stay in two).
 
-| lc-mode run, 11 files | first version | now |
-|---|---|---|
-| truth compounds whole | 72.8 % | 80.2 % |
-| ... with at least 90 % of their ions in one component | 81.7 % | 87.2 % |
-| components | 17,120 | 9,051 |
-| components on one picked ion | 8,234 | 2,995 |
-| close pairs separated (108; BDE 153 / TBBPA at 0.2-0.5 s) | all | all |
+| lc-mode run, 11 files | first version | one component per apex time | + delayed copies |
+|---|---|---|---|
+| truth compounds whole | 72.8 % | 80.2 % | 84.3 % |
+| ... with at least 90 % of their ions in one component | 81.7 % | 87.2 % | 91.8 % |
+| components | 17,120 | 9,051 | 8,548 |
+| close pairs separated (108; BDE 153 / TBBPA at 0.2-0.5 s) | all | all | all |
 
-What still splits: fragment groups whose apex is 0.1-0.25 s after the rest of their compound at every level
-(the C5Cl6 ions of both Dechlorane Plus isomers, the tribromophenoxy ions of BTBPE, several HBCD ions), beyond
-the 0.1 s tolerance of strong ions. Widening the tolerance to take them in would merge BDE 153 and TBBPA.
-`min_features=3` halves the components again (4,817) but takes the component away from 2.5 % of the truth
-compound rows, so it is not the default.
+gc-mode run: 69.1 %, 74.9 %, 78.7 % whole; 23,532, 11,545, 10,756 components; all pairs separated.
+
+The delayed-copy test on labelled pairs of six files (`bench/gc/diag/delay_test.py`): of 45 split-off groups of
+truth compounds 19 are called copies (both Dechlorane Plus isomers at every level, BEHTBP, OBIND, BDE 153), of
+25 pairs of different truth compounds 0.24-1.9 s apart none. Groups that are a pure small move of their compound
+(T23BPIC, EHTBB, BTBPE: 0.1-0.15 s, the same shape) and HBCD, which decomposes on the column, stay split: a
+lag that short cannot be told from a second compound. `min_features=3` halves the components (4,817 before
+the delayed copies) but takes the component away from 2.5 % of the truth compound rows, so it is not the default.
 
 ## Open
 
