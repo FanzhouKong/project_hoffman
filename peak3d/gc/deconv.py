@@ -10,10 +10,16 @@ both produce the same ion.
    be one compound), per S/N class of the weaker ion, because a weak ion's apex is less certain and its chromatogram
    noisier: the apex-time tolerance is 3 robust sd of the pairs' apex-time differences, the shape cut the
    chromatogram correlation that 99 % of the pairs reach. Files with too few pairs use fixed defaults.
-3. Components: the strongest unassigned ion is a seed; unassigned ions whose apex lies within the tolerance and whose
-   chromatogram correlates with the seed's over the seed's bounds join it. Each component gets a model profile, the
-   per-scan median of its strongest members' normalised chromatograms (one member distorted by a neighbour does not
-   bend it); every ion is then placed with the model it correlates with best.
+3. Components: the strongest unassigned ion is a seed, and the unassigned ions whose apex lies within the tolerance
+   of its apex are its neighbourhood. The reference ion of the component is, of the seed and the next strongest of
+   the neighbourhood, the one most of the others correlate with. Ions at the reference's apex time whose
+   chromatogram correlates with it are tight members; the others are loose members: the apex time, not the
+   shape, separates two compounds, so two components never start at one apex time. (They did in the first
+   version, and the next step then divided a compound between two near-identical models: on the MRH set 27 % of
+   the truth compounds had ions outside their main component, 20 % now.) Each component gets a model profile,
+   the per-scan median of its strongest tight members' normalised chromatograms (one member distorted by a
+   neighbour does not bend it); every ion is then placed with the model it correlates with best among the
+   components within its tolerance, or stays a loose member of the nearest one.
 4. Composite components. An ion shared by two compounds that elute within a peak width is picked as one peak with
    its apex between theirs, where the two contributions put it, so each shared ion (with its isotopes) forms a small
    component of its own. A component of a few ions whose model is a non-negative mix of the models of the nearest
@@ -61,6 +67,12 @@ class DeconvParams:
     composite_share: float = 0.2       # a composite needs each neighbour to explain at least this share of its model
     composite_max_ions: int = 6        # ... and has at most this many picked ions (one shared ion and its isotopes)
     composite: bool = True
+    ref_ions: int = 5                  # the reference ion of a component is, of the strongest free ion and the next
+                                       # ref_ions - 1 at its apex time, the one most of them correlate with (1: the
+                                       # strongest, whatever its shape)
+    attach: bool = True                # an ion at a component's apex time whose chromatogram does not fit stays with
+                                       # that component as a loose member (False: it starts a component of its own)
+    min_features: int = 1              # a component with fewer picked ions that fit its model is not reported
 
 
 @dataclass
@@ -78,6 +90,7 @@ class Deconv:
     feature_r: np.ndarray
     feature_shared: np.ndarray
     info: dict
+    feature_loose: np.ndarray = None    # at its component's apex time, chromatogram not fitting the model
 
     def spectrum(self, c: int):
         a, b = self.off[c], self.off[c + 1]
@@ -189,39 +202,118 @@ def _pair_r(off, mz, inten, f_mz, f_tol, f_lo, f_hi, a, b):
 
 
 @njit(cache=True)
-def _cluster(off, mz, inten, f_mz, f_tol, f_t, f_lo, f_hi, f_tau, f_rcut, order_h, order_t, t_sorted, tau_max):
-    """star clustering: seeds in descending height; a free feature joins the seed when its apex is within the larger
-    of the two tolerances and its chromatogram over the seed's bounds correlates with the seed's (the lower of the
-    two cuts: the weaker ion's)"""
+def _cluster(off, mz, inten, f_mz, f_tol, f_h, f_t, f_lo, f_hi, f_tau, f_rcut, order_h, order_t, t_sorted, tau_max,
+             k_ref, attach):
+    """Star clustering. Seeds in descending height; the free ions whose apex is within the larger of the two
+    tolerances of the seed's are its neighbourhood. The component's reference ion is, of the seed and the k_ref - 1
+    strongest of the neighbourhood, the one most of the others correlate with (chromatograms over the reference's
+    bounds, the lower of the two cuts), the stronger on a tie: a clipped or disturbed strongest ion does not define
+    the shape. Free ions at the reference's apex time that correlate with it are tight members; the others are
+    loose members when `attach` (the apex time, not the shape, separates compounds: two components do not start
+    at one apex time), else stay free. Returns (component, tight, correlation with the reference, reference ions)."""
     n = len(f_mz)
     comp = np.full(n, -1, np.int64)
+    tight = np.zeros(n, np.bool_)
     r_seed = np.zeros(n)
     seeds = np.empty(n, np.int64)
+    cand = np.empty(n, np.int64)
+    refs = np.empty(max(k_ref, 1), np.int64)
     C = 0
     for q in range(n):
         s = order_h[q]
-        if comp[s] >= 0:
+        while comp[s] < 0:
+            a = _lower_bound(t_sorted, 0, n, f_t[s] - tau_max)
+            b = _upper_bound(t_sorted, a, n, f_t[s] + tau_max)
+            m = 0
+            for k in range(a, b):
+                j = order_t[k]
+                if comp[j] < 0 and j != s and abs(f_t[j] - f_t[s]) <= max(f_tau[j], f_tau[s]):
+                    cand[m] = j
+                    m += 1
+            ref = s
+            if k_ref > 1 and m > 0:
+                refs[0] = s
+                nr = 1
+                for _ in range(k_ref - 1):
+                    best = -1
+                    for k in range(m):
+                        j = cand[k]
+                        taken = False
+                        for u in range(nr):
+                            if refs[u] == j:
+                                taken = True
+                        if not taken and (best < 0 or f_h[j] > f_h[best]):
+                            best = j
+                    if best < 0:
+                        break
+                    refs[nr] = best
+                    nr += 1
+                best_n = -1
+                for u in range(nr):
+                    t = refs[u]
+                    yt = eic_kernel(off, mz, inten, f_mz[t], f_tol[t], f_lo[t], f_hi[t] + 1)
+                    cnt = 0
+                    for k in range(m + 1):
+                        j = cand[k] if k < m else s
+                        if j == t or abs(f_t[j] - f_t[t]) > max(f_tau[j], f_tau[t]):
+                            continue
+                        r = _pearson(yt, eic_kernel(off, mz, inten, f_mz[j], f_tol[j], f_lo[t], f_hi[t] + 1))
+                        if r >= min(f_rcut[j], f_rcut[t]):
+                            cnt += 1
+                    if cnt > best_n:
+                        best_n = cnt
+                        ref = t
+            c = C
+            seeds[C] = ref
+            C += 1
+            comp[ref] = c
+            tight[ref] = True
+            r_seed[ref] = 1.0
+            s0 = f_lo[ref]; s1 = f_hi[ref] + 1
+            ys = eic_kernel(off, mz, inten, f_mz[ref], f_tol[ref], s0, s1)
+            a = _lower_bound(t_sorted, 0, n, f_t[ref] - tau_max)
+            b = _upper_bound(t_sorted, a, n, f_t[ref] + tau_max)
+            for k in range(a, b):
+                j = order_t[k]
+                if comp[j] >= 0 or abs(f_t[j] - f_t[ref]) > max(f_tau[j], f_tau[ref]):
+                    continue
+                r = _pearson(ys, eic_kernel(off, mz, inten, f_mz[j], f_tol[j], s0, s1))
+                if r >= min(f_rcut[j], f_rcut[ref]):
+                    comp[j] = c
+                    tight[j] = True
+                    r_seed[j] = r
+                elif attach:
+                    comp[j] = c
+                    r_seed[j] = r
+    return comp, tight, r_seed, seeds[:C]
+
+
+@njit(cache=True)
+def _attach(f_t, f_tau, f_skip, comp, c_t, c_tau, c_alive):
+    """features no model fits join, as loose members, the live component nearest in apex time within the tolerance
+    (components sorted by apex time); returns the loose mask and writes comp"""
+    n = len(f_t)
+    C = len(c_t)
+    loose = np.zeros(n, np.bool_)
+    if C == 0 or n == 0:
+        return loose
+    tau_max = max(f_tau.max(), c_tau.max())
+    for j in range(n):
+        if comp[j] >= 0 or f_skip[j]:
             continue
-        c = C
-        seeds[C] = s
-        C += 1
-        comp[s] = c
-        r_seed[s] = 1.0
-        s0 = f_lo[s]; s1 = f_hi[s] + 1
-        ys = eic_kernel(off, mz, inten, f_mz[s], f_tol[s], s0, s1)
-        a = _lower_bound(t_sorted, 0, n, f_t[s] - tau_max)
-        b = _upper_bound(t_sorted, a, n, f_t[s] + tau_max)
-        for k in range(a, b):
-            j = order_t[k]
-            if comp[j] >= 0:
-                continue
-            if abs(f_t[j] - f_t[s]) > max(f_tau[j], f_tau[s]):
-                continue
-            r = _pearson(ys, eic_kernel(off, mz, inten, f_mz[j], f_tol[j], s0, s1))
-            if r >= min(f_rcut[j], f_rcut[s]):
-                comp[j] = c
-                r_seed[j] = r
-    return comp, r_seed, seeds[:C]
+        a = _lower_bound(c_t, 0, C, f_t[j] - tau_max)
+        b = _upper_bound(c_t, a, C, f_t[j] + tau_max)
+        best = -1
+        bd = np.inf
+        for c in range(a, b):
+            d = abs(c_t[c] - f_t[j])
+            if c_alive[c] and d <= max(f_tau[j], c_tau[c]) and d < bd:
+                bd = d
+                best = c
+        if best >= 0:
+            comp[j] = best
+            loose[j] = True
+    return loose
 
 
 @njit(cache=True)
@@ -569,10 +661,10 @@ def deconvolve(cloud: Cloud, feats: pd.DataFrame, P: Params, D: DeconvParams | N
     f_hi = np.clip(feats["scan_max"].values.astype(np.int64), 0, max(S - 1, 0))
     f_apex = np.clip(feats["scan_apex"].values.astype(np.int64), 0, max(S - 1, 0))
     f_tol = ion_tol(f_mz, f_h, P)
-    cols = ["rt", "rt_min", "rt_max", "scan_apex", "scan_min", "scan_max", "n_features", "n_ions", "n_shared_ions",
+    cols = ["rt", "rt_min", "rt_max", "scan_apex", "scan_min", "scan_max", "n_features", "n_loose", "n_ions", "n_shared_ions",
             "base_mz", "base_height", "quant_mz", "quant_height", "tic", "model_r", "apex_tol_s"]
     empty = Deconv(pd.DataFrame({c: [] for c in cols}), np.zeros(1, np.int64), np.zeros(0), np.zeros(0), np.zeros(0, bool),
-                   np.full(n, -1, np.int64), np.zeros(n), np.zeros(n, bool), dict(n_components=0))
+                   np.full(n, -1, np.int64), np.zeros(n), np.zeros(n, bool), dict(n_components=0), np.zeros(n, bool))
     if n == 0 or S < 3:
         return empty
     half = int(np.ceil(2.0 * P.fwhm_med / P.dt)) + 2
@@ -581,9 +673,9 @@ def deconvolve(cloud: Cloud, feats: pd.DataFrame, P: Params, D: DeconvParams | N
 
     # seeds and first membership
     order_t = np.argsort(f_t, kind="stable").astype(np.int64)
-    comp0, _, seeds = _cluster(off, mz, inten, f_mz, f_tol, f_t, f_lo, f_hi, f_tau, f_rcut,
-                               np.argsort(-f_h, kind="stable").astype(np.int64), order_t, f_t[order_t],
-                               float(f_tau.max()))
+    comp0, tight0, _, seeds = _cluster(off, mz, inten, f_mz, f_tol, f_h, f_t, f_lo, f_hi, f_tau, f_rcut,
+                                       np.argsort(-f_h, kind="stable").astype(np.int64), order_t, f_t[order_t],
+                                       float(f_tau.max()), int(D.ref_ions), bool(D.attach))
     # components by apex time; bounds and apex scan are the seed's
     o = np.argsort(f_t[seeds], kind="stable")
     rank = np.empty(len(seeds), np.int64)
@@ -593,7 +685,7 @@ def deconvolve(cloud: Cloud, feats: pd.DataFrame, P: Params, D: DeconvParams | N
     C = len(seeds)
     c_lo, c_hi, c_apex = f_lo[seeds], f_hi[seeds], f_apex[seeds]
     c_t, c_tau = f_t[seeds].copy(), f_tau[seeds]
-    mem_off, mem_idx = _member_lists(comp0, f_h, C)
+    mem_off, mem_idx = _member_lists(np.where(tight0, comp0, -1), f_h, C)     # loose members shape no model
     m_off, m_val = _models(off, mz, inten, f_mz, f_tol, c_lo, c_hi, c_apex, mem_off, mem_idx, D.model_ions)
 
     # shared-ion components dissolve; their ions stay out of every model
@@ -609,6 +701,8 @@ def deconvolve(cloud: Cloud, feats: pd.DataFrame, P: Params, D: DeconvParams | N
     mem_off, mem_idx = _member_lists(comp, f_h, C)
     m_off, m_val = _models(off, mz, inten, f_mz, f_tol, c_lo, c_hi, c_apex, mem_off, mem_idx, D.model_ions)
     n_mem = np.diff(mem_off)
+    f_loose = _attach(f_t, f_tau, f_shared, comp, c_t, c_tau, alive) if D.attach else np.zeros(n, bool)
+    n_loose = np.bincount(comp[f_loose], minlength=C) if f_loose.any() else np.zeros(C, np.int64)
 
     # spectra
     live = np.flatnonzero(alive)
@@ -616,6 +710,9 @@ def deconvolve(cloud: Cloud, feats: pd.DataFrame, P: Params, D: DeconvParams | N
     new_id[live] = 0
     spec_mz, spec_ab, spec_sh, counts, rows = [], [], [], [], []
     for pos, c in enumerate(live):
+        if n_mem[c] < D.min_features:
+            new_id[c] = -3
+            continue
         lo, hi = int(c_lo[c]), int(c_hi[c])
         # overlapping live neighbours, nearest in apex time first
         nb = [int(d) for d in live[max(0, pos - D.max_neighbours):pos + D.max_neighbours + 1]
@@ -643,21 +740,23 @@ def deconvolve(cloud: Cloud, feats: pd.DataFrame, P: Params, D: DeconvParams | N
         quant = int(uniq[np.argmax(a_[uniq])]) if len(uniq) else base
         members = mem_idx[mem_off[c]:mem_off[c + 1]]
         rows.append(dict(rt=c_t[c], rt_min=rt[lo], rt_max=rt[hi], scan_apex=int(c_apex[c]), scan_min=lo, scan_max=hi,
-                         n_features=int(n_mem[c]), n_ions=len(m_), n_shared_ions=int(s_.sum()),
+                         n_features=int(n_mem[c]), n_loose=int(n_loose[c]), n_ions=len(m_), n_shared_ions=int(s_.sum()),
                          base_mz=m_[base] if base >= 0 else np.nan, base_height=a_[base] if base >= 0 else 0.0,
                          quant_mz=m_[quant] if quant >= 0 else np.nan, quant_height=a_[quant] if quant >= 0 else 0.0,
                          tic=float(a_.sum()), model_r=float(np.median(f_r[members])) if len(members) else np.nan,
                          apex_tol_s=60.0 * float(c_tau[c])))
     comps = pd.DataFrame(rows, columns=cols)
     comps.insert(0, "component_id", np.arange(len(comps), dtype=np.int64))
-    n_small = int((new_id == -2).sum())
+    n_small, n_few = int((new_id == -2).sum()), int((new_id == -3).sum())
     kept = np.flatnonzero(new_id >= 0)
     new_id[kept] = np.arange(len(kept))
-    new_id[new_id == -2] = -1
+    new_id[new_id < -1] = -1
     f_comp = np.where(comp >= 0, new_id[np.maximum(comp, 0)], -1)
+    f_loose = f_loose & (f_comp >= 0)
     info.update(n_components=int(len(comps)), n_composite=int((~alive).sum()), n_below_min_ions=n_small,
-                n_features=int(n), n_assigned=int((f_comp >= 0).sum()), params=asdict(D))
+                n_below_min_features=n_few, n_features=int(n), n_assigned=int((f_comp >= 0).sum()),
+                n_loose=int(f_loose.sum()), params=asdict(D))
     return Deconv(comps, np.concatenate([[0], np.cumsum(counts)]).astype(np.int64),
                   np.concatenate(spec_mz) if spec_mz else np.zeros(0), np.concatenate(spec_ab) if spec_ab else np.zeros(0),
                   np.concatenate(spec_sh) if spec_sh else np.zeros(0, bool),
-                  f_comp, f_r, f_shared, info)
+                  f_comp, f_r, f_shared, info, f_loose)

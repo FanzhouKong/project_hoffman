@@ -54,8 +54,13 @@ the same ion.
 2. The file calibrates itself on the isotope pairs the picker annotated (M and M+1 of one fragment, known to be
    one compound), per S/N class of the weaker ion: apex tolerance = 3 robust sd of the pairs' apex-time
    differences, shape cut = the chromatogram correlation 99 % of the pairs reach.
-3. Components: the strongest free ion is a seed; ions within the apex tolerance whose chromatogram correlates with
-   it join. Each component's model profile is the per-scan median of its five strongest members.
+3. Components: the strongest free ion is a seed and the free ions within the apex tolerance are its
+   neighbourhood. The reference ion is the one of the five strongest there that most of the others correlate
+   with. Ions that correlate with it are tight members, the others loose members of the same component: two
+   components never start at one apex time. The model profile is the per-scan median of the five strongest
+   tight members; every ion then goes to the model it fits best among the components within its tolerance.
+   `n_features` counts tight members, `n_loose` the others; `min_features` (default 1) can require more picked
+   ions per component.
 4. An ion shared by two compounds less than a peak width apart is picked as one peak between them. A component of
    at most six ions whose model is a mix of the models of the nearest larger component on each side is dissolved,
    and its ions are marked shared. (Shape alone cannot tell this from a small compound eluting between two large
@@ -100,6 +105,25 @@ stay candidates. Ranked by `match`; a best hit at `--min-similarity` (0.7) or mo
 | `components/<file>.npz` | their spectra: off, mz, abundance, shared |
 | `components/<file>.features.tsv` | per picked ion: component_id (-1 none), model_r, shared |
 | `params.json` | settings, each file's calibration (tolerances, isotope pairs), ladder notes, timings |
+
+## Deconvolution on the MRH set
+
+`bench/gc/deconv_eval.py` scores the clustering on picked ions (a truth compound is whole when all its found ions
+sit in one component; a pair of truth compounds less than two peak widths apart must stay in two).
+
+| lc-mode run, 11 files | first version | now |
+|---|---|---|
+| truth compounds whole | 72.8 % | 80.2 % |
+| ... with at least 90 % of their ions in one component | 81.7 % | 87.2 % |
+| components | 17,120 | 9,051 |
+| components on one picked ion | 8,234 | 2,995 |
+| close pairs separated (108; BDE 153 / TBBPA at 0.2-0.5 s) | all | all |
+
+What still splits: fragment groups whose apex is 0.1-0.25 s after the rest of their compound at every level
+(the C5Cl6 ions of both Dechlorane Plus isomers, the tribromophenoxy ions of BTBPE, several HBCD ions), beyond
+the 0.1 s tolerance of strong ions. Widening the tolerance to take them in would merge BDE 153 and TBBPA.
+`min_features=3` halves the components again (4,817) but takes the component away from 2.5 % of the truth
+compound rows, so it is not the default.
 
 ## Open
 

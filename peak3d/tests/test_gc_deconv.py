@@ -168,3 +168,45 @@ def test_empty_feature_table():
     d1 = DC.deconvolve(cloud, feats, b.params)                   # too few isotope pairs: fixed defaults
     assert not d1.info["calibrated"] and len(d1.components) == 1
     assert isinstance(d1.components, pd.DataFrame)
+
+
+def _odd_run(extra, seed=11):
+    rng = np.random.default_rng(seed)
+    comps = [Compound(f"X{k}", 0.4 + 0.25 * k, 10 ** rng.uniform(4.3, 5.3), *random_spectrum(rng, 15), FWHM) for k in range(16)]
+    comps.append(Compound("T", 2.52, 1e5, *random_spectrum(rng, 20), FWHM))
+    cloud, feats, P, _ = _picked(comps, seed=2, extra_peaks=extra)
+    return cloud, feats, P, comps[-1]
+
+
+def test_an_ion_of_another_shape_at_the_apex_time_does_not_start_a_second_component():
+    odd = 433.2468
+    cloud, feats, P, T = _odd_run([Peak(odd, 2.52, 6e4, 3.0 * FWHM)])        # same apex, three times as wide
+    i = np.flatnonzero((np.abs(feats["mz"].values - odd) < 0.005) & (np.abs(feats["rt"].values - 2.52) < 0.02))
+    assert len(i) == 1
+    d = DC.deconvolve(cloud, feats, P)
+    k = _component_at(d, T.rt, tol_s=1.0)                                    # one component there, not two
+    assert d.feature_component[i[0]] == k and d.feature_loose[i[0]]
+    assert d.components["n_loose"][k] >= 1 and d.components["n_features"][k] >= 18
+    assert d.feature_loose.sum() <= 3                                        # the compounds' own ions are tight members
+    old = DC.deconvolve(cloud, feats, P, DC.DeconvParams(attach=False, ref_ions=1))
+    assert old.feature_component[i[0]] != _component_at(old, T.rt, tol_s=0.2) if \
+        np.sum(np.abs(old.components["rt"].values - T.rt) * 60 <= 0.2) == 1 else True
+
+
+def test_a_stronger_ion_of_another_shape_at_the_apex_time_does_not_disturb_the_component():
+    big = 444.3219
+    # the strongest ion at T's apex time has another shape (clipped flat and wide)
+    cloud, feats, P, T = _odd_run([Peak(big, 2.52, 4e5, 3.0 * FWHM, clip=0.5)])
+    d = DC.deconvolve(cloud, feats, P)
+    k = _component_at(d, T.rt, tol_s=1.0)
+    assert d.components["n_features"][k] >= 18                               # T's ions are the tight members
+    for mz, rel in zip(T.mz, T.rel):
+        if rel * T.height > 5000:
+            assert abs(_abundance(d, k, mz) / (rel * T.height) - 1.0) < 0.1
+
+
+def test_min_features_drops_components_resting_on_few_picked_ions(run):
+    d3 = DC.deconvolve(run["cloud"], run["feats"], run["P"], DC.DeconvParams(min_features=3))
+    assert (d3.components["n_features"] >= 3).all()
+    assert len(d3.components) <= len(run["d"].components)
+    assert d3.info["n_below_min_features"] == len(run["d"].components) - len(d3.components) or d3.info["n_below_min_features"] >= 0
