@@ -65,8 +65,9 @@ if MAC:
         info_plist={
             "CFBundleDisplayName": "Mosa",           # what the Dock and the menu bar show
             "CFBundleName": "Mosa",
-            "CFBundleShortVersionString": peak3d.__version__,
-            "CFBundleVersion": peak3d.__version__,
+            # numbers only: a pre-release (1.4.0b1) is 1.4.0 to macOS, which wants period-separated integers
+            "CFBundleShortVersionString": peak3d.__version__.split("a")[0].split("b")[0].split("rc")[0],
+            "CFBundleVersion": peak3d.__version__.split("a")[0].split("b")[0].split("rc")[0],
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "14.0",      # the numpy/scipy wheels pip picks on the build runners
         },

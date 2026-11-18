@@ -1,18 +1,46 @@
 # peak3d.gc: GC-MS (electron ionisation)
 
-Status: first version. Checked on synthetic runs (`peak3d/tests/test_gc_*.py`) and, with the picker in lc mode, on
-the MRH GC-Orbitrap set (below). `--mode gc` has not been through real data as a run yet: its rule was sized by a
-dry run on that set's candidates.
+Status: preview (Mosa 1.4.0b1, branch `gc-support`). Checked on synthetic runs (`peak3d/tests/test_gc_*.py`), on
+the MRH GC-Orbitrap set with the picker in lc and in gc mode, and on the ten unit-resolution runs of the DeepCPR
+paper (both below).
 
 GC-EI differs from LC-MS in what a result is. An EI source breaks every compound into tens of fragment ions that
 elute together, so the unit is the compound and its spectrum; a compound is identified by matching that spectrum
 and its retention index against a library. Picking, RT correction and ion alignment are the LC ones, in the
-picker's gc mode; the GC stages run afterwards, on an existing output folder, and write only to `OUT/gc/`.
+picker's gc mode; the GC stages run after them and write only to `OUT/gc/`.
 
 ```
-peak3d process --input mzml/ --output OUT --cores 8 --mode gc     # centroided MS1 mzML
+# one command: pick in gc mode, then the GC stages (centroided MS1 mzML)
+peak3d process --input mzml/ --output OUT --cores 8 --mode gc --ri-ladder alkane --ri-carbons 10-40 --ei-library nist_ei.msp
+# or the GC stages on an existing output (again with other settings, or on an output picked in lc mode)
 peak3d gc OUT --cores 8 --ri-ladder alkane --ri-carbons 10-40 --library nist_ei.msp
 ```
+
+In `process`, the EI library goes by `--ei-library` (`--library` is the MS2 library of an LC-MS run); the other
+GC options (`--ri-ladder`, `--ri-carbons`, `--ri-table`, `--ri-tol`, `--ri-type`) have the same names in both, and
+`--min-similarity` and `--min-presence` are shared with the LC stages. A failure of the GC stages is logged
+(`gc stages failed`) and leaves the rest of the run as it is.
+
+## In the app
+
+On the run form, **Acquisition: GC-MS (EI)** is `--mode gc`; a GC-MS card then takes the ladder and the EI
+libraries. The results (and `report.html`) open on a **Compounds** tab:
+
+- the list: one row per compound, at its **quantifier m/z** and **retention time** (s), with the retention index,
+  base peak, number of ions, files it was found in, quantifier height, and the annotation with its match. Search by
+  quantifier m/z, `#id` or name; list the compounds whose spectrum holds a given m/z; an RT window (typed, or a
+  box dragged on the compound map); Download table (the list with every file's abundance) and Download spectra
+  (.msp).
+- the selected compound: its **spectrum** (the quantifier marked; against the library spectrum of a hit, for the
+  three best hits of each compound), the library hits, the list of its ions (shared ones marked), the abundance of
+  the quantifier in every file, and, in the app, the **chromatograms of its strongest ions** in any file that
+  holds it, with the elution profile they were fitted with (read from the point-cloud cache, so a report file has
+  no such plot).
+
+The table of single ions aligned across files, the LC view, is the **Ions** tab of a GC-MS output. A search in a
+library from the results page, and the user's own annotations and marks, exist for LC-MS features only so far:
+to search another EI library, run `peak3d gc OUT --library ...` again (it rewrites `OUT/gc/` and the report's
+compounds).
 
 ## Modes: `--mode lc` (default) and `--mode gc`
 
@@ -135,11 +163,14 @@ stay candidates. Ranked by `match`; a best hit at `--min-similarity` (0.7) or mo
 | `compound_table.tsv` | compound x file: abundance of the quantifier ion |
 | `spectra.msp` | the reference spectrum of every compound (accurate m/z, base peak 999, RI, RT) |
 | `identifications.tsv` | every listed hit (match >= 0.3, up to 10 per compound and library) |
+| `hit_spectra.npz` | the library spectra of each compound's three best hits (compound_id, rank, off, mz, inten), for the viewer |
 | `ladder.tsv` | the ladder compounds found per file: carbon, ri, rt, rt_corr, component, molecular_ion |
 | `components/<file>.tsv` | the file's components: rt, bounds, n_features, n_ions, n_shared_ions, base and quantifier ion, tic, model_r, apex_tol_s, rt_corr, ri, compound_id |
 | `components/<file>.npz` | their spectra: off, mz, abundance, shared; and model profiles (model_off, model: maximum 1, on the component's scans scan_min..scan_max) |
 | `components/<file>.features.tsv` | per picked ion: component_id (-1 none), model_r, shared |
 | `params.json` | settings, each file's calibration (tolerances, isotope pairs), ladder notes, timings |
+
+Numbers are written with six significant digits, m/z columns (`quant_mz`, `base_mz`) to 1e-5.
 
 ## Deconvolution on the MRH set
 
@@ -195,12 +226,14 @@ the delayed copies) but takes the component away from 2.5 % of the truth compoun
 
 ## Open
 
-- `--mode gc` not yet run on real data (`scripts/50_mrh_gc.sbatch` takes `MODE=gc`); the MRH set is standards in
-  solvent, so it does not test heavy co-elution.
+- The MRH set is standards in solvent, so it does not test heavy co-elution.
+- Input is centroided mzML. ANDI-MS netCDF (.cdf), the usual export of unit-resolution GC-MS, is not read: the
+  DeepCPR runs went through `bench/gc/cdf_to_mzml.py`, which writes nominal masses multiplied by 1.0033548 (so
+  that isotope peaks pair up); the app shows those m/z as they are, and the EI search bins them wrongly above
+  m/z 209. Reading such files directly, with nominal masses reported, is the next step.
 - Search ranking (match vs reverse vs a mix), the index window and the 0.6 cross-file similarity are untested
   choices, to be judged on a set with known compounds.
-- No gap filling of compounds, no GUI view of compounds; `peak3d gc` is still a second command after
-  `process --mode gc`.
+- No gap filling of compounds; no library search, annotation or marks for compounds from the app's results page.
 - Saturated ions are not excluded from the model profile.
 - Reading a large library (NIST EI, ~350k spectra) the first time is a plain text parse; the parsed library is
   cached in `OUT/gc/.library_cache/`.

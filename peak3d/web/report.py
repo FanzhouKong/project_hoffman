@@ -14,33 +14,45 @@ import html
 import re
 from pathlib import Path
 
-from . import bundle
+from . import bundle, gcview
 
 STATIC = Path(__file__).with_name("static")
-SCRIPTS = ("logo.js", "icons.js", "core.js", "plot.js", "smiles-drawer.min.js", "viewer.js")   # load order; GUI adds app.js
+SCRIPTS = ("logo.js", "icons.js", "core.js", "plot.js", "smiles-drawer.min.js", "gc.js", "viewer.js")   # load order; GUI adds app.js
 DATA_RE = re.compile(rb'<script id="peak3d-data" type="application/octet-stream">([A-Za-z0-9+/=\s]*)</script>')
 MS2_RE = re.compile(rb'<script id="peak3d-ms2" type="application/octet-stream">([A-Za-z0-9+/=\s]*)</script>')
+GC_RE = re.compile(rb'<script id="peak3d-gc" type="application/octet-stream">([A-Za-z0-9+/=\s]*)</script>')
 
 
 def _inline(text: str) -> str:
     return text.replace("</", "<\\/")                      # no early end of the inline <script>
 
 
-def _page(data_b64: str, ms2_b64: str, title: str) -> str:
-    """the report page around two base64 blocks (text, as stored in the file)"""
+def _page(data_b64: str, ms2_b64: str, title: str, gc_b64: str = "") -> str:
+    """the report page around its base64 blocks (text, as stored in the file): the main bundle, the MS2 part and,
+    for a GC-MS output, the compounds (gcview.build)"""
     page = (STATIC / "report.html").read_text(encoding="utf-8")
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     js = "\n".join(_inline((STATIC / f).read_text(encoding="utf-8")) for f in SCRIPTS)
     for key, val in (("{{TITLE}}", html.escape(title)), ("{{CSS}}", css), ("{{JS}}", js), ("{{MS2}}", ms2_b64),
-                     ("{{DATA}}", data_b64)):
+                     ("{{GC}}", gc_b64), ("{{DATA}}", data_b64)):
         page = page.replace(key, val)
     return page
 
 
-def render(blob_gz: bytes, title: str, ms2_gz: bytes | None = None) -> str:
-    """the report page for a gzip'd bundle, and the gzip'd MS2 part (bundle.ms2_ids_blob) when it travels apart"""
+def render(blob_gz: bytes, title: str, ms2_gz: bytes | None = None, gc_gz: bytes | None = None) -> str:
+    """the report page for a gzip'd bundle, the gzip'd MS2 part (bundle.ms2_ids_blob) when it travels apart, and
+    the gzip'd GC compounds (gcview.blob) of a GC-MS output"""
     return _page(base64.b64encode(blob_gz).decode("ascii"),
-                 base64.b64encode(ms2_gz).decode("ascii") if ms2_gz else "", title)
+                 base64.b64encode(ms2_gz).decode("ascii") if ms2_gz else "", title,
+                 base64.b64encode(gc_gz).decode("ascii") if gc_gz else "")
+
+
+def gc_blob(output) -> bytes | None:
+    """the gzip'd GC compounds of an output (gcview.blob), None when it has none or they cannot be read"""
+    try:
+        return gcview.blob(output) if gcview.has_gc(output) else None
+    except Exception:          # damaged GC files never cost the rest of the report
+        return None
 
 
 def write_report(output, cache_dir=None, path=None, **limits) -> Path:
@@ -52,7 +64,7 @@ def write_report(output, cache_dir=None, path=None, **limits) -> Path:
         ms2 = None
     blob = gzip.compress(bundle.build(output, cache_dir, with_ms2=ms2 is None, **limits), compresslevel=6, mtime=0)
     path = Path(path) if path else output / "report.html"
-    path.write_text(render(blob, f"Mosa · {output.resolve().name}", ms2), encoding="utf-8")
+    path.write_text(render(blob, f"Mosa · {output.resolve().name}", ms2, gc_blob(output)), encoding="utf-8")
     return path
 
 
@@ -72,6 +84,11 @@ def read_bundle(report: Path) -> bytes | None:
 def read_ms2(report: Path) -> bytes | None:
     """the gzip'd MS2 block of a report.html (bundle.ms2_ids_blob), or None (a report from before 1.2.8)"""
     return _block(Path(report).read_bytes(), MS2_RE)
+
+
+def read_gc(report: Path) -> bytes | None:
+    """the gzip'd GC compounds block of a report.html (gcview.blob), or None"""
+    return _block(Path(report).read_bytes(), GC_RE)
 
 
 def read_full(report: Path) -> tuple[dict, dict] | None:
@@ -120,9 +137,33 @@ def refresh_ids(output, ms2_gz: bytes | None = None) -> bool:
         main = gzip.compress(bundle.pack(bundle._clean({**header, **{k: None for k in bundle.MS2_KEYS}}), arrays),
                              compresslevel=6, mtime=0)
         data_b64 = base64.b64encode(main).decode("ascii")
+    g = GC_RE.search(text)                              # the GC compounds stay as written
+    gc_b64 = g.group(1).decode("ascii") if g else ""
     del text
-    page = _page(data_b64, base64.b64encode(ms2_gz).decode("ascii"), f"Mosa · {output.resolve().name}")
+    page = _page(data_b64, base64.b64encode(ms2_gz).decode("ascii"), f"Mosa · {output.resolve().name}", gc_b64)
     tmp = rep.with_name(rep.name + ".tmp")
     tmp.write_text(page, encoding="utf-8")
     tmp.replace(rep)                   # a reader never sees a half-written report
+    return True
+
+
+def refresh_gc(output) -> bool:
+    """put the current GC compounds (gcview.blob) into <output>/report.html after `peak3d gc` ran on an output that
+    already has a report, keeping everything else; False when there is no report to update"""
+    output = Path(output)
+    rep = output / "report.html"
+    if not rep.exists():
+        return False
+    text = rep.read_bytes()
+    m = DATA_RE.search(text)
+    if m is None:
+        return False
+    ms2 = MS2_RE.search(text)
+    gz = gc_blob(output)
+    page = _page(m.group(1).decode("ascii"), ms2.group(1).decode("ascii") if ms2 else "",
+                 f"Mosa · {output.resolve().name}", base64.b64encode(gz).decode("ascii") if gz else "")
+    del text
+    tmp = rep.with_name(rep.name + ".tmp")
+    tmp.write_text(page, encoding="utf-8")
+    tmp.replace(rep)
     return True

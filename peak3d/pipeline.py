@@ -579,11 +579,34 @@ def _write_report(output: Path, cache_dir: Path, args):
 
 
 def check_library(args):
-    """fail before any work when --library names a file that is not there"""
-    libs = getattr(args, "library", None) or []
-    for lib in [libs] if isinstance(libs, (str, Path)) else libs:
-        if not Path(lib).expanduser().is_file():
-            sys.exit(f"--library: no such file: {lib}")
+    """fail before any work when --library (or, in GC-MS mode, --ei-library or --ri-table) names a file that is not
+    there"""
+    for flag, dest in (("--library", "library"), ("--ei-library", "ei_library"), ("--ri-table", "ri_table")):
+        libs = getattr(args, dest, None) or []
+        for lib in [libs] if isinstance(libs, (str, Path)) else libs:
+            if not Path(lib).expanduser().is_file():
+                sys.exit(f"{flag}: no such file: {lib}")
+
+
+def gc_stages(output: Path, cache_dir: Path, args) -> None:
+    """--mode gc: the GC-MS stages on the finished output, as `peak3d gc` runs them (each run's ions deconvolved
+    into compounds, the compounds matched across files, retention index, EI library search), written to
+    <output>/gc/. Never fails a finished run. Before the report, which shows them, and while the cache exists"""
+    if (getattr(args, "mode", None) or "lc") != "gc":
+        return
+    tic = time.perf_counter()
+    log("gc: deconvolving each run's ions into compounds")
+    try:
+        from .gc import pipeline as gc_pipeline
+        s = gc_pipeline.run(output, max(1, int(getattr(args, "cores", 1) or 1)), cache_dir,
+                            getattr(args, "ri_ladder", None), getattr(args, "ri_carbons", None),
+                            getattr(args, "ri_table", None), getattr(args, "ei_library", None),
+                            getattr(args, "min_similarity", 0.7), getattr(args, "ri_tol", None),
+                            getattr(args, "ri_type", "semi"), getattr(args, "min_presence", 2))
+        log(f"gc: {s['n_compounds']} compounds from {s['n_components']} components in {s['n_files']} files "
+            f"({time.perf_counter() - tic:.1f} s)")
+    except Exception as e:
+        log(f"gc stages failed: {e!r}")
 
 
 def ms2_and_identify(output: Path, args, stage: dict) -> None:
@@ -660,6 +683,7 @@ def process(files, args, raw_files: dict | None = None):
     if raw_files:
         extra["raw_files"] = raw_files
     _write_params(output, args, res, stage, files, extra=extra)
+    gc_stages(output, cache_dir, args)
     _write_report(output, cache_dir, args)
     if getattr(args, "no_keep_cache", False) and cache_dir == output / ".cache":
         shutil.rmtree(cache_dir, ignore_errors=True)

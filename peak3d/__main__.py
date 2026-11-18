@@ -2,7 +2,8 @@
 
 process:  pick every mzML in --input, align the runs on their own credible features, group them
           into one table, gap-fill, map MS2 spectra to the features, write QC and report.html -> --output
-          (with --library: identity search of the features' MS2 in an .msp or .pkl library)
+          (with --library: identity search of the features' MS2 in an .msp or .pkl library; with --mode gc:
+          the GC-MS stages of `gc` too, written to OUT/gc/ and shown as the report's Compounds tab)
 pick:     per-file feature tables only
 align:    re-run alignment/grouping/gap-fill from an existing output (features/ + .cache/)
 identify: (re)run the identity search of an existing output against an .msp or .pkl library
@@ -127,6 +128,25 @@ def build_parser():
         p.add_argument("--quant", choices=["height", "area"], default="height",
                        help="value in the main aligned table (default height; the other is written too)")
 
+    def gc_opts(p, library_flag="--library"):
+        """the options of the GC-MS stages: of `gc`, and of `process --mode gc` (there the EI library goes by
+        --ei-library: --library is its MS2 library)"""
+        also = "" if library_flag == "--library" else " (GC-MS mode)"
+        p.add_argument("--ri-ladder", choices=["alkane", "fame"], default=None,
+                       help="find this retention-index ladder in the runs: n-alkanes (RI = 100 x carbons) or the FiehnLib "
+                            "FAME markers" + also)
+        p.add_argument("--ri-carbons", default=None, metavar="LIST",
+                       help='carbon numbers of the ladder, e.g. "10-40" or "8,9,10,12-30:2" (default: C8-C30 FiehnLib set '
+                            "for fame; for alkane, only compounds whose molecular ion names their carbon number)")
+        p.add_argument("--ri-table", type=Path, default=None,
+                       help="a ladder table instead of finding one: columns rt (minutes) or rt_s, and ri or carbon")
+        p.add_argument(library_flag, type=Path, nargs="+", action="extend", default=None,
+                       help="EI spectral library, .msp (unit-mass or accurate-mass); several are searched in turn" + also)
+        p.add_argument("--ri-tol", type=_positive(float), default=None,
+                       help="retention-index window of the search (default 20 for alkane, 3000 for FAME indices)")
+        p.add_argument("--ri-type", choices=["semi", "std", "polar"], default="semi",
+                       help="which index of a NIST record to use: semi-standard non-polar (default), standard non-polar, polar")
+
     def identify_opts(p, required=False):
         from .library import FRAGMENT_PPM, FRAGMENT_TOL, METHODS
         p.add_argument("--library", type=Path, nargs="+", action="extend", default=None, required=required,
@@ -165,6 +185,7 @@ def build_parser():
     common(p)
     align_opts(p)
     identify_opts(p)
+    gc_opts(p, "--ei-library")
 
     p = sub.add_parser("pick", help="per-file feature tables only")
     p.add_argument("files", nargs="+", type=Path, help=".mzML or Thermo .raw files")
@@ -216,22 +237,9 @@ def build_parser():
     p.add_argument("output", type=Path, help="a peak3d output folder (features/ and .cache/ of process or pick)")
     p.add_argument("--cores", type=_positive(int), default=1, help="worker processes (default 1)")
     p.add_argument("--cache-dir", type=Path, default=None, help="point-cloud cache (default <output>/.cache)")
-    p.add_argument("--ri-ladder", choices=["alkane", "fame"], default=None,
-                   help="find this retention-index ladder in the runs: n-alkanes (RI = 100 x carbons) or the FiehnLib "
-                        "FAME markers")
-    p.add_argument("--ri-carbons", default=None, metavar="LIST",
-                   help='carbon numbers of the ladder, e.g. "10-40" or "8,9,10,12-30:2" (default: C8-C30 FiehnLib set '
-                        "for fame; for alkane, only compounds whose molecular ion names their carbon number)")
-    p.add_argument("--ri-table", type=Path, default=None,
-                   help="a ladder table instead of finding one: columns rt (minutes) or rt_s, and ri or carbon")
-    p.add_argument("--library", type=Path, nargs="+", action="extend", default=None,
-                   help="EI spectral library, .msp (unit-mass or accurate-mass); several are searched in turn")
+    gc_opts(p)
     p.add_argument("--min-similarity", type=_unit, default=0.7,
                    help="match score at which a compound's best hit becomes its annotation (default 0.7)")
-    p.add_argument("--ri-tol", type=_positive(float), default=None,
-                   help="retention-index window of the search (default 20 for alkane, 3000 for FAME indices)")
-    p.add_argument("--ri-type", choices=["semi", "std", "polar"], default="semi",
-                   help="which index of a NIST record to use: semi-standard non-polar (default), standard non-polar, polar")
     p.add_argument("--min-presence", type=_positive(int), default=2,
                    help="a compound is reported when found in at least this many files (capped at the file count; "
                         "default 2)")
@@ -387,6 +395,12 @@ def main(argv=None):
                             args.library, args.min_similarity, args.ri_tol, args.ri_type, args.min_presence)
         except (FileNotFoundError, ValueError) as e:
             sys.exit(str(e))
+        from .web.report import refresh_gc
+        try:
+            if refresh_gc(args.output):          # report.html shows the compounds (everything else is kept)
+                print("[peak3d] report.html updated", flush=True)
+        except OSError:
+            pass                                  # a read-only results folder
         print(f"[peak3d] gc: {args.output / 'gc' / 'compounds.tsv'}; done in {time.perf_counter() - t0:.1f} s", flush=True)
         return
     if args.cmd == "addon":

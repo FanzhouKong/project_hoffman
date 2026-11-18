@@ -643,6 +643,9 @@
   // ppm (optional) = the window is the larger of tol and ppm x m/z, shift (optional, ppm) = the top spectrum's file
   // offset, taken out before matching as the search does. Each side is scaled to its own base peak (100); peaks with a
   // partner on the other side within the window are drawn in the series colour, the rest in the neutral grey.
+  // prec = an m/z marked by a dashed line, named precLabel ("precursor") unless precText is false; mzDigits =
+  // decimals of the m/z labels (4). Of the m/z labels on the strongest peaks, one that would cover a stronger
+  // peak's label is left out.
   class Mirror extends Chart {
     // drag across to zoom into an m/z range, double-click to see the whole spectrum again
     constructor(el, spec) {
@@ -722,7 +725,15 @@
         ctx.fillStyle = P.muted;
         ctx.textAlign = "center";
         ctx.textBaseline = si ? "top" : "bottom";
-        for (const i of top4) if (r.rel[i] > 5) ctx.fillText(P3.fixed(r.mz[i], 4), this.sx(r.mz[i]), this.sy(sign * r.rel[i]) + (si ? 3 : -3));
+        const boxes = [];
+        for (const i of top4) {
+          if (!(r.rel[i] > 5)) continue;
+          const t = P3.fixed(r.mz[i], s.mzDigits == null ? 4 : s.mzDigits), x = this.sx(r.mz[i]), y = this.sy(sign * r.rel[i]) + (si ? 3 : -3);
+          const w = ctx.measureText(t).width / 2 + 2, bx = [x - w, x + w, si ? y : y - 11, si ? y + 11 : y];
+          if (boxes.some((o) => bx[0] < o[1] && bx[1] > o[0] && bx[2] < o[3] && bx[3] > o[2])) continue;
+          boxes.push(bx);
+          ctx.fillText(t, x, y);
+        }
       });
       if (isFinite(s.prec) && s.prec > 0) {    // the precursor m/z: a dashed grey line
         const x = Math.round(this.sx(s.prec)) + 0.5;
@@ -735,7 +746,7 @@
         ctx.fillStyle = P.muted;
         ctx.textAlign = "right";
         ctx.textBaseline = "top";
-        ctx.fillText(`precursor ${P3.fixed(s.prec, 4)}`, x - 4, b.y0 + 18);
+        if (s.precText !== false) ctx.fillText(`${s.precLabel || "precursor"} ${P3.fixed(s.prec, s.mzDigits == null ? 4 : s.mzDigits)}`, x - 4, b.y0 + 18);
       }
       if (this.drag) {
         const [l, r] = [Math.min(this.drag.a, this.drag.b), Math.max(this.drag.a, this.drag.b)];
@@ -780,7 +791,8 @@
       if (best < 0) return this.hideTip();
       const name = si ? this.spec.bottomLabel || "library" : this.spec.topLabel || "query";
       this.showTip(this.sx(r.mz[best]), this.sy((si ? -1 : 1) * r.rel[best]),
-        `<b>m/z ${P3.fixed(r.mz[best], 4)}</b><br>${P3.fixed(r.rel[best], 1)} % · ${name}${this.sides.length === 2 ? (r.hit[best] ? " · matched" : " · unmatched") : ""}`);
+        `<b>m/z ${P3.fixed(r.mz[best], this.spec.mzDigits == null ? 4 : this.spec.mzDigits)}</b><br>${P3.fixed(r.rel[best], 1)} % · ${name}${this.sides.length === 2 ? (r.hit[best] ? " · matched" : " · unmatched") : ""}` +
+        (this.spec.peakNote ? this.spec.peakNote(si, best) || "" : ""));
     }
     onLeave() { this.hideTip(); if (this.hoverPk) { this.hoverPk = null; this.draw(); } }
   }

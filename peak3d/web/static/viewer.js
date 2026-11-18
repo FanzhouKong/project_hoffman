@@ -1,5 +1,6 @@
 // Results viewer: Overview, Features (table + chromatograms), Alignment and Run details for one peak3d
-// output. Mounted by report.html (standalone) and by the GUI. Reads the decoded bundle only.
+// output. Mounted by report.html (standalone) and by the GUI. Reads the decoded bundle only. A GC-MS output
+// (opts.gc: its compounds block) gets a Compounds tab (gc.js), shown first, and its Features tab is named Ions.
 (function (P3) {
   "use strict";
   const { h, icon, fixed, int, compact, sci, duration } = P3;
@@ -491,7 +492,12 @@
 
     root.replaceChildren();
     root.classList.add("viewer");
-    const tabsDef = [["overview", "insights", "Overview"], ["features", "table_rows", "Features"], ["alignment", "timeline", "Alignment"], ["details", "info", "Run details"]];
+    // a GC-MS output: its deconvolved compounds (each a quantifier m/z, a retention time and a spectrum) come first;
+    // the features of the table are then the single ions those compounds are made of
+    const G = opts.gc && P3.gc ? new P3.gc.Compounds(opts.gc) : null;
+    const gcState = {};
+    const tabsDef = [["overview", "insights", "Overview"], ...(G ? [["compounds", "science", "Compounds"]] : []),
+      ["features", "table_rows", G ? "Ions" : "Features"], ["alignment", "timeline", "Alignment"], ["details", "info", "Run details"]];
     const tabs = h("div.tabs", { role: "tablist" }, tabsDef.map(([id, ic, label]) =>
       h("button.tab.state", { type: "button", role: "tab", "data-tab": id, "aria-selected": "false", onclick: () => show(id) }, icon(ic), label)));
     const body = h("div.page");
@@ -503,7 +509,7 @@
       detailRefs = null;
       repaintRows = null;
       showSiblingsOf = clearCidF = null;
-      body.className = id === "features" ? "page wide" : "page";
+      body.className = id === "features" || id === "compounds" ? "page wide" : "page";
       headEl = annoEl = shown = null;
       chromCharts.length = 0;              // their charts are among those clearCharts destroys now
       annoCharts.length = 0;
@@ -511,8 +517,14 @@
       tabs.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === id)));
       clearCharts();
       body.replaceChildren();
-      ({ overview, features, alignment, details })[id]();
+      ({ overview, features, alignment, details, compounds })[id]();
       if (opts.onTab) opts.onTab(id);
+    }
+
+    // ---------------------------------------------------------------- compounds (GC-MS; gc.js)
+    function compounds() {
+      P3.gc.render(body, G, { state: gcState, track, drop, alive: () => alive, title: R.h.title, trace: opts.gcTrace || null,
+        redraw: () => show("compounds") });
     }
 
     // ---------------------------------------------------------------- overview
@@ -533,7 +545,8 @@
       }
       body.append(h("div.tiles",
         tile("Files", int(R.N), R.params.input_files ? "centroided MS1 mzML" : null),
-        tile("Aligned features", int(R.G), st.n_groups_all ? `${int(st.n_groups_all)} groups before the presence rule` : null),
+        G ? tile("Compounds", int(G.n), `deconvolved from ${int(G.summary.n_components)} components` + (G.hasHits ? `; ${int(G.nAnnotated)} annotated` : "")) : null,
+        tile(G ? "Aligned ions" : "Aligned features", int(R.G), st.n_groups_all ? `${int(st.n_groups_all)} groups before the presence rule` : null),
         R.compounds ? tile("Feature groups", int(R.compounds.n_multi), `features of one compound (adducts, fragments, isotopes) grouped together, holding ${int(R.compounds.n_in_multi)} features; ${int(R.G - R.compounds.n_in_multi)} features on their own`) : null,
         tile("Features per file", mf ? int(mf.med) : "–", mf && R.N > 1 ? `median; range ${int(mf.lo)}–${int(mf.hi)}` : "picked, before alignment"),
         tile("RT alignment", res ? `${fixed(res.mad_after, 2)} s` : R.N > 1 ? "off" : "n/a", res ? `anchor MAD, ${fixed(res.mad_before, 2)} s before correction` : "single file or correction disabled"),
@@ -1984,7 +1997,7 @@
       body.append(h("p.footer-note", "Values shown here are rounded for display; the exact numbers are in aligned_feature_table.tsv and the other tables in the output folder."));
     }
 
-    show(opts.tab || "overview");
+    show(tabsDef.some(([id]) => id === opts.tab) ? opts.tab : G ? "compounds" : "overview");
     return { results: R, show, destroy };
   }
 

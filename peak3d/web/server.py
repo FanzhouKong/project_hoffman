@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from .. import __version__
 from ..estimate import VARIANT, VARIANT_SETS
 from ..library import LIBRARY_SUFFIXES
-from . import bundle, report, subset
+from . import bundle, gcview, report, subset
 
 STATIC = report.STATIC
 APP_SCRIPTS = (*report.SCRIPTS, "app.js")
@@ -58,7 +58,7 @@ RT_COLS = ("rt", "rt_min", "rt_max", "rt_sd")    # minutes in the tables; the GU
 STAGES = [("Thermo .raw file(s) to mzML", "convert", 0.01), ("raw files converted:", "compile", 0.02),
           ("JIT warm-up", "pick", 0.05), ("picked ", "align", 0.80), ("alignment:", "group", 0.84),
           ("grouped ", "fill", 0.88), ("gap-filled", "write", 0.93), ("presence rule", "write", 0.95),
-          ("report", "report", 0.97),
+          ("gc: ", "gc", 0.955), ("report", "report", 0.97),      # gc: the GC stages of a --mode gc run
           # external kernels (peak3d external): the tool's own run, then conversion, chromatograms and MS2
           ("kernel: running", "pick", 0.05), ("kernel: converting", "group", 0.70),
           ("for chromatograms and MS2", "fill", 0.75), ("ms2:", "fill", 0.90), ("identify:", "fill", 0.93)]
@@ -390,6 +390,7 @@ class App:
         self._filled: dict[str, tuple] = {}                  # per table: the gap-filled files of each group
         self._recounts: dict[str, tuple] = {}                # per table and left-out files: counts and rows kept
         self._subsets: dict[str, tuple] = {}                 # per output and left-out files: the report's bundle
+        self._gc: dict[str, tuple] = {}                      # per output: the GC compounds block
         self._refresh: dict[str, threading.Timer] = {}      # report refreshes waiting for a burst of annotations to end
         self.addon_jobs: dict[str, dict] = {}                # add-on installs: name -> {state, log, error}
         self.lock = threading.Lock()
@@ -453,6 +454,16 @@ class App:
         _remember(self._bundles, str(output), (key, blob))
         return blob
 
+
+    def gc_blob(self, output: Path) -> bytes:
+        """gzip'd GC compounds block (gcview.build), rebuilt when the files of <output>/gc change"""
+        key = gcview.stamp(output)
+        hit = self._gc.get(str(output))
+        if hit and hit[0] == key:
+            return hit[1]
+        blob = gcview.blob(output, bundle.LIVE_LEVEL)
+        _remember(self._gc, str(output), (key, blob))
+        return blob
 
     def ms2_blob(self, output: Path) -> bytes:
         """gzip'd MS2 + identification parts of the bundle, rebuilt when those files change"""
@@ -633,6 +644,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.app.bundle_for(out), "application/octet-stream")
             if url.path == "/api/results/ms2ids":
                 return self._send(200, self.app.ms2_blob(self._output(q)), "application/octet-stream")
+            if url.path == "/api/results/gc":          # the Compounds tab of a GC-MS output (404: not one)
+                out = self._output(q)
+                if not gcview.has_gc(out):
+                    return self._error(404, f"no GC results in {out}")
+                return self._send(200, self.app.gc_blob(out), "application/octet-stream")
+            if url.path == "/api/results/gcfile":
+                out = self._output(q)
+                name = q.get("name", [""])[0]
+                path = gcview.gc_dir(out) / name
+                if name not in gcview.GC_FILES or not path.exists():
+                    return self._error(404, f"no file gc/{name} in {out}")
+                ctype = ("application/json" if name.endswith(".json") else "text/plain; charset=utf-8"
+                         if name.endswith(".msp") else "text/tab-separated-values; charset=utf-8")
+                return self._send(200, path.read_bytes(), ctype,
+                                  {"Content-Disposition": _disposition("attachment", f"{out.name}_gc_{name}")})
             if url.path == "/api/results/file":
                 out = self._output(q)
                 name = q.get("name", [""])[0]
@@ -660,10 +686,11 @@ class Handler(BaseHTTPRequestHandler):
                 rep = out / "report.html"
                 if drop:                                               # built now, without the left-out files
                     body = report.render(self.app.subset_bundle(out, drop),
-                                         f"Mosa · {out.name} · without {len(drop)} files").encode()
+                                         f"Mosa · {out.name} · without {len(drop)} files",
+                                         gc_gz=report.gc_blob(out)).encode()      # the GC compounds keep every file
                 else:
                     body = rep.read_bytes() if rep.exists() else report.render(
-                        gzip.compress(bundle.build(out), mtime=0), f"Mosa · {out.name}").encode()
+                        gzip.compress(bundle.build(out), mtime=0), f"Mosa · {out.name}", gc_gz=report.gc_blob(out)).encode()
                 disp = "attachment" if q.get("download") else "inline"
                 name = f"mosa_report_{out.name}{f'_without_{len(drop)}_files' if drop else ''}.html"
                 return self._send(200, body, "text/html; charset=utf-8",
@@ -710,6 +737,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._ms1(body)
             if url.path == "/api/results/eic":
                 return self._eic(body)
+            if url.path == "/api/results/gc/trace":
+                return self._gc_trace(body)
             m = re.fullmatch(r"/api/runs/(\w+)/cancel", url.path)
             if m and m.group(1) in self.app.runs:
                 self.app.runs[m.group(1)].cancel()
@@ -990,6 +1019,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "lo_ppm and hi_ppm must lie between 0 and 1000 ppm")
         offset = bundle.file_offsets(out).get(stem, 0.0) if body.get("offset", True) else None
         return self._json(bundle.extract_eic(out, out / ".cache", stem, mz, ppm, offset, lo, hi))
+
+    def _gc_trace(self, body):
+        """the chromatograms of one GC compound's ions in one file, with the component's model profile
+        (gcview.trace): {"path", "compound_id", "file"?} (file: default the compound's reference file)"""
+        out = self._output({"path": [body.get("path") or ""]})
+        try:
+            k = int(body.get("compound_id"))
+        except (TypeError, ValueError):
+            return self._error(400, "compound_id must be a number")
+        try:
+            return self._json(gcview.trace(out, out / ".cache", k, body.get("file")))
+        except KeyError as e:
+            return self._error(404, str(e.args[0]) if e.args else "not found")
 
     def _identify(self, body):
         """identity search of this output's MS2 spectra against one or more .msp / .pkl libraries ("libraries": their

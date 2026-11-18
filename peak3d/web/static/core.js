@@ -74,7 +74,8 @@
   function duration(s) {
     if (s == null || !isFinite(s)) return "–";
     if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + " s";
-    const m = Math.floor(s / 60), r = Math.round(s - 60 * m);
+    s = Math.round(s);                 // whole seconds first: 119.6 s is 2 min, not "1 min 60 s"
+    const m = Math.floor(s / 60), r = s - 60 * m;
     if (m < 60) return m + " min " + (r ? r + " s" : "");
     return Math.floor(m / 60) + " h " + (m % 60) + " min";
   }

@@ -9,6 +9,7 @@ or `peak3d pick`). Everything is written to OUTPUT/gc/; no file of the LC output
   spectra.msp                     one spectrum per compound (from the file where it is strongest)
   ladder.tsv                      the retention-index ladder found in each file
   identifications.tsv             the listed library hits of every compound
+  hit_spectra.npz                 the library spectra of each compound's best hits (for the viewer)
   params.json                     settings, per-file calibration and timings
 
 Compounds across files: the strongest unmatched component is a reference; in every other file the component within
@@ -36,10 +37,24 @@ from .deconv import DeconvParams, deconvolve, params_from_dict
 
 MATCH_MIN = 0.6            # spectrum similarity for the same compound in two files
 QUANT_TOL, QUANT_PPM = 0.003, 10.0
+HIT_SPECTRA = 3            # library spectra kept per compound, best hits first (the viewer's head-to-tail plot)
 
 
 def log(msg):
     print(f"[peak3d gc] {msg}", flush=True)
+
+
+MZ_COLS = ("quant_mz", "base_mz")
+
+
+def _write(table: pd.DataFrame, path) -> None:
+    """a table of the GC stages: six significant digits, the m/z columns to 1e-5 (six digits would round an
+    accurate mass at m/z 300 to 1 mDa)"""
+    t = table.copy()
+    for c in MZ_COLS:
+        if c in t:
+            t[c] = ["" if v != v else f"{v:.5f}" for v in t[c].astype(float)]
+    t.to_csv(path, sep="\t", index=False, float_format="%.6g")
 
 
 def _deconv_one(job):
@@ -57,7 +72,7 @@ def _deconv_one(job):
     pd.DataFrame({"feature_id": feats["feature_id"].values, "component_id": d.feature_component,
                   "model_r": np.round(d.feature_r, 4), "shared": d.feature_shared.astype(np.int8)}) \
         .to_csv(out / f"{stem}.features.tsv", sep="\t", index=False)
-    d.components.to_csv(out / f"{stem}.tsv", sep="\t", index=False, float_format="%.6g")
+    _write(d.components, out / f"{stem}.tsv")
     info = dict(d.info)
     info.pop("params", None)
     info.update(file=stem, seconds=round(time.perf_counter() - tic, 3), fwhm_med=float(P.fwhm_med), dt=float(P.dt),
@@ -158,6 +173,21 @@ def _study_map(ladder: pd.DataFrame):
     if len(g) < 2 or np.any(np.diff(g.index.values) <= 0):
         return None
     return RI.RIMap(g.values, g.index.values)
+
+
+def _hit_spectra(path: Path, hits: pd.DataFrame, libraries) -> None:
+    """the library spectra of these hits (their records in libraries[hit _lib]) as one file: compound_id and rank
+    per spectrum, then off / mz / inten"""
+    mzs, its, counts = [], [], []
+    for k, i in zip(hits["_lib"].to_numpy(np.int64), hits["library_index"].to_numpy(np.int64)):
+        lib = libraries[k]
+        a, b = int(lib.off[i]), int(lib.off[i + 1])
+        mzs.append(np.asarray(lib.mz[a:b], np.float64))
+        its.append(np.asarray(lib.inten[a:b], np.float32))
+        counts.append(b - a)
+    np.savez(path, compound_id=hits["compound_id"].to_numpy(np.int64), rank=hits["rank"].to_numpy(np.int64),
+             off=np.concatenate([[0], np.cumsum(counts)]).astype(np.int64),
+             mz=np.concatenate(mzs) if mzs else np.zeros(0), inten=np.concatenate(its) if its else np.zeros(0, np.float32))
 
 
 def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbons=None, ladder_table=None,
@@ -311,6 +341,7 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
     for c in ("match", "reverse", "library_ri", "delta_ri"):
         compounds[c] = np.nan
     libs = [Path(p) for p in ([library] if isinstance(library, (str, Path)) else (library or []))]
+    (gc_dir / "hit_spectra.npz").unlink(missing_ok=True)          # an earlier search's
     if libs and len(compounds):
         tic = time.perf_counter()
         SP = search or L.SearchParams()
@@ -319,16 +350,20 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
         elif ri_tol is not None:
             SP.ri_tol = float(ri_tol)
         mz_range = (min(i["mz_lo"] for i in infos), max(i["mz_hi"] for i in infos))
-        parts = []
+        parts, loaded = [], []
         for p in libs:
             lib = L.load(p, gc_dir / ".library_cache", ri_type)
             h = L.search(c_off, c_mz, c_ab, lib, compounds["ri"].values, SP, mz_range, p.name)
+            h["_lib"] = len(loaded)
+            loaded.append(lib)
             parts.append(h)
             log(f"library {p.name}: {len(lib)} spectra ({'unit' if lib.nominal else 'accurate'} mass, "
                 f"{int(np.isfinite(lib.ri).sum())} with a retention index), {h['query'].nunique()} compounds with a hit")
         hits = pd.concat(parts, ignore_index=True).sort_values(["query", "match"], ascending=[True, False], kind="stable")
         hits["rank"] = hits.groupby("query").cumcount() + 1
         hits = hits.rename(columns={"query": "compound_id"})
+        _hit_spectra(gc_dir / "hit_spectra.npz", hits[hits["rank"] <= HIT_SPECTRA], loaded)
+        hits = hits.drop(columns="_lib")
         top = hits[(hits["rank"] == 1) & (hits["match"] >= min_similarity)].set_index("compound_id")
         for c in ("name", "formula", "inchikey", "match", "reverse", "library_ri", "delta_ri"):
             compounds.loc[top.index, c] = top[c].values
@@ -337,10 +372,10 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
 
     # 6. write
     for s in stems:
-        comps[s].to_csv(comp_dir / f"{s}.tsv", sep="\t", index=False, float_format="%.6g")
-    compounds.to_csv(gc_dir / "compounds.tsv", sep="\t", index=False, float_format="%.6g")
-    pd.concat([compounds[["compound_id", "rt", "ri", "quant_mz", "name"]], pd.DataFrame(quant, columns=stems)], axis=1) \
-        .to_csv(gc_dir / "compound_table.tsv", sep="\t", index=False, float_format="%.6g")
+        _write(comps[s], comp_dir / f"{s}.tsv")
+    _write(compounds, gc_dir / "compounds.tsv")
+    _write(pd.concat([compounds[["compound_id", "rt", "ri", "quant_mz", "name"]], pd.DataFrame(quant, columns=stems)],
+                     axis=1), gc_dir / "compound_table.tsv")
     hits.to_csv(gc_dir / "identifications.tsv", sep="\t", index=False, float_format="%.6g")
     L.write_msp(gc_dir / "spectra.msp",
                 [f"compound {k}" + (f" | {n}" if n else "") for k, n in zip(compounds["compound_id"], compounds["name"])],

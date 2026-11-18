@@ -1,10 +1,12 @@
 name: app
 # Standalone peak3d app (PyInstaller) for Windows, macOS and Linux: build, use it as a user would, publish.
 # Every push builds and checks the four apps (the downloads and the check screenshots stay as workflow artifacts);
-# only a v* tag publishes them, as the release "Mosa vX.Y.Z". Since 1.1.3 there is no preview release.
+# only a v* tag publishes them, as the release "Mosa vX.Y.Z". Since 1.1.3 there is no preview release. A tag that
+# is not plain vX.Y.Z (v1.4.0b1: the GC-MS preview from gc-support) is published as a pre-release, which leaves the
+# latest release as it is.
 on:
   push:
-    branches: [main, gui-prototype]
+    branches: [main, gui-prototype, gc-support]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -68,6 +70,13 @@ jobs:
           start=$(date +%s); "$BIN" demo --output smoke1 --cores 2; echo "cold: $(( $(date +%s) - start )) s"
           test -f smoke1/peak3d_out/report.html
           start=$(date +%s); "$BIN" demo --output smoke2 --cores 2; echo "warm: $(( $(date +%s) - start )) s"
+      - name: GC-MS mode inside the app (the demo runs once more, deconvolved into compounds)
+        run: |
+          "$BIN" process --input smoke1/demo_mzml --output gc_smoke --cores 2 --mode gc | tee gc_smoke.log
+          if grep -q "gc stages failed" gc_smoke.log; then echo "::error::the GC stages failed inside the app"; exit 1; fi
+          test -f gc_smoke/gc/compounds.tsv && test -f gc_smoke/gc/compound_table.tsv
+          echo "GC compounds: $(( $(wc -l < gc_smoke/gc/compounds.tsv) - 1 ))"
+          grep -q 'id="peak3d-gc" type="application/octet-stream">H4sI' gc_smoke/report.html      # the report holds them (gzip, base64)
       - name: asari inside the app (bundled; runs as the app's own `_asari` command)
         if: matrix.extras == '[asari]'
         timeout-minutes: 10
@@ -261,4 +270,6 @@ jobs:
           if [ -n "$tag_sha" ]; then changes=$(gh api "repos/$GH_REPO/git/tags/$tag_sha" --jq .message 2>/dev/null || true); fi
           if [ -n "$changes" ]; then printf '%s\n\n%s\n' "$changes" "$notes" > notes.md; else printf '%s\n' "$notes" > notes.md; fi
           cat notes.md
-          gh release create "$GITHUB_REF_NAME" upload/* --title "Mosa $GITHUB_REF_NAME" --notes-file notes.md
+          pre=""
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then pre="--prerelease --latest=false"; fi
+          gh release create "$GITHUB_REF_NAME" upload/* --title "Mosa $GITHUB_REF_NAME" --notes-file notes.md $pre

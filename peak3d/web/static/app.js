@@ -42,6 +42,8 @@
     compounds: "Compound groups (adducts, fragments, isotopes)",
     library: "Spectral libraries (.msp or .pkl, optional)", similarity: "Similarity score", min_similarity: "Minimum similarity",
     precursor_ppm: "Precursor tolerance (ppm)", fragment_tol: "Fragment tolerance (Da)", fragment_ppm: "Fragment tolerance (ppm)",
+    mode: "Acquisition", ri_ladder: "Retention-index ladder", ri_carbons: "Ladder carbon numbers (optional)", ri_table: "Ladder table (optional)",
+    ei_library: "EI spectral libraries (.msp, optional)", ri_tol: "Retention-index window of the search", ri_type: "Library retention index",
   };
   const HELP = {
     cores: "Files are picked in parallel; each worker holds one file in memory (about 0.5–1.5 GB).",
@@ -53,10 +55,22 @@
     set: "One NAME=VALUE per line; advanced picker parameters.",
     no_report: "A single HTML file with these views and chromatograms; opens in any browser, easy to share.",
     library: "MS2 spectra are mapped to the features (a consensus of all of them, and the highest-TIC one); with one or more libraries (searched as one, each hit naming its library), both are searched after the run, each candidate scored on the spectrum as measured and denoised with its own formula (ions without a plausible neutral loss removed), and the better of the best hits on the denoised consensus and highest-TIC spectra becomes each feature's annotation.",
+    mode: "GC-MS (electron ionisation): fragment peaks that ride on a continuous background of the same ion are kept, each run's ions are deconvolved into compounds with their spectra, and the results open on a Compounds tab.",
+    ri_ladder: "Find this ladder in the runs to give every compound a retention index: n-alkanes (RI = 100 x carbons) or the FiehnLib FAME markers.",
+    ri_carbons: 'Carbon numbers of the ladder, e.g. "10-40" or "8,9,10,12-30:2". Empty: the C8-C30 FiehnLib set for FAMEs; for n-alkanes, the compounds whose molecular ion names their carbon number.',
+    ri_table: "A table with the ladder instead of finding it: columns rt (minutes) or rt_s, and ri or carbon.",
+    ei_library: "Unit-mass or accurate-mass EI libraries; each compound's deconvolved spectrum is searched in them, within the retention-index window when the runs have a ladder. The best hit at the minimum similarity becomes the annotation.",
+    ri_tol: "Empty: 20 for n-alkane indices, 3000 for FAME indices.",
   };
+  // the options of the GC-MS stages: a card of their own, shown (and sent with the run) in GC-MS mode only
+  const GC_FIELDS = ["ri_ladder", "ri_carbons", "ri_table", "ei_library", "ri_tol", "ri_type"];
+  const gcMode = () => S.kernel === "peak3d" && S.form.mode === "gc";
+  const runOptions = () => (gcMode() ? S.form : Object.fromEntries(Object.entries(S.form).filter(([k]) => !GC_FIELDS.includes(k))));
   const INVERTED = new Set(["no_rt_correction", "no_rt_tracking", "no_gap_fill", "no_report", "no_keep_cache"]);
-  const BASIC = ["cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];
-  const SEGMENTS = { polarity: [[null, "Auto"], ["pos", "Positive"], ["neg", "Negative"]], quant: [["height", "Height"], ["area", "Area"]] };
+  const BASIC = ["mode", "cores", "polarity", "quant", "min_score", "ppm", "no_rt_correction", "no_gap_fill", "library", "similarity"];
+  const SEGMENTS = { polarity: [[null, "Auto"], ["pos", "Positive"], ["neg", "Negative"]], quant: [["height", "Height"], ["area", "Area"]],
+    mode: [["lc", "LC-MS"], ["gc", "GC-MS (EI)"]], ri_ladder: [[null, "None"], ["alkane", "n-Alkanes"], ["fame", "FAMEs"]],
+    ri_type: [["semi", "Semi-standard non-polar"], ["std", "Standard non-polar"], ["polar", "Polar"]] };
 
   function stamp() {
     const d = new Date(), p = (n) => String(n).padStart(2, "0");
@@ -146,14 +160,19 @@
     }
     if (SEGMENTS[f.dest]) {
       return h("div", h("div.label-medium", { style: { color: "var(--ink-2)", marginBottom: "6px" } }, label),
-        segmented(SEGMENTS[f.dest], S.form[f.dest], set), help && f.dest !== "quant" ? h("div.body-small.muted", { style: { marginTop: "5px" } }, help) : null);
+        segmented(SEGMENTS[f.dest], S.form[f.dest], set), help && f.dest !== "quant" && f.dest !== "ri_type" ? h("div.body-small.muted", { style: { marginTop: "5px" } }, help) : null);
     }
-    if (f.dest === "library") {      // one or more libraries, searched as one: added by path or Browse (several at once)
-      const libs = () => S.form.library || [];
+    if (f.dest === "library" || f.dest === "ei_library") {      // one or more libraries: added by path or Browse (several at once)
+      const ei = f.dest === "ei_library";       // GC-MS: EI libraries (.msp), remembered apart from the MS2 libraries
+      const libs = () => S.form[f.dest] || [];
       const rows = h("div.lib-rows.form-libs");
       const paint = () => rows.replaceChildren(...libs().map((p) => h("div.lib-row", { title: p }, icon("description"), h("span.lib-name", basename(p)),
         h("button.icon-btn.state", { type: "button", title: "Remove", "aria-label": `Remove ${basename(p)}`, onclick: () => setLibs(libs().filter((x) => x !== p)) }, icon("close")))));
-      const setLibs = (list, remember = true) => { S.form.library = list; if (remember) P3.saveLibraries(list); paint(); onAny(); };
+      const setLibs = (list, remember = true) => {
+        S.form[f.dest] = list;
+        if (remember) { if (ei) P3.storeSet("peak3d-ei-libraries", JSON.stringify(list)); else P3.saveLibraries(list); }
+        paint(); onAny();
+      };
       const add = (paths) => {
         const fresh = paths.map((p) => String(p).trim()).filter((p) => p && !libs().includes(p));
         if (fresh.length) setLibs(libs().concat(fresh));
@@ -164,11 +183,11 @@
           onclick: () => browse("msp", libs().length ? dirname(libs()[libs().length - 1]) : S.input, (ps) => add([].concat(ps))) }, icon("folder_open")),
         onchange: (v) => { if (v.trim()) { t.input.value = ""; add([v]); } },
       });
-      t.input.placeholder = "Add a .msp or .pkl file: path, or Browse";
+      t.input.placeholder = ei ? "Add an EI .msp file: path, or Browse" : "Add a .msp or .pkl file: path, or Browse";
       t.input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); const v = t.input.value; t.input.value = ""; add([v]); } });
       t.el.insertBefore(rows, t.support);
       paint();
-      exampleLibrary = (v) => setLibs([v], false);      // not remembered as the user's libraries
+      if (!ei) exampleLibrary = (v) => setLibs([v], false);      // not remembered as the user's libraries
       return t.el;
     }
     if (f.kind === "choice") {
@@ -209,6 +228,7 @@
   function argvPreview() {
     const parts = ["peak3d", ...(S.kernel === "peak3d" ? ["process"] : ["external", "--kernel", S.kernel]), "--input", q(S.input || "<folder>"), "--output", q(S.output || "<folder>")];
     for (const f of schemaOf(S.kernel)) {
+      if (GC_FIELDS.includes(f.dest) && !gcMode()) continue;
       const v = S.form[f.dest];
       if (f.kind === "flag") { if (v) parts.push(f.flag); }
       else if (f.kind === "list") (v || []).forEach((x) => parts.push(f.flag, q(x)));
@@ -220,7 +240,7 @@
 
   // ---------------------------------------------------------------- run page
   const INTRO = {
-    peak3d: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). Mosa picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library.",
+    peak3d: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). Mosa picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library. For GC-MS data (electron ionisation), set Acquisition to GC-MS: each run's ions are then also deconvolved into compounds with their spectra.",
     asari: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). asari detects and aligns the features with its own defaults; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
     masscube: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). MassCube runs its default untargeted workflow; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
   };
@@ -258,9 +278,13 @@
       sumOut.textContent = S.output ? basename(S.output) : "–";
       sumOut.title = S.output || "";
       sumCores.textContent = S.form.cores != null ? String(S.form.cores) : "–";
-      const bad = !n || needsReader || !S.output || !kst.available || schemaOf(S.kernel).some((f) => S.formErrors[f.dest]);
+      const bad = !n || needsReader || !S.output || !kst.available || schemaOf(S.kernel).some((f) => S.formErrors[f.dest] && (gcMode() || !GC_FIELDS.includes(f.dest)));
       runBtn.disabled = bad;
+      gcCard.style.display = gcMode() ? "" : "none";
     };
+    const gcBox = h("div.form");
+    const gcCard = h("section.card.elevated", { style: { display: "none" } }, h("div.card-head", h("h3.title-medium", "GC-MS")),
+      h("p.card-sub.body-small", "After picking, each run's ions are deconvolved into compounds (one spectrum each, quantified on its own strongest unshared ion) and the compounds are matched across the files. Optional: a retention index from a ladder in the runs, and an EI library to annotate the compounds."), gcBox);
 
     const inField = textField("Data folder", S.input, {
       lead: "folder", help: "The folder that holds your .mzML or Thermo .raw files",
@@ -325,9 +349,10 @@
         h("span.body-small.muted", { style: { flex: "1", minWidth: "200px" } }, "No mzML files at hand? This writes three small synthetic LC-MS/MS runs, with MS2 spectra and a spectral library to search them, into a peak3d_example folder."))));
 
     const basic = h("div.form"), adv = h("div.form");
-    for (const f of schemaOf(S.kernel)) (BASIC.includes(f.dest) ? basic : adv).appendChild(fieldFor(f, refresh));
+    for (const f of schemaOf(S.kernel)) (GC_FIELDS.includes(f.dest) ? gcBox : BASIC.includes(f.dest) ? basic : adv).appendChild(fieldFor(f, refresh));
     main.appendChild(h("section.card.elevated", h("div.card-head", h("h3.title-medium", "Settings")), basic,
       h("details.expand", { style: { marginTop: "14px" } }, h("summary.state", icon("tune"), "Advanced options", h("span.spacer"), icon("expand_more", "chev")), h("div.form", { style: { padding: "12px 0 0" } }, adv))));
+    if (gcBox.children.length) main.appendChild(gcCard);
 
     const copyBtn = h("button.icon-btn.state", { type: "button", title: "Copy command", "aria-label": "Copy the equivalent command", onclick: () => {
       (navigator.clipboard ? navigator.clipboard.writeText(cmd.textContent) : Promise.reject()).then(() => snack("Command copied"), () => snack("Copy failed; select the text instead"));
@@ -346,7 +371,7 @@
     async function start(overwrite) {
       runBtn.disabled = true;
       try {
-        const r = await post("/api/runs", { kernel: S.kernel, input: S.input, output: S.output, options: S.form, overwrite });
+        const r = await post("/api/runs", { kernel: S.kernel, input: S.input, output: S.output, options: runOptions(), overwrite });
         S.runs.set(r.id, { status: r, log: r.log || [] });
         renderRuns();
         poll(r.id);
@@ -372,15 +397,17 @@
 
   // ---------------------------------------------------------------- runs
   const STEPS = [["compile", "Compile"], ["pick", "Pick files"], ["align", "Align"], ["group", "Group"], ["fill", "Gap-fill"], ["report", "Report"]];
-  const stepsOf = (k, nConvert) => [...(nConvert ? [["convert", "Convert .raw"]] : []),
-    ...(!k || k === "peak3d" ? STEPS : [["pick", "Run " + KNAME[k]], ["group", "Convert"], ["fill", "Chromatograms & MS2"], ["report", "Report"]])];
+  const isGcRun = (s) => { const i = (s.argv || []).indexOf("--mode"); return i >= 0 && s.argv[i + 1] === "gc"; };
+  const stepsOf = (k, nConvert, gc) => [...(nConvert ? [["convert", "Convert .raw"]] : []),
+    ...(!k || k === "peak3d" ? (gc ? [...STEPS.slice(0, -1), ["gc", "Deconvolve"], STEPS[STEPS.length - 1]] : STEPS) :
+      [["pick", "Run " + KNAME[k]], ["group", "Convert"], ["fill", "Chromatograms & MS2"], ["report", "Report"]])];
   const EXTERNAL_TEXT = { compile: () => "Starting…", pick: (k) => `Running ${KNAME[k]} (its own progress is in the log)…`, group: () => "Converting the feature table…",
     fill: () => "Reading the files for chromatograms and MS2…" };
   const STAGE_TEXT = {
     convert: "Converting the Thermo .raw files to mzML (once: later runs on this folder reuse them)…",
     compile: "Compiling the picker (the first run on a machine takes about a minute)…", pick: "Picking features in each file…",
     align: "Aligning retention times…", group: "Grouping features across files…", fill: "Filling gaps from the chromatograms…",
-    write: "Writing tables and QC figures…", report: "Writing the report…", done: "Finished", failed: "Failed", cancelled: "Cancelled",
+    write: "Writing tables and QC figures…", gc: "Deconvolving each run's ions into compounds (GC-MS)…", report: "Writing the report…", done: "Finished", failed: "Failed", cancelled: "Cancelled",
   };
   function renderRuns() {
     const box = document.getElementById("runs");
@@ -392,7 +419,7 @@
   function runCard(R) {
     const s = R.status;
     const running = s.state === "running";
-    const steps0 = stepsOf(s.kernel, s.n_convert);
+    const steps0 = stepsOf(s.kernel, s.n_convert, isGcRun(s));
     const stIdx = Math.max(0, steps0.findIndex(([k]) => k === (s.stage === "write" ? "fill" : s.stage)));
     const head = h("div.row", { style: { alignItems: "flex-start" } },
       h("div", { style: { flex: 1, minWidth: 0 } }, h("div.title-small", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
@@ -476,7 +503,7 @@
   }
 
   // ---------------------------------------------------------------- results page
-  function openResults(path) { S.resultsPath = path; S.viewerTab = "overview"; go("results"); }
+  function openResults(path) { S.resultsPath = path; S.viewerTab = null; go("results"); }      // null: the viewer's own first tab
   async function resultsPage() {
     setTitle("Results");
     if (!S.resultsPath) {
@@ -498,6 +525,8 @@
     S.skipBy = S.skipBy || {};
     const skipQ = () => ((S.skipBy[path] || []).length ? `&skip=${enc(S.skipBy[path].join(","))}` : "");
     const fileUrl = (name) => `/api/results/file?path=${enc(path)}&name=${name}`;
+    const gcUrl = (name) => `/api/results/gcfile?path=${enc(path)}&name=${name}`;
+    let gcHead = null;               // a GC-MS output: the header of its compounds block
     const addActions = (quant, hd) => {
       const other = quant === "area" ? "height" : "area";
       const without = skipQ() ? ", without the flagged files" : "";
@@ -505,8 +534,12 @@
       actions.replaceChildren(
         h("a.icon-btn.state", { href: `/api/results/report?path=${enc(path)}${skipQ()}`, target: "_blank", rel: "noopener", title: `Open report.html in a new tab${without}`, "aria-label": "Open report" }, icon("open_in_new")),
         menuButton("download", "Download", [
-          { icon: "table_rows", label: `Feature table (${quant}s${without})`, href: fileUrl("aligned_feature_table.tsv") + skipQ() },
-          ...(!hd.kernel || hd.kernel === "peak3d" ? [{ icon: "table_rows", label: `Feature table (${other}s${without})`, href: fileUrl(`aligned_feature_${other}.tsv`) + skipQ() }] : []),
+          ...(gcHead ? [{ icon: "table_rows", label: "GC-MS compounds (compounds.tsv)", href: gcUrl("compounds.tsv") },
+            { icon: "table_rows", label: "GC-MS compound x file abundances (compound_table.tsv)", href: gcUrl("compound_table.tsv") },
+            { icon: "bar_chart", label: "GC-MS compound spectra (.msp)", href: gcUrl("spectra.msp") },
+            ...(gcHead.hits ? [{ icon: "table_rows", label: "GC-MS library hits (identifications.tsv)", href: gcUrl("identifications.tsv") }] : []), "-"] : []),
+          { icon: "table_rows", label: `${gcHead ? "Ion" : "Feature"} table (${quant}s${without})`, href: fileUrl("aligned_feature_table.tsv") + skipQ() },
+          ...(!hd.kernel || hd.kernel === "peak3d" ? [{ icon: "table_rows", label: `${gcHead ? "Ion" : "Feature"} table (${other}s${without})`, href: fileUrl(`aligned_feature_${other}.tsv`) + skipQ() }] : []),
           ...(hd.ms2c ? [{ icon: "bar_chart", label: "Consensus MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_consensus.msp") }] : []),
           ...(hd.ms2 ? [{ icon: "bar_chart", label: "Highest-TIC MS2 spectra, one per feature (.msp)", href: fileUrl("ms2_spectra.msp") }] : []),
           ...(hd.ms2c && hd.ms2c.denoised ? [{ icon: "bar_chart", label: "Denoised consensus MS2 spectra (.msp)", href: fileUrl("ms2_consensus_denoised.msp") }] : []),
@@ -533,7 +566,11 @@
         Object.assign(b.a, m.a);
         for (const k of ["ms2", "ms2c", "ids", "ann"]) b.header[k] = m.header[k];
       } catch (e) { /* keep the bundle's own copy */ }
+      let gc = null;         // a GC-MS output: its compounds, for the Compounds tab (404: not one)
+      try { gc = await P3.loadBundle(await api(`/api/results/gc?path=${enc(path)}`)); } catch (e) { /* an LC-MS output */ }
       if (S.page !== "results" || S.resultsPath !== path) return;
+      gcHead = gc ? gc.header : null;
+      const gcTrace = (compound_id, file) => post("/api/results/gc/trace", { path, compound_id, file });
       const quant = b.header.quant === "area" ? "area" : "height";
       let cur = b.header;              // the header parts the download menu reflects (a search updates them)
       addActions(quant, cur);
@@ -553,7 +590,7 @@
       const ms1 = (group_id, file) => post("/api/results/ms1", { path, group_id, file });
       const eic = (file, mz, ppm, offset, lo, hi) => post("/api/results/eic", Object.assign({ path, file, mz, ppm, offset },
         lo != null && hi != null ? { lo_ppm: lo, hi_ppm: hi } : {}));
-      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, skip: S.skipBy[path] || [], onSkip, identify, annotate, note, ms1, eic, browseLibrary, methods: S.info.methods || {} });
+      S.viewer = P3.viewer.mount(holder, b, { tab: S.viewerTab, onTab: (t) => (S.viewerTab = t), exportTable, skip: S.skipBy[path] || [], onSkip, identify, annotate, note, ms1, eic, browseLibrary, methods: S.info.methods || {}, gc, gcTrace });
     } catch (e) {
       holder.replaceChildren(h("div.page", h("div.banner.error", { style: { marginTop: "16px" } }, icon("error"), h("div", e.message))));
     }
@@ -752,6 +789,9 @@
     for (const f of [...S.schemas.peak3d, ...S.schemas.external]) if (!(f.dest in S.form)) S.form[f.dest] = f.kind === "list" ? [] : f.default;
     if ("cores" in S.form) S.form.cores = Math.max(1, Math.min(S.info.cpu_count || 1, 4));
     if ("library" in S.form) S.form.library = P3.savedLibraries();     // search automatically with the last libraries
+    if ("ei_library" in S.form) {
+      try { const v = JSON.parse(P3.storeGet("peak3d-ei-libraries") || "[]"); if (Array.isArray(v)) S.form.ei_library = v.filter((x) => typeof x === "string" && x); } catch (e) { /* not a list */ }
+    }
     const k = P3.storeGet("peak3d-kernel");
     if (k && KNAME[k]) S.kernel = k;
     try {

@@ -37,6 +37,15 @@ press **Create example data** to try it with three small synthetic runs, then **
 results**. The first run compiles Mosa (about a minute); later runs start at once. Your data stay on your
 computer.
 
+**GC-MS (preview)**: the pre-release
+[Mosa v1.4.0b1](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.4.0b1), built from the `gc-support`
+branch, adds a GC-MS mode for electron-ionisation data (centroided mzML). Set **Acquisition** to **GC-MS (EI)** on
+the run form: after picking, each run's ions are deconvolved into compounds, and the results open on a
+**Compounds** tab that lists every compound at its quantifier m/z and retention time, with its spectrum, its ions'
+chromatograms and its abundance in every file. Optional: a retention index from an n-alkane or FAME ladder in the
+runs, and an EI library (.msp) to annotate the compounds. Method and limits: [`peak3d/gc/README.md`](peak3d/gc/README.md).
+The LC-MS workflow in it is the one of 1.3.0.
+
 **Thermo .raw files** work as they are: choose their folder and Mosa first converts them to centroided mzML with
 ThermoRawFileParser, into `mzml_converted/` in that folder, where later runs find and reuse them. ThermoRawFileParser
 is not part of the app download, because Thermo's licence for the RawFileReader libraries it uses does not let us

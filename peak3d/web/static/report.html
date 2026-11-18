@@ -23,6 +23,7 @@
 </div>
 <script id="peak3d-data" type="application/octet-stream">{{DATA}}</script>
 <script id="peak3d-ms2" type="application/octet-stream">{{MS2}}</script>
+<script id="peak3d-gc" type="application/octet-stream">{{GC}}</script>
 <script>
 {{JS}}
 </script>
@@ -43,7 +44,9 @@
       for (const k of ["ms2", "ms2c", "ids", "ann", "ms2_note"]) { if (k in m.header) bundle.header[k] = m.header[k]; else delete bundle.header[k]; }
     }
     document.getElementById("subtitle").textContent = bundle.header.title;
-    P3.viewer.mount(el, bundle, {});
+    const g = document.getElementById("peak3d-gc");       // a GC-MS output: its compounds, for the Compounds tab
+    const gc = g && g.textContent.trim() ? await P3.loadBundle(P3.b64bytes(g.textContent)) : null;
+    P3.viewer.mount(el, bundle, { gc });
   } catch (e) {
     el.replaceChildren(P3.h("div.page", P3.h("div.banner.error", { style: { marginTop: "24px" } }, P3.icon("error"), P3.h("div", String(e.message || e)))));
   }
