@@ -52,7 +52,8 @@ def _deconv_one(job):
     P = params_from_dict(json.loads((Path(features_dir) / f"{stem}.params.json").read_text()))
     d = deconvolve(cloud, feats, P, D)
     out = Path(out_dir)
-    np.savez(out / f"{stem}.npz", off=d.off, mz=d.mz, abundance=d.abundance, shared=d.shared)
+    np.savez(out / f"{stem}.npz", off=d.off, mz=d.mz, abundance=d.abundance, shared=d.shared,
+             model_off=d.model_off, model=d.model.astype(np.float32))
     pd.DataFrame({"feature_id": feats["feature_id"].values, "component_id": d.feature_component,
                   "model_r": np.round(d.feature_r, 4), "shared": d.feature_shared.astype(np.int8)}) \
         .to_csv(out / f"{stem}.features.tsv", sep="\t", index=False)

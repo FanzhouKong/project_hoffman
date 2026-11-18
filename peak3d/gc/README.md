@@ -50,7 +50,8 @@ what the rule adds is that they are features (they can define a component and be
 **Deconvolution (`deconv.py`, per file).** On a TOF or Orbitrap all ions of one compound share an apex time and
 a peak shape; two co-eluting compounds differ in apex time, often by a fraction of a peak width, and may produce
 the same ion.
-1. Every picked ion gets an apex time below the scan spacing (parabola through the logarithm of its top).
+1. Every picked ion gets an apex time below the scan spacing (parabola through the logarithm of its top), with
+   the fit's own standard error: a wide, flat or noisy top is placed less well than a sharp one.
 2. The file calibrates itself on the isotope pairs the picker annotated (M and M+1 of one fragment, known to be
    one compound), per S/N class of the weaker ion: apex tolerance = 3 robust sd of the pairs' apex-time
    differences, shape cut = the chromatogram correlation 99 % of the pairs reach.
@@ -61,6 +62,16 @@ the same ion.
    tight members; every ion then goes to the model it fits best among the components within its tolerance.
    `n_features` counts tight members, `n_loose` the others; `min_features` (default 1) can require more picked
    ions per component.
+   A component of one picked ion whose apex time is less certain than its class's (`tau_own`) joins the
+   component whose model its chromatogram follows, within a tolerance wider in proportion to its own error
+   (an ion r times as uncertain as its class differs from a typical partner by sqrt((r^2 + 1) / 2) as much). It
+   does not shape that model. Components of several ions are left alone: ions that agree on an apex time are
+   a compound, however badly a parabola fits each (a tailing peak is fitted badly in all its ions alike).
+   The profiles that are reported and that the spectra are fitted with (`model_net`) are built from the
+   members' chromatograms above the level each holds beyond its bounds: a background ion (column bleed,
+   reagent, air) among the five strongest members of a weak peak stands on a fifth of its height and more,
+   and would put a pedestal under the profile that the compound's other ions do not have. Grouping is decided
+   on the chromatograms as they are (correlations and fits with a constant are indifferent to such a level).
 3b. Delayed copies. Some fragments are formed after the column (in the ion source, on a surface): their signal
    starts when their compound's does and peaks and tails later, by 0.15-0.45 s on the MRH set, past the apex
    tolerance, so they made a component of their own. A second compound that elutes later starts later. A
@@ -69,6 +80,22 @@ the same ion.
    better than a's profile moved later (F >= 5), and moving it later on top is not needed (F < 5). F uses a noise
    floor from the shape cut, so two profiles that agree within their noise are left as the apex times had them.
    The copy's ions join a; the spectrum is fitted with both profiles; `n_delayed` counts the copies.
+3c. Explained components (`_explained`, `_rejoin`). In a cluster of overlapping compounds most picked ions are
+   shared, and each one's apex lies somewhere between the compounds' apexes, by more than the apex tolerance: the
+   steps above made a component at every such apex time (11 components for two fatty acid methyl esters 1.7 s
+   apart on a quadrupole run), and the same happened to a single compound at low signal, whose noisy apexes
+   scatter. So, from the smallest component up, a component is dissolved when the larger components that
+   overlap it describe its strongest ions without it: (1) their models, fitted non-negatively with a constant,
+   leave no more than the share of variance an isotope partner is allowed to leave (1 - shape cut^2), and
+   (2) adding its own model does not lower the residual significantly (F < 5). A component that neighbours do
+   not describe is never dissolved, however weak. Smaller components that passed their own test take part in
+   the explanation as long as the larger ones carry more than half of it (`explain_smaller`): the ions a large
+   compound shares with a small one before it are the large one's peak with a shoulder, and there can be more
+   of them than the small compound has ions of its own. Each ion of a dissolved component is fitted again with the
+   live models: when one model carries at least 80 % of the fit and the fit reaches the ion's shape cut, the ion
+   is a member of that component (`n_rejoined`); otherwise it is shared. Model profiles are single-peaked
+   (`_unimodal`): where a profile rises again away from its apex (a neighbour's peak in the member ions) it is
+   continued as a decay. In the spectrum fit a component's own picked ions start from its own model.
 4. An ion shared by two compounds less than a peak width apart is picked as one peak between them. A component of
    at most six ions whose model is a mix of the models of the nearest larger component on each side is dissolved,
    and its ions are marked shared. (Shape alone cannot tell this from a small compound eluting between two large
@@ -110,7 +137,7 @@ stay candidates. Ranked by `match`; a best hit at `--min-similarity` (0.7) or mo
 | `identifications.tsv` | every listed hit (match >= 0.3, up to 10 per compound and library) |
 | `ladder.tsv` | the ladder compounds found per file: carbon, ri, rt, rt_corr, component, molecular_ion |
 | `components/<file>.tsv` | the file's components: rt, bounds, n_features, n_ions, n_shared_ions, base and quantifier ion, tic, model_r, apex_tol_s, rt_corr, ri, compound_id |
-| `components/<file>.npz` | their spectra: off, mz, abundance, shared |
+| `components/<file>.npz` | their spectra: off, mz, abundance, shared; and model profiles (model_off, model: maximum 1, on the component's scans scan_min..scan_max) |
 | `components/<file>.features.tsv` | per picked ion: component_id (-1 none), model_r, shared |
 | `params.json` | settings, each file's calibration (tolerances, isotope pairs), ladder notes, timings |
 
@@ -127,6 +154,37 @@ sit in one component; a pair of truth compounds less than two peak widths apart 
 | close pairs separated (108; BDE 153 / TBBPA at 0.2-0.5 s) | all | all | all |
 
 gc-mode run: 69.1 %, 74.9 %, 78.7 % whole; 23,532, 11,545, 10,756 components; all pairs separated.
+
+With the explained-component step (2026-11-18): 90.1 % whole (94.9 % with at least 90 % of their ions), 7,207
+components, all 108 pairs separated; gc-mode run 86.8 %. In the spectra (`bench/gc/mrh_score.py`, compounds with at
+least 3 clean ions): all clean ions in one spectrum 80.8 -> 86.3 % (gc-mode run 77.6 -> 87.4 %), compounds whose
+ions sit in two or more components 27.4 -> 24.4 % (34.2 -> 24.4 %). With smaller components taking part in the
+explanation (`explain_smaller`, 2026-11-18): 91.1 % whole (95.7 %), 7,069 components, all pairs separated; gc-mode
+run 87.3 %. Tried and not adopted: moving a component's bound past a valley that cut its reference ion (89.2 %
+whole, slower); any surviving component explaining any other, without the half limit (83.9 %); the model profile
+as the lower quartile of its ions instead of the median (90.8 %, and worse fits in co-eluting clusters).
+
+Open: a compound that is only a shoulder in every picked ion gets no component. `shoulders` (off) seeds
+components at second maxima that at least three ions share (`_sub_apexes`, `_coincident`, `_complete`): it finds
+the linoleate shoulder of the DeepCPR fatty-acid runs at 0.6x, but on the MRH set it adds about 2,000 components
+and lowers whole compounds to 90.4 % (gc-mode run 84.9 %), so it is not a default.
+
+With `model_net` and `tau_own` (2026-11-18): 91.3 % whole (95.7 %), 6,948 components, all 108 pairs separated;
+gc-mode run 88.0 %. `model_net` alone changes no truth compound. On the DeepCPR sets: amino acids R2 0.958 ->
+0.971 (5 mg/L 0.869 -> 0.929), 60 of 60 cases found (methionine at 5 mg/L was split in three); FAMEs 0.983 ->
+0.984, co-eluting clusters unchanged at 0.974 except the 565-568 s segment at 0.2x (0.907 -> 0.888). Tried and
+not adopted: the floor already in the models that decide the grouping (MRH 90.4 %, single-ion components no
+longer dissolved); the wider tolerance for every ion joining a seed (MRH 92.3 %, but a large neighbour takes
+the ions of a close tailing compound: TBBPA lost in three files, C18 FAME cluster worse).
+
+## Unit-resolution runs: the DeepCPR benchmark
+
+`bench/gc/cdf_to_mzml.py` turns a quadrupole .CDF into the centroid mzML the picker reads (nominal masses written
+13C-spaced so that M / M+1 pairs calibrate the deconvolution, a noise floor from the file's negative points, the
+scan skew measured and removed). `scripts/51_deepcpr_gc.sbatch`, `52_deepcpr_tool.sbatch`, `54_deepcpr_score.sh` run
+Mosa and DeepCPR (Yu et al., Anal. Chem. 2026, 98, 32686) on that paper's amino-acid and fatty-acid mixture runs;
+`bench/gc/deepcpr_paper_table.py` scores Mosa the paper's way. Results and what is still open:
+`results/gc_deepcpr/summary_2026-11-17.md`.
 
 The delayed-copy test on labelled pairs of six files (`bench/gc/diag/delay_test.py`): of 45 split-off groups of
 truth compounds 19 are called copies (both Dechlorane Plus isomers at every level, BEHTBP, OBIND, BDE 153), of

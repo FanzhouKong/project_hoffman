@@ -62,8 +62,32 @@ def test_log_parabola_places_a_gaussian_apex_between_scans():
     for apex in (19.5, 20.2, 20.49):
         y = (1e4 * np.exp(-0.5 * ((t - apex) / 4.0) ** 2)).astype(np.float32)
         k = int(np.argmax(y))
-        assert abs(DC._log_parabola_apex(y, k, t) - apex) < 1e-3
-    assert np.isnan(DC._log_parabola_apex(np.array([0, 5, 0], np.float32), 1, t[:3]))       # nothing beside the top
+        pos, se = DC._log_parabola_apex(y, k, t)
+        assert abs(pos - apex) < 1e-3 and se < 1e-3                          # a clean peak: placed, and known to be
+    assert np.isnan(DC._log_parabola_apex(np.array([0, 5, 0], np.float32), 1, t[:3])[0])    # nothing beside the top
+
+
+def test_the_apex_of_a_noisy_flat_top_is_less_certain_than_that_of_a_sharp_peak():
+    rng = np.random.default_rng(3)
+    t = np.arange(60, dtype=np.float64)
+    se = {}
+    for name, sd in (("sharp", 2.0), ("wide", 6.0)):
+        e = []
+        for _ in range(50):
+            y = 1e3 * np.exp(-0.5 * ((t - 30.3) / sd) ** 2) + rng.normal(0, 40, len(t))
+            y = np.maximum(y, 1.0).astype(np.float32)
+            e.append(DC._log_parabola_apex(y, int(np.argmax(y)), t)[1])
+        se[name] = np.nanmedian(e)
+    assert se["wide"] > 2.0 * se["sharp"]
+
+
+def test_own_tolerance_widens_only_for_ions_less_certain_than_their_class():
+    tau = np.array([0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2])
+    se = np.array([0.01, 0.01, 0.01, 0.05, 0.02, np.nan, 0.02])
+    own = DC._own_tolerance(tau, se, cap=0.3)
+    assert np.allclose(own[[0, 1, 2, 4, 5, 6]], tau[[0, 1, 2, 4, 5, 6]])      # typical, or no error known: the class's
+    assert np.isclose(own[3], min(0.3, 0.1 * np.sqrt((25 + 1) / 2)))         # five times the typical error
+    assert DC._own_tolerance(tau, se * 100, cap=0.05)[3] == 0.1               # never below the class tolerance
 
 
 def test_calibration_comes_from_isotope_pairs(run):
@@ -159,15 +183,64 @@ def test_constant_background_ion_stays_out_of_the_spectra():
     assert np.min(np.abs(d.mz - bleed)) > 0.01
 
 
+def test_model_profile_times_abundance_gives_the_chromatogram(run):
+    d, cloud = run["d"], run["cloud"]
+    assert len(d.model_off) == len(d.components) + 1
+    c = next(x for x in run["comps"] if x.name == "C")
+    k = _component_at(d, c.rt)
+    row = d.components.iloc[k]
+    p = d.profile(k)
+    assert len(p) == row["scan_max"] - row["scan_min"] + 1 and p.max() == pytest.approx(1.0)
+    assert int(np.argmax(p)) + row["scan_min"] == pytest.approx(row["scan_apex"], abs=1)
+    mz = float(c.mz[np.argmax(c.rel)])                           # its strongest ion, alone at that mass
+    y = cloud.eic(mz, 10.0, int(row["scan_min"]), int(row["scan_max"]) + 1)
+    fit = _abundance(d, k, mz) * p
+    assert np.sum((y - fit) ** 2) < 0.02 * np.sum(y ** 2)
+
+
 def test_empty_feature_table():
     cloud, _ = make_run([Compound("A", 1.0, 1e5, *random_spectrum(np.random.default_rng(0), 10), FWHM)], n_scans=600, dt=DT)
     b = pick_cloud(cloud, estimate(cloud))
     feats, _ = build_features(cloud, b)
     d = DC.deconvolve(cloud, feats.iloc[:0], b.params)
     assert len(d.components) == 0 and len(d.off) == 1 and len(d.feature_component) == 0
+    assert len(d.model_off) == 1 and len(d.model) == 0
     d1 = DC.deconvolve(cloud, feats, b.params)                   # too few isotope pairs: fixed defaults
     assert not d1.info["calibrated"] and len(d1.components) == 1
     assert isinstance(d1.components, pd.DataFrame)
+
+
+def _one_ion(trace):
+    """a run holding one ion: CSR arrays for the kernels"""
+    S = len(trace)
+    return np.arange(S + 1, dtype=np.int64), np.full(S, 100.0), np.asarray(trace, np.float32)
+
+
+def test_floor_is_the_level_a_chromatogram_keeps_beyond_its_peak():
+    t = np.arange(80, dtype=np.float64)
+    peak = 1000.0 * np.exp(-0.5 * ((t - 40) / 3.0) ** 2)
+    args = (np.array([100.0]), np.array([0.01]), np.array([1000.0]), np.array([30], np.int64), np.array([50], np.int64), 80, 6, 0.05)
+    clean = DC._floors(*_one_ion(peak), *args)[0]
+    assert clean < 10.0                                                      # its own feet, nothing more
+    assert abs(DC._floors(*_one_ion(peak + 200.0), *args)[0] - 200.0) < 10.0  # a background ion: the level it stands on
+    # between two neighbours the trace climbs again beyond both bounds: a valley is not a floor
+    crowd = peak + 1000.0 * np.exp(-0.5 * ((t - 26) / 3.0) ** 2) + 1000.0 * np.exp(-0.5 * ((t - 54) / 3.0) ** 2)
+    v = (np.array([100.0]), np.array([0.01]), np.array([1000.0]), np.array([33], np.int64), np.array([47], np.int64), 80, 6, 0.05)
+    assert DC._floors(*_one_ion(crowd), *v)[0] == 0.0
+
+
+def test_lone_ions_with_uncertain_apexes_join_without_disturbing_the_compounds():
+    # beside T an ion with a flat, wide top 0.6 s later; the run holds a few more picked ions that stand alone
+    cloud, feats, P, T = _odd_run([Peak(433.2468, 2.52 + 0.6 / 60, 3e4, 1.5 * FWHM, clip=0.6)])
+    off = DC.deconvolve(cloud, feats, P, DC.DeconvParams(tau_own=False))
+    on = DC.deconvolve(cloud, feats, P, DC.DeconvParams(tau_own=True))
+    assert off.info["n_lone_joined"] == 0 and on.info["n_lone_joined"] >= 1
+    assert len(on.components) <= len(off.components)
+    k0, k1 = _component_at(off, T.rt, tol_s=1.0), _component_at(on, T.rt, tol_s=1.0)
+    assert on.components["n_features"][k1] >= off.components["n_features"][k0] >= 38
+    for mz, rel in zip(T.mz, T.rel):                                         # the compound's spectrum is as it was
+        if rel * T.height > 5000:
+            assert abs(_abundance(on, k1, mz) / (rel * T.height) - 1.0) < 0.1
 
 
 def _odd_run(extra, seed=11):
@@ -271,3 +344,129 @@ def test_a_second_compound_just_after_stays_a_component():
         if rel * L.height > 5000:
             assert abs(_abundance(d, ku, mz) / (rel * L.height) - 1.0) < 0.15
     assert d.info["n_delayed_copies"] == 0
+
+
+# ------------------------------------------------- single-peaked models, explained components ----
+def test_unimodal_model_continues_as_a_decay_where_a_neighbour_rises():
+    m = np.array([0.0, 0.1, 0.5, 0.3, 0.28, 0.5, 1.0, 0.6, 0.22, 0.24, 0.05])
+    off = np.array([0, len(m)], np.int64)
+    v = m.copy()
+    DC._unimodal(off, v, 0.05)
+    assert v[6] == 1.0 and v[5] == 0.5 and v[4] == 0.28            # up to the valley: untouched
+    assert np.all(np.diff(v[:7]) >= 0) and np.all(np.diff(v[6:]) <= 0)
+    assert v[2] < 0.28 * 0.9 and v[0] < v[2]                       # the neighbour's hump (0.5) is gone: a decay
+    assert v[9] == pytest.approx(0.22)                             # a rise below the threshold is levelled
+    flat = np.array([0.2, 0.6, 1.0, 0.7, 0.3])
+    w = flat.copy()
+    DC._unimodal(np.array([0, 5], np.int64), w, 0.05)
+    assert np.array_equal(w, flat)                                 # a single peak is left as it is
+
+
+def test_nnls_fit_keeps_the_first_listed_column_of_a_dependent_set():
+    x = np.linspace(-2, 2, 21)
+    own = np.exp(-0.5 * x ** 2)
+    X = np.column_stack([np.ones(21), np.zeros(21), 0.3 * np.ones(21), own])     # constant, empty, flat, own
+    y = 5.0 * own + 1.0
+    G, g, yy = X.T @ X, X.T @ y, float(y @ y)
+    coef, sse = DC._nnls_fit(G, g, yy, np.array([3, 0, 1, 2], np.int64), 4)
+    assert coef[3] == pytest.approx(5.0, rel=1e-6) and sse < 1e-6 * yy
+    assert DC._nnls_sse(G, g, yy, np.array([0, 1, 2], np.int64), 3) > 0.5 * float(((y - y.mean()) ** 2).sum())
+
+
+@pytest.fixture(scope="module")
+def cluster():
+    """A and B, one and a half peak widths apart, share ten ions in every ratio: the picked peak of a shared ion
+    has its apex anywhere between the two, by more than the apex tolerance. C, weak, elutes two widths after B
+    and shares nothing; forty more compounds give the picker and the calibration their material."""
+    rng = np.random.default_rng(5)
+    mzA, relA = random_spectrum(rng, 22)
+    mzB, relB = random_spectrum(rng, 22)
+    k = np.argsort(-relA)[2:12]
+    mzB[:10] = mzA[k]
+    relB[:10] = relA[k] * rng.uniform(0.2, 3.0, 10)
+    relB = np.clip(relB, 0.02, 1.0)
+    o = np.argsort(mzB)
+    comps = [Compound("A", 2.0, 2e5, mzA, relA, FWHM), Compound("B", 2.0 + 1.5 * FWHM, 1.5e5, mzB[o], relB[o], FWHM),
+             Compound("C", 2.0 + 3.5 * FWHM, 8e3, *random_spectrum(rng, 12), FWHM)]
+    for q in range(40):
+        m, r = random_spectrum(rng, 15)
+        comps.append(Compound(f"X{q}", 0.3 + (1.3 if q % 2 else 4.0) * rng.random() + (0.0 if q % 2 else 2.6),
+                              10 ** rng.uniform(3.5, 5.5), m, r, FWHM))
+    cloud, feats, P, truth = _picked(comps, seed=7)
+    return dict(cloud=cloud, feats=feats, P=P, comps=comps, shared=np.sort(mzA[k]))
+
+
+def _in_window(d, comps, pad=1.0):
+    t = d.components["rt"].values
+    return np.flatnonzero((t >= comps[0].rt - pad * FWHM) & (t <= comps[2].rt + pad * FWHM))
+
+
+def test_shared_ions_of_two_overlapping_compounds_make_no_components_of_their_own(cluster):
+    comps = cluster["comps"]
+    old = DC.deconvolve(cluster["cloud"], cluster["feats"], cluster["P"], DC.DeconvParams(explain=False, unimodal=False))
+    d = DC.deconvolve(cluster["cloud"], cluster["feats"], cluster["P"])
+    assert len(_in_window(old, comps)) > 3                         # what the rule is for: pieces between A and B
+    assert len(_in_window(d, comps)) == 3 and d.info["n_explained"] > 0
+    a, b = _component_at(d, comps[0].rt), _component_at(d, comps[1].rt)
+    for mz in cluster["shared"]:                                   # every shared ion is in both spectra, divided
+        ia = float(comps[0].rel[np.argmin(np.abs(comps[0].mz - mz))] * comps[0].height)
+        ib = float(comps[1].rel[np.argmin(np.abs(comps[1].mz - mz))] * comps[1].height)
+        if min(ia, ib) < 5000:
+            continue
+        assert abs(_abundance(d, a, mz) / ia - 1.0) < 0.25, (mz, _abundance(d, a, mz), ia)
+        assert abs(_abundance(d, b, mz) / ib - 1.0) < 0.25, (mz, _abundance(d, b, mz), ib)
+
+
+def test_ions_of_dissolved_pieces_are_members_of_their_compound_again(cluster):
+    d = DC.deconvolve(cluster["cloud"], cluster["feats"], cluster["P"])
+    F = cluster["feats"]
+    comps = cluster["comps"]
+    b = _component_at(d, comps[1].rt)
+    only_b = [mz for mz in comps[1].mz if np.min(np.abs(cluster["shared"] - mz)) > 0.01]
+    rows = [int(F.index[(np.abs(F["mz"].values - mz) < 0.003) & (np.abs(F["rt"].values - comps[1].rt) < FWHM)][0])
+            for mz in only_b if ((np.abs(F["mz"].values - mz) < 0.003) & (np.abs(F["rt"].values - comps[1].rt) < FWHM)).any()]
+    assert len(rows) >= 8
+    assert np.mean(d.feature_component[rows] == b) >= 0.9
+    assert d.info["n_rejoined"] >= 0
+
+
+def test_a_weak_compound_beside_a_large_one_is_not_explained_away(cluster):
+    d = DC.deconvolve(cluster["cloud"], cluster["feats"], cluster["P"])
+    c = cluster["comps"][2]
+    k = _component_at(d, c.rt)
+    m, _ = d.spectrum(k)
+    assert sum(np.min(np.abs(m - x)) < 0.005 for x in c.mz) >= 6
+
+
+def _small_beside_large(seed):
+    """A, with five ions of its own, 1.2 peak widths before B, and twelve of B's ions at a third to two thirds of
+    B's abundance: in those ions A is a shoulder on B's peak, their apex is near B's, and there are more of them
+    than A has ions of its own"""
+    rng = np.random.default_rng(seed)
+    mzB, relB = random_spectrum(rng, 30)
+    mzA, relA = random_spectrum(rng, 17)
+    k = np.argsort(-relB)[1:13]
+    mzA[:12] = mzB[k]
+    relA[:12] = np.clip(2.0 * relB[k] * rng.uniform(0.3, 0.6, 12), 0.02, 1.0)
+    o = np.argsort(mzA)
+    comps = [Compound("A", 2.0, 1e5, mzA[o], relA[o], FWHM), Compound("B", 2.0 + 1.2 * FWHM, 2e5, mzB, relB, FWHM)]
+    for q in range(40):
+        m, r = random_spectrum(rng, 15)
+        comps.append(Compound(f"X{q}", 0.3 + (1.3 if q % 2 else 4.0) * rng.random() + (0.0 if q % 2 else 2.6),
+                              10 ** rng.uniform(3.5, 5.5), m, r, FWHM))
+    cloud, feats, P, truth = _picked(comps, seed=seed + 1)
+    return cloud, feats, P, comps
+
+
+def _between(d, first, last, pad=1.0):
+    t = d.components["rt"].values
+    return np.flatnonzero((t >= first.rt - pad * FWHM) & (t <= last.rt + pad * FWHM))
+
+
+def test_ions_shared_with_a_smaller_compound_make_no_component_of_their_own():
+    cloud, feats, P, comps = _small_beside_large(21)
+    old = DC.deconvolve(cloud, feats, P, DC.DeconvParams(explain_smaller=False))
+    d = DC.deconvolve(cloud, feats, P)
+    assert len(_between(old, comps[0], comps[1])) == 3             # what the rule is for: A's shoulder ions as a piece
+    assert len(_between(d, comps[0], comps[1])) == 2
+    _component_at(d, comps[0].rt), _component_at(d, comps[1].rt)          # A and B are both there
