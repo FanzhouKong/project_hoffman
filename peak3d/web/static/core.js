@@ -148,12 +148,16 @@
     const n = dv.getUint32(0, true);
     const header = JSON.parse(new TextDecoder().decode(raw.subarray(4, 4 + n)));
     let start = 4 + n; start += (8 - (start % 8)) % 8;
-    const buf = raw.buffer.slice(raw.byteOffset + start, raw.byteOffset + raw.byteLength);   // 8-aligned copy
+    // the arrays as views of the decompressed bytes themselves (gunzip's own buffer, 8-aligned), so a large bundle is
+    // not held twice while it opens; a copy only when they are part of a larger buffer or not 8-aligned
+    const at = raw.byteOffset + start;
+    const own = at % 8 === 0 && raw.byteOffset === 0 && raw.byteLength === raw.buffer.byteLength;
+    const buf = own ? raw.buffer : raw.buffer.slice(at, raw.byteOffset + raw.byteLength), base = own ? at : 0;
     const arrays = {};
     for (const [k, m] of Object.entries(header.arrays)) {
       const T = DT[m.dtype];
       if (!T) throw new Error("unknown dtype " + m.dtype);
-      arrays[k] = new T(buf, m.offset, m.length);
+      arrays[k] = new T(buf, base + m.offset, m.length);
     }
     delete header.arrays;
     const ids = header.ids;          // hit text columns stored as distinct values + a code per hit (bundle.pack)
