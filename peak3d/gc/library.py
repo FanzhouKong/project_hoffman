@@ -340,6 +340,7 @@ class SearchParams:
     min_rel: float = 0.005             # measured peaks below this fraction of the base peak are left out
     top_k: int = 10
     min_match: float = 0.3             # hits below it are not listed
+    unit_mass: bool = False            # the measured spectra hold nominal masses: every library is compared by nominal mass
 
 
 @dataclass
@@ -363,8 +364,8 @@ def prepare(lib: EiLibrary, P: SearchParams) -> Prepared:
     off = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
     take = np.concatenate([np.arange(lib.off[i], lib.off[i + 1]) for i in order]) if len(order) else np.zeros(0, np.int64)
     mz = lib.mz[take]
-    w = _weights(nominal_mass(mz) if lib.nominal else mz, lib.inten[take], P.intensity_power, P.mass_power)
-    return Prepared(lib, order, ri, no_ri0, off, mz, w, (P.intensity_power, P.mass_power))
+    w = _weights(nominal_mass(mz) if lib.nominal or P.unit_mass else mz, lib.inten[take], P.intensity_power, P.mass_power)
+    return Prepared(lib, order, ri, no_ri0, off, mz, w, (P.intensity_power, P.mass_power, P.unit_mass))
 
 
 def search(q_off, q_mz, q_int, lib: EiLibrary | Prepared, q_ri=None, P: SearchParams | None = None,
@@ -403,7 +404,7 @@ def search(q_off, q_mz, q_int, lib: EiLibrary | Prepared, q_ri=None, P: SearchPa
         hi[has] = np.searchsorted(prep.ri[:n_ri], q_ri[has] + P.ri_tol, side="right")
         if not P.keep_no_ri:
             no_ri0 = len(L)
-    if L.nominal:
+    if L.nominal or P.unit_mass:
         nb = int(max(nominal_mass(m).max() if len(m) else 0, nominal_mass(prep.mz).max() if len(prep.mz) else 0)) + 2
         dense = np.zeros((nq, nb))
         row = np.repeat(np.arange(nq), counts)

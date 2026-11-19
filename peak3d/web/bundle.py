@@ -293,13 +293,19 @@ def eic_scans(off, mz, inten, lo, hi):
 
 
 def _source_cloud(output: Path, cache_dir: Path, stem: str) -> tuple[Cloud, str]:
-    """a file's MS1 point cloud: the run's cache, else the mzML the run read (params.json), when it still exists"""
+    """a file's MS1 point cloud: the run's cache, else the mzML (or .cdf) file the run read (params.json), when it
+    still exists"""
     npz = cache_dir / f"{stem}.npz"
     if npz.exists():
         return Cloud.load_npz(npz), "cache"
     params = json.loads((output / "params.json").read_text()) if (output / "params.json").exists() else {}
     for p in map(Path, params.get("input_files") or []):
-        if p.stem == stem and p.suffix.lower() == ".mzml" and p.is_file():
+        if p.stem == stem and p.suffix.lower() in (".mzml", ".cdf") and p.is_file():
+            if p.suffix.lower() == ".cdf":          # read as the run read it: with the run's scan skew taken out
+                from ..cdf import load_cloud as load_cdf
+                fp = output / "features" / f"{stem}.params.json"
+                src = (json.loads(fp.read_text()).get("source") or {}) if fp.exists() else {}
+                return load_cdf(p, skew=src.get("scan_skew", "auto")), "CDF"
             from ..io import load_cloud
             return load_cloud(p, (params.get("options") or {}).get("polarity")), "mzML"
     raise FileNotFoundError(f"no point-cloud cache for {stem} and its mzML file is not where the run read it")

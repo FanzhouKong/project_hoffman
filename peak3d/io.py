@@ -83,6 +83,8 @@ class Cloud:
     mz: np.ndarray        # (N,) float64, ascending within each scan
     inten: np.ndarray     # (N,) float32, > 0
     polarity: str = ""    # "pos", "neg" or "" (unknown)
+    mass_scale: float = 1.0       # m/z = nominal mass x this, for a unit-resolution run read from .cdf (cdf.py); not
+    source: dict | None = None    # kept in the cache file (the file's params.json has both). source: what the reader did
 
     @property
     def n_scans(self) -> int:
@@ -291,7 +293,10 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
     the pass, at the precursor corrected by the file's precursor_calibration and with its tolerance. Empty and
     profile-mode MS2 spectra are skipped and counted in ``ms2.n_skipped``, and the calibration is stored in
     ``ms2.cal_mz``, ``cal_ppm``, ``tol_ppm`` and ``cal_n``, when the collector has those attributes
-    (ms2.Collector)."""
+    (ms2.Collector). An ANDI-MS netCDF file (.cdf, GC-MS) is read by cdf.load_cloud: MS1 only, its own polarity."""
+    if Path(path).suffix.lower() == ".cdf":
+        from .cdf import load_cloud as load_cdf
+        return load_cdf(path)
     from pyteomics import mzml
 
     want = {"pos": "positive scan", "neg": "negative scan"}.get(polarity)

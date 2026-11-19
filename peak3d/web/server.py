@@ -838,7 +838,7 @@ class Handler(BaseHTTPRequestHandler):
         a = self.app
         if os.name == "nt" and p == "::drives" and a.root is None:
             drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-            return {"path": "", "parent": None, "dirs": drives, "n_mzml": 0, "mzml": [], "n_raw": 0, "n_raw_pending": 0,
+            return {"path": "", "parent": None, "dirs": drives, "n_mzml": 0, "mzml": [], "n_raw": 0, "n_raw_pending": 0, "n_cdf": 0,
                     "n_inputs": 0, "inputs": [], "is_output": False, "files": []}
         path = a.resolve(p)
         if not path.is_dir():
@@ -857,10 +857,11 @@ class Handler(BaseHTTPRequestHandler):
             pass
         dirs.sort(key=str.lower)
         files.sort(key=str.lower)
-        from ..rawfiles import CONVERTED, is_raw, reusable
+        from ..rawfiles import CONVERTED, is_cdf, is_raw, reusable
         inputs = _input_files(path)
-        mz = [f for f in inputs if not is_raw(f)]
+        mz = [f for f in inputs if not is_raw(f) and not is_cdf(f)]
         raw = [f for f in inputs if is_raw(f)]
+        cdf = [f for f in inputs if is_cdf(f)]           # ANDI-MS netCDF (GC-MS): read as they are
         pending = sum(reusable(f, path / CONVERTED) is None for f in raw)       # not yet converted next to them
         if a.root is not None and path == a.root:
             parent = None
@@ -869,7 +870,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             parent = str(path.parent)
         return {"path": str(path), "parent": parent, "dirs": dirs, "n_mzml": len(mz), "mzml": [f.name for f in mz[:8]],
-                "n_raw": len(raw), "n_raw_pending": int(pending), "n_inputs": len(inputs),
+                "n_raw": len(raw), "n_raw_pending": int(pending), "n_cdf": len(cdf), "n_inputs": len(inputs),
                 "inputs": [f.name for f in inputs[:8]],
                 "is_output": (path / "aligned_feature_table.tsv").exists(), "has_report": (path / "report.html").exists(),
                 "writable": os.access(path, os.W_OK), "files": files[:2000]}
@@ -1171,6 +1172,8 @@ class Handler(BaseHTTPRequestHandler):
         files = _input_files(inp)
         if not files:
             return self._error(400, no_inputs_message(inp))
+        if kernel != "peak3d" and any(f.suffix.lower() == ".cdf" for f in files):
+            return self._error(400, f"{kernel} reads mzML files, not ANDI-MS netCDF (.cdf): run this folder with Mosa")
         if not body.get("output"):
             return self._error(400, "choose an output folder")
         out = a.resolve(body["output"])

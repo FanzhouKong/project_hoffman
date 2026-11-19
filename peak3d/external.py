@@ -342,6 +342,10 @@ def run_external(files, args, raw_files: dict | None = None) -> None:
     if not st["available"]:
         sys.exit(f"{k['label']} is not available: {st['note']}")
     files = [Path(f).resolve() for f in files]      # absolute: the tools run in their own working folders
+    cdf = [f.name for f in files if f.suffix.lower() == ".cdf"]
+    if cdf:
+        sys.exit(f"{k['label']} reads mzML files, not ANDI-MS netCDF ({cdf[0]}): run these files with the Mosa kernel "
+                 "(peak3d process)")
     stems = [f.stem for f in files]
     if len(set(stems)) != len(stems):
         sys.exit("input file stems must be unique")

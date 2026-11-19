@@ -100,14 +100,24 @@ def _apply_model(feats, model):
     return feats
 
 
+def _cdf_skew(path):
+    from .cdf import file_skew
+    return file_skew(path)
+
+
 def _pick_one(job):
-    path, features_dir, cache_dir, min_score, keep_rejected, polarity, threads, model_path, overrides, ms2_dir = job
+    path, features_dir, cache_dir, min_score, keep_rejected, polarity, threads, model_path, overrides, ms2_dir, *more = job
+    cdf_skew = more[0] if more else None            # the run's scan skew for .cdf files (pick_files)
     import numba
     numba.set_num_threads(max(1, int(threads)))
     t = {}
     tic = time.perf_counter()
     spectra = Collector()
-    cloud = load_cloud(path, polarity, spectra)     # MS2 spectra come along in the same pass
+    if cdf_skew is not None and Path(path).suffix.lower() == ".cdf":
+        from .cdf import load_cloud as load_cdf     # ANDI-MS netCDF (GC-MS): the run's one scan skew taken out
+        cloud = load_cdf(path, skew=cdf_skew)
+    else:
+        cloud = load_cloud(path, polarity, spectra)     # MS2 spectra come along in the same pass
     t["parse"] = time.perf_counter() - tic
     stem = cloud.name
     if spectra:
@@ -147,8 +157,13 @@ def _pick_one(job):
                   n_candidates=int(len(b.basin_id)), n_features=int(len(feats)),
                   timings_s={k: round(float(v), 4) if isinstance(v, float) else v for k, v in t.items()},
                   peak3d_version=__version__)
+    scale = float(getattr(cloud, "mass_scale", 1.0) or 1.0)
+    if scale != 1.0:                      # a unit-resolution run read from .cdf: m/z = nominal mass x scale (cdf.py)
+        params["mass_scale"] = scale
+    if getattr(cloud, "source", None):
+        params["source"] = cloud.source
     (Path(features_dir) / f"{stem}.params.json").write_text(json.dumps(params, indent=1))
-    return dict(stem=stem, path=str(path), n_features=int(len(feats)), n_centroids=int(cloud.n_points),
+    return dict(stem=stem, path=str(path), mass_scale=scale, n_features=int(len(feats)), n_centroids=int(cloud.n_points),
                 n_scans=int(cloud.n_scans), n_ms2=len(spectra), parse_s=round(t["parse"], 3), pick_s=round(t["pick"], 3),
                 features_s=round(t["features"], 3))
 
@@ -176,8 +191,28 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
     tic = time.perf_counter()
     _warm_jit()
     log(f"JIT warm-up {time.perf_counter() - tic:.1f} s; picking {len(files)} files with {n_workers} workers x {threads} threads")
+    # ANDI-MS netCDF files of unit-resolution scans: one scan skew for the run, the median of the files' own (cdf.py)
+    cdf_skew = None
+    cdfs = [str(f) for f in files if f.suffix.lower() == ".cdf"]
+    if cdfs:
+        from .cdf import study_skew
+        tic = time.perf_counter()
+        if n_workers == 1:
+            ks = [_cdf_skew(f) for f in cdfs]
+        else:
+            with get_context("spawn").Pool(min(n_workers, len(cdfs))) as pool:
+                ks = pool.map(_cdf_skew, cdfs, chunksize=1)
+        cdf_skew = study_skew(ks)
+        from .cdf import SKEW_MIN_PEAKS
+        used = [k for k, n in ks if n >= SKEW_MIN_PEAKS]
+        if used:
+            log(f".cdf files: scan skew {cdf_skew:+.2f} scans per 1000 Da taken out (median of {len(used)} files, "
+                f"their own {min(used):+.2f} to {max(used):+.2f}; {time.perf_counter() - tic:.1f} s)")
+        elif any(n for _, n in ks):
+            log(f".cdf files: too few strong peaks to measure the scan skew on (fewer than {SKEW_MIN_PEAKS} per file): "
+                "none taken out")
     jobs = [(str(f), str(features_dir), str(cache_dir), args.min_score, args.keep_rejected, args.polarity, threads,
-             str(args.model) if args.model else None, overrides, str(ms2_dir)) for f in files]
+             str(args.model) if args.model else None, overrides, str(ms2_dir), cdf_skew) for f in files]
     tic = time.perf_counter()
     if n_workers == 1:
         results = [_pick_one(j) for j in jobs]
@@ -682,6 +717,9 @@ def process(files, args, raw_files: dict | None = None):
     extra = dict(n_files=len(files), n_features_total=int(sum(r["n_features"] for r in results)))
     if raw_files:
         extra["raw_files"] = raw_files
+    scales = sorted({float(r.get("mass_scale", 1.0)) for r in results} - {1.0})
+    if scales:                            # unit-resolution .cdf runs: the tables' m/z are nominal masses x this
+        extra["mass_scale"] = scales[0]
     _write_params(output, args, res, stage, files, extra=extra)
     gc_stages(output, cache_dir, args)
     _write_report(output, cache_dir, args)

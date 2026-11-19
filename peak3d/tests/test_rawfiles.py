@@ -92,7 +92,7 @@ def test_input_files_prefer_mzml_and_skip_folders(tmp_path):
     agilent = tmp_path / "agilent"
     (agilent / "run1.d").mkdir(parents=True)
     assert "Agilent" in rawfiles.no_inputs_message(agilent)
-    assert rawfiles.no_inputs_message(tmp_path / "missing").startswith("no .mzML or Thermo .raw files")
+    assert rawfiles.no_inputs_message(tmp_path / "missing").startswith("no .mzML, Thermo .raw or .cdf files")
 
 
 # ------------------------------------------------------------------ conversion ----

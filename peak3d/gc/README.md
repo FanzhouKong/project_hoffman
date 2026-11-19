@@ -1,6 +1,6 @@
 # peak3d.gc: GC-MS (electron ionisation)
 
-Status: preview (Mosa 1.4.0b1, branch `gc-support`). Checked on synthetic runs (`peak3d/tests/test_gc_*.py`), on
+Status: preview (Mosa 1.4.0b2, branch `gc-support`). Checked on synthetic runs (`peak3d/tests/test_gc_*.py`), on
 the MRH GC-Orbitrap set with the picker in lc and in gc mode, and on the ten unit-resolution runs of the DeepCPR
 paper (both below).
 
@@ -10,7 +10,7 @@ and its retention index against a library. Picking, RT correction and ion alignm
 picker's gc mode; the GC stages run after them and write only to `OUT/gc/`.
 
 ```
-# one command: pick in gc mode, then the GC stages (centroided MS1 mzML)
+# one command: pick in gc mode, then the GC stages (centroided MS1 mzML, or ANDI-MS netCDF .cdf files)
 peak3d process --input mzml/ --output OUT --cores 8 --mode gc --ri-ladder alkane --ri-carbons 10-40 --ei-library nist_ei.msp
 # or the GC stages on an existing output (again with other settings, or on an output picked in lc mode)
 peak3d gc OUT --cores 8 --ri-ladder alkane --ri-carbons 10-40 --library nist_ei.msp
@@ -20,6 +20,47 @@ In `process`, the EI library goes by `--ei-library` (`--library` is the MS2 libr
 GC options (`--ri-ladder`, `--ri-carbons`, `--ri-table`, `--ri-tol`, `--ri-type`) have the same names in both, and
 `--min-similarity` and `--min-presence` are shared with the LC stages. A failure of the GC stages is logged
 (`gc stages failed`) and leaves the rest of the run as it is.
+
+## Input: mzML and ANDI-MS netCDF (.cdf)
+
+A folder of `.cdf` files runs as it is (`peak3d/cdf.py`, read with scipy). Which kind of data a file holds is read
+from its masses:
+
+- **Unit resolution** (quadrupoles: masses written on a 0.05 or 0.1 Da grid, one value per nominal mass). Each
+  scan is reduced to nominal masses (n holds n - 0.3 <= m < n + 0.7, the rule of the NIST libraries); points below
+  3 x the root mean square of the file's negative intensities are dropped (exports with a subtracted baseline hold
+  noise on both sides of zero); and the **scan skew** is taken out: a quadrupole measures the masses of a scan one
+  after the other, so each mass chromatogram is sampled at its own times. The skew is measured in every file (the
+  apex of each ion of the strongest peaks against its mass) and one value, the median of the files', is used for
+  the run. In the point cloud the masses are multiplied by 1.0033548, so that M and M+1 are one 13C apart as on an
+  accurate-mass instrument and the picker pairs them. The GC stages divide by that factor: components, compounds,
+  spectra, the quantifier m/z and `spectra.msp` are at **nominal masses**, every library (unit-mass or accurate) is
+  compared by nominal mass, and the ladder is looked up at nominal masses (there a molecular ion counts only when
+  it is stronger than the ion one mass below it, since the 13C peak of a fragment sits on the molecular mass of the
+  next smaller alkane). The tables of single ions (`features/`, `aligned_feature_table.tsv`, the Ions tab) keep the
+  scaled m/z: nominal mass 73 is listed at 73.2449 (`mass_scale` in `params.json`).
+- **Accurate mass** (time-of-flight exports): read as centroids, nothing changed.
+
+`features/<file>.params.json` records what was done (`source`: kind, noise floor, scan skew). asari and MassCube
+do not read .cdf files.
+
+Check on the ten unit-resolution runs of the DeepCPR paper, read from their .CDF files (`results/gc_deepcpr/mosa_cdf`),
+against the benchmark run on mzML files written by `bench/gc/cdf_to_mzml.py` (`mosa_dsk`, "Unit-resolution runs"
+below), scored the paper's way (`deepcpr_paper_table.py`, 2026-11-18):
+
+| | from .CDF | benchmark (mzML) |
+|---|---|---|
+| amino acids: scan skew (scans per 1000 Da) | -1.16 | -1.16 |
+| R2, all 60 cases; found | 0.971; 60 | 0.971; 60 |
+| fatty acids: scan skew | +0.55 | +0.55 |
+| R2, all 135 cases; found | 0.983; 130 | 0.984; 130 |
+| R2 in co-eluting clusters | 0.973 | 0.974 |
+
+With each file's own skew instead of the run's median (the fatty-acid files measure +0.50, +0.55, +0.68, +0.71 and
+-0.61) the fatty acids come out at R2 0.972 (co-eluting 0.953), 129 found. With the MoNA GC-MS library (accurate
+masses, compared by nominal mass) 171 of 201 amino-acid-run compounds and 49 of 60 fatty-acid-run compounds are
+annotated at match >= 0.7, the saturated FAMEs C8 to C24 among them; with `--ri-ladder fame` nine ladder members
+are found in each of the five fatty-acid runs.
 
 ## In the app
 
@@ -227,10 +268,11 @@ the delayed copies) but takes the component away from 2.5 % of the truth compoun
 ## Open
 
 - The MRH set is standards in solvent, so it does not test heavy co-elution.
-- Input is centroided mzML. ANDI-MS netCDF (.cdf), the usual export of unit-resolution GC-MS, is not read: the
-  DeepCPR runs went through `bench/gc/cdf_to_mzml.py`, which writes nominal masses multiplied by 1.0033548 (so
-  that isotope peaks pair up); the app shows those m/z as they are, and the EI search bins them wrongly above
-  m/z 209. Reading such files directly, with nominal masses reported, is the next step.
+- In a unit-resolution run the single ions (Ions tab, feature tables) carry the scaled m/z (nominal mass x
+  1.0033548); only the GC stages report nominal masses. The halogen check and the isotope arithmetic of the LC
+  stages mean nothing there.
+- A unit-resolution run converted to mzML outside (`bench/gc/cdf_to_mzml.py`, msconvert) is not recognised as one:
+  read the .cdf files directly.
 - Search ranking (match vs reverse vs a mix), the index window and the 0.6 cross-file similarity are untested
   choices, to be judged on a set with known compounds.
 - No gap filling of compounds; no library search, annotation or marks for compounds from the app's results page.

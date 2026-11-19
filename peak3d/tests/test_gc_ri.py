@@ -48,6 +48,21 @@ def test_alkane_ladder_named_by_molecular_ions():
     assert [comps[k].name for k in table["component"]] == [f"C{n} alkane" for n in range(10, 17)]
 
 
+def test_alkane_ladder_in_unit_mass_spectra():
+    """nominal masses, every ion with its 13C peak one mass above: the isotope peak of C(n)H(2n+1) sits on the
+    molecular mass of the alkane with n carbons, and must not name the compound"""
+    lad = [alkane(n, 1.0 + 0.5 * (n - 10), 1e5) for n in range(10, 17)]
+    unit = []
+    for c in lad:
+        nm = np.floor(c.mz + 0.3)
+        unit.append(Compound(c.name, c.rt, c.height, np.concatenate([nm, nm + 1.0]), np.concatenate([c.rel, 0.12 * c.rel])))
+    rt, off, mz, ab, comps = _csr(unit)
+    table, note = RI.find_ladder(rt, off, mz, ab, "alkane", unit=True)
+    assert table["carbon"].tolist() == list(range(10, 17)) and table["molecular_ion"].all()
+    assert RI.find_ladder(rt, off, mz, ab, "alkane")[0].empty          # accurate-mass lookup finds none of them
+    assert RI._unit(57.0699) == 57.0 and RI._unit(562.64) == 562.0     # n - 0.3 <= m < n + 0.7
+
+
 def test_alkane_without_molecular_ion_takes_its_place_in_the_given_ladder():
     lad = [alkane(n, 1.0 + 0.5 * (n - 10), 1e5) for n in range(10, 15)]
     c12 = lad[2]

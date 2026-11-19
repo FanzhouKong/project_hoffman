@@ -240,7 +240,7 @@
 
   // ---------------------------------------------------------------- run page
   const INTRO = {
-    peak3d: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). Mosa picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library. For GC-MS data (electron ionisation), set Acquisition to GC-MS: each run's ions are then also deconvolved into compounds with their spectra.",
+    peak3d: "Choose a folder of centroided .mzML files, Thermo .raw files (converted to mzML on the way) or, for GC-MS, ANDI-MS netCDF files (.cdf). Mosa picks every file, aligns the runs on their own features, and writes one feature table with an interactive report; MS2 spectra in the files are mapped to the features and can be searched against a spectral library. For GC-MS data (electron ionisation), set Acquisition to GC-MS: each run's ions are then also deconvolved into compounds with their spectra.",
     asari: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). asari detects and aligns the features with its own defaults; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
     masscube: "Choose a folder of centroided .mzML files or Thermo .raw files (converted to mzML on the way). MassCube runs its default untargeted workflow; Mosa then adds chromatograms, maps the MS2 spectra and writes the same tables and report.",
   };
@@ -269,6 +269,7 @@
     const runBtn = h("button.btn.filled.lg.block.state", { type: "button" }, icon("play_arrow"), "Run " + KNAME[S.kernel]);
     const cmd = h("code");
     const sumIn = h("dd"), sumOut = h("dd", { style: { fontFamily: "var(--mono)", fontSize: "12px" } }), sumCores = h("dd");
+    let cdfHint = false;         // a folder of .cdf files is GC-MS data: the mode is set once per folder (the user can set it back)
     const refresh = () => {
       cmd.textContent = argvPreview();
       const n = S.inputInfo && S.inputInfo.n_inputs;
@@ -287,7 +288,7 @@
       h("p.card-sub.body-small", "After picking, each run's ions are deconvolved into compounds (one spectrum each, quantified on its own strongest unshared ion) and the compounds are matched across the files. Optional: a retention index from a ladder in the runs, and an EI library to annotate the compounds."), gcBox);
 
     const inField = textField("Data folder", S.input, {
-      lead: "folder", help: "The folder that holds your .mzML or Thermo .raw files",
+      lead: "folder", help: "The folder that holds your .mzML, Thermo .raw or .cdf files",
       trail: h("button.icon-btn.state", { type: "button", title: "Browse", "aria-label": "Browse for the input folder", onclick: () => browse("input", S.input, (p) => { inField.input.value = p; setInput(p); }) }, icon("folder_open")),
       onchange: (v) => setInput(v.trim()),
     });
@@ -308,10 +309,16 @@
         if (my !== seq) return;
         S.inputInfo = info;
         rawBox.replaceChildren(...rawReaderNote(info));
-        if (!info.n_inputs) inField.setError("No .mzML or Thermo .raw files in this folder");
+        if (!info.n_inputs) inField.setError("No .mzML, Thermo .raw or .cdf files in this folder");
         else {
           inField.setError(null);
           inField.setHelp(`${filesText(info)}: ${info.inputs.slice(0, 3).join(", ")}${info.n_inputs > 3 ? ", …" : ""}`);
+          if (info.n_cdf && S.kernel === "peak3d" && S.form.mode === "lc" && cdfHint !== info.path) {
+            cdfHint = info.path;
+            S.form.mode = "gc";
+            snack("These are .cdf files (GC-MS): Acquisition is set to GC-MS (EI).");
+            return go("run");
+          }
           if (!S.output || S.autoOutput === S.output) { S.output = S.autoOutput = join(info.path, "mosa_" + stamp()); outField.input.value = S.output; }
         }
       } catch (e) {
@@ -597,11 +604,11 @@
   }
 
   // ---------------------------------------------------------------- Thermo .raw files
-  // "3 Thermo .raw + 2 mzML files": a folder listing's inputs (/api/ls)
+  // "3 Thermo .raw + 2 mzML files": a folder listing's inputs (/api/ls); .cdf: ANDI-MS netCDF (GC-MS)
   function filesText(r) {
-    const n = r.n_inputs || 0, raw = r.n_raw || 0, mz = n - raw;
-    if (!raw) return `${int(n)} mzML file${n > 1 ? "s" : ""}`;
-    return `${int(raw)} Thermo .raw${mz ? ` + ${int(mz)} mzML` : ""} file${n > 1 ? "s" : ""}`;
+    const n = r.n_inputs || 0, raw = r.n_raw || 0, cdf = r.n_cdf || 0, mz = n - raw - cdf;
+    const parts = [raw ? `${int(raw)} Thermo .raw` : null, cdf ? `${int(cdf)} .cdf` : null, mz || !n ? `${int(mz)} mzML` : null].filter(Boolean);
+    return `${parts.join(" + ")} file${n > 1 ? "s" : ""}`;
   }
   // under the Data fields: what happens to the folder's .raw files, or the converter to install first
   function rawReaderNote(info) {
@@ -704,7 +711,7 @@
   // picks are kept while moving between folders) and done gets their paths as a list
   function browse(mode, start, done) {
     const dlg = document.getElementById("browse");
-    const titles = { input: "Choose the data folder (.mzML or Thermo .raw)", output: "Choose where to write results", results: "Choose a results folder", msp: "Choose spectral libraries (.msp or MassCube .pkl)" };
+    const titles = { input: "Choose the data folder (.mzML, Thermo .raw or .cdf)", output: "Choose where to write results", results: "Choose a results folder", msp: "Choose spectral libraries (.msp or MassCube .pkl)" };
     let cur = null;
     const picked = [];             // msp: the library files chosen so far, full paths in the order picked
     // change also fires when a click in the list takes the focus: reloading the folder already shown would swap the
@@ -753,7 +760,7 @@
         if (!r.dirs.length && !(mode === "msp" && (r.files || []).length)) items.push(h("div.list-item", h("div.text.muted", mode === "msp" ? "No subfolders or library files" : "No subfolders")));
         list.replaceChildren(...items);
         if (mode === "msp") { ok.disabled = !picked.length; status.textContent = pickedText(); }
-        else if (mode === "input") { ok.disabled = !r.n_inputs; status.textContent = r.n_inputs ? `${filesText(r)} here` : "No .mzML or Thermo .raw files here"; }
+        else if (mode === "input") { ok.disabled = !r.n_inputs; status.textContent = r.n_inputs ? `${filesText(r)} here` : "No .mzML, Thermo .raw or .cdf files here"; }
         else if (mode === "results") { ok.disabled = !r.is_output; status.textContent = r.is_output ? "Mosa results here" : "No Mosa results here"; }
         else { ok.disabled = !r.path || r.writable === false; status.textContent = r.writable === false ? "Not writable" : "Results go in a new subfolder here"; }
       } catch (e) {

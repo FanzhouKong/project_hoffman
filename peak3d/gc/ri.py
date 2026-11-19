@@ -111,12 +111,25 @@ def _abundance_at(mz, ab, target, ppm, da):
     return float(ab[lo:hi].max()) if hi > lo else 0.0
 
 
-def candidates(rt, off, mz, ab, kind: str, carbons=None, ppm: float = 10.0, da: float = 0.003) -> pd.DataFrame:
+def _unit(target: float) -> float:
+    """the nominal mass an ion of this m/z is measured at on a unit-resolution instrument (n - 0.3 <= m < n + 0.7,
+    the rule of library.nominal_mass)"""
+    return float(np.floor(target + 0.3))
+
+
+def candidates(rt, off, mz, ab, kind: str, carbons=None, ppm: float = 10.0, da: float = 0.003,
+               unit: bool = False) -> pd.DataFrame:
     """Components that look like a ladder compound: component, rt, series (summed series-ion abundance), share (of
-    the spectrum), carbon (from the molecular ion, -1 when none is found among `carbons` or 4..60)."""
+    the spectrum), carbon (from the molecular ion, -1 when none is found among `carbons` or 4..60). unit: the
+    spectra hold nominal masses (a unit-resolution run): the ladder's ions are looked up at theirs, and a
+    molecular ion counts only when it is stronger than the ion one mass below it (at unit resolution the 13C peak
+    of the fragment C(n)H(2n+1) sits on the molecular mass of the alkane with n carbons)."""
     if kind not in KINDS:
         raise ValueError(f"ladder kind must be one of {KINDS}")
     ions = ALKANE_IONS if kind == "alkane" else FAME_IONS
+    at = (lambda t: t) if not unit else _unit
+    if unit:
+        ions, ppm, da = [_unit(t) for t in ions], 0.0, 0.25
     search = list(carbons) if carbons else list(range(4, 61))
     rows = []
     for c in range(len(off) - 1):
@@ -128,7 +141,9 @@ def candidates(rt, off, mz, ab, kind: str, carbons=None, ppm: float = 10.0, da: 
             continue
         best_n, best_a = -1, 0.0
         for n in search:
-            x = _abundance_at(m, a, molecular_mz(kind, n), ppm, da)
+            x = _abundance_at(m, a, at(molecular_mz(kind, n)), ppm, da)
+            if unit and x <= _abundance_at(m, a, at(molecular_mz(kind, n)) - 1.0, ppm, da):
+                continue
             if x > best_a:
                 best_n, best_a = n, x
         rows.append(dict(component=c, rt=float(rt[c]), series=float(sum(s)), share=float(sum(s) / a.sum()),
@@ -170,14 +185,14 @@ def assign(cand: pd.DataFrame, carbons) -> np.ndarray:
     return out
 
 
-def find_ladder(rt, off, mz, ab, kind: str, carbons=None, ppm: float = 10.0, da: float = 0.003):
+def find_ladder(rt, off, mz, ab, kind: str, carbons=None, ppm: float = 10.0, da: float = 0.003, unit: bool = False):
     """The ladder of one deconvolved run: (table, note). Table columns: carbon, ri, rt, component, series,
     molecular_ion (True where the molecular ion named the carbon number); empty when fewer than three members
     are found. carbons: the ladder's carbon numbers (default: the FiehnLib set for fame; for alkanes none, and
     then only candidates named by their molecular ion are used)."""
     carbons = list(carbons) if carbons else default_carbons(kind)
     cols = ["carbon", "ri", "rt", "component", "series", "molecular_ion"]
-    cand = candidates(rt, off, mz, ab, kind, carbons or None, ppm, da)
+    cand = candidates(rt, off, mz, ab, kind, carbons or None, ppm, da, unit)
     if len(cand) == 0:
         return pd.DataFrame(columns=cols), f"no {kind} ladder compound found"
     if carbons:

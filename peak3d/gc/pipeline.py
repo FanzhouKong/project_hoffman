@@ -64,8 +64,16 @@ def _deconv_one(job):
     tic = time.perf_counter()
     cloud = Cloud.load_npz(Path(cache_dir) / f"{stem}.npz")
     feats = pd.read_csv(Path(features_dir) / f"{stem}.tsv", sep="\t")
-    P = params_from_dict(json.loads((Path(features_dir) / f"{stem}.params.json").read_text()))
+    pj = json.loads((Path(features_dir) / f"{stem}.params.json").read_text())
+    P = params_from_dict(pj)
     d = deconvolve(cloud, feats, P, D)
+    # a unit-resolution run read from .cdf holds its masses x mass_scale (peak3d/cdf.py): the components, their
+    # spectra and everything made of them are at nominal masses
+    scale = float(pj.get("mass_scale") or 1.0)
+    if scale != 1.0:
+        d.mz = np.rint(d.mz / scale)
+        for c in MZ_COLS:
+            d.components[c] = np.rint(d.components[c].to_numpy(np.float64) / scale)
     out = Path(out_dir)
     np.savez(out / f"{stem}.npz", off=d.off, mz=d.mz, abundance=d.abundance, shared=d.shared,
              model_off=d.model_off, model=d.model.astype(np.float32))
@@ -76,8 +84,8 @@ def _deconv_one(job):
     info = dict(d.info)
     info.pop("params", None)
     info.update(file=stem, seconds=round(time.perf_counter() - tic, 3), fwhm_med=float(P.fwhm_med), dt=float(P.dt),
-                mz_lo=float(cloud.mz.min()) if cloud.n_points else 0.0,
-                mz_hi=float(cloud.mz.max()) if cloud.n_points else 0.0)
+                mass_scale=scale, mz_lo=float(cloud.mz.min()) / scale if cloud.n_points else 0.0,
+                mz_hi=float(cloud.mz.max()) / scale if cloud.n_points else 0.0)
     return info
 
 
@@ -144,7 +152,7 @@ def _corrected(output: Path, stem: str, t):
     return np.interp(t, w["rt_native"].values, w["rt_corr"].values)
 
 
-def _ladders(stems, comps, spectra, kind, carbons, table):
+def _ladders(stems, comps, spectra, kind, carbons, table, unit=False):
     """per-file ladder tables (rt native, rt_corr) and notes; table: a user ladder (applies to every file's
     corrected time axis)"""
     if table is not None:
@@ -154,7 +162,7 @@ def _ladders(stems, comps, spectra, kind, carbons, table):
     for s in stems:
         c = comps[s]
         off, mz, ab = spectra[s]
-        t, note = RI.find_ladder(c["rt"].values, off, mz, ab, kind, carbons)
+        t, note = RI.find_ladder(c["rt"].values, off, mz, ab, kind, carbons, unit=unit)
         if len(t):
             t = t.assign(file=s, rt_corr=np.interp(t["rt"].values, c["rt"].values, c["rt_corr"].values)
                          if len(c) > 1 else t["rt"].values)
@@ -208,6 +216,7 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
         raise FileNotFoundError(f"no point-cloud cache for {missing[0]} in {cache_dir} (run peak3d process without "
                                 "--no-keep-cache)")
     D = deconv or DeconvParams()
+    unit = False
     gc_dir = output / "gc"
     comp_dir = gc_dir / "components"
     comp_dir.mkdir(parents=True, exist_ok=True)
@@ -225,6 +234,11 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
     times["deconvolution_s"] = round(time.perf_counter() - tic, 3)
     log(f"deconvolution: {sum(i['n_components'] for i in infos)} components in {len(stems)} files "
         f"({times['deconvolution_s']} s)")
+    n_unit = sum(i["mass_scale"] != 1.0 for i in infos)
+    unit = n_unit == len(stems)
+    if n_unit:
+        log(f"{n_unit} of {len(stems)} files are unit-resolution runs: their compounds are reported at nominal masses"
+            + ("" if unit else " (the other files hold accurate masses: compounds of the two kinds will not match)"))
 
     comps, spectra = {}, {}
     for s in stems:
@@ -318,7 +332,7 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
         comps[s]["ri"] = np.nan
     if kind or table is not None:
         lad, notes = _ladders(stems, comps, spectra, kind, RI.parse_carbons(carbons) if isinstance(carbons, str) else carbons,
-                              table)
+                              table, unit)
         rimap = _study_map(lad)
         if rimap is None:
             log("retention index: no ladder found, no index assigned")
@@ -345,6 +359,7 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
     if libs and len(compounds):
         tic = time.perf_counter()
         SP = search or L.SearchParams()
+        SP.unit_mass = unit                       # nominal-mass spectra: compared by nominal mass in any library
         if rimap is not None and not np.isfinite(SP.ri_tol):
             SP.ri_tol = float(ri_tol) if ri_tol is not None else RI.RI_TOL.get(kind or "", float("nan"))
         elif ri_tol is not None:
@@ -384,6 +399,7 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
                    rt_tol_min=rt_tol, min_presence=need, ladder=kind, ladder_table=str(ladder_table) if ladder_table else None,
                    n_ladder=int(len(rimap.rt)) if rimap is not None else 0, libraries=[str(p) for p in libs],
                    min_similarity=min_similarity, ri_tol=SP.ri_tol if libs and np.isfinite(SP.ri_tol) else None,
+                   unit_mass=unit,
                    deconvolution=asdict(D), files=infos, ladder_notes=notes, stage_times_s=times)
     (gc_dir / "params.json").write_text(json.dumps(summary, indent=1, default=str))
     return summary

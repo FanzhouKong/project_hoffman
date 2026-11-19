@@ -22,8 +22,9 @@
       this.n = header.n;
       this.stems = header.stems || [];
       this.N = this.stems.length;
-      this.digits = header.digits === 1 ? 1 : 4;          // decimals worth showing in an m/z (1: unit-mass data)
-      this.tol = this.digits === 1 ? 0.3 : 0.005;         // Da: a typed m/z matches an ion within this
+      this.digits = header.digits === 0 || header.digits === 1 ? header.digits : 4;     // decimals worth showing in an m/z (0: nominal masses)
+      this.unit = this.digits < 4;                        // unit-resolution data
+      this.tol = this.unit ? 0.3 : 0.005;                 // Da: a typed m/z matches an ion within this
       this.summary = header.summary || {};
       this.name = header.name || [];
       this.formula = header.formula || [];
@@ -61,12 +62,12 @@
   // the listed compounds as a tab-separated table: retention times in seconds, then the quantifier's abundance in
   // every file (empty: compound not found there)
   function table(G, rows) {
-    const a = G.a, num = (v, d) => (isFinite(v) ? (+v).toFixed(d) : "");
+    const a = G.a, num = (v, d) => (isFinite(v) ? (+v).toFixed(d) : ""), md = G.unit ? G.digits : 5;
     const head = ["compound_id", "rt_s", ...(G.hasRi ? ["ri"] : []), "quant_mz", "base_mz", "n_ions", "n_shared_ions", "n_files", "height",
       ...(G.hasHits ? ["name", "formula", "inchikey", "match", "reverse", "library_ri", "delta_ri"] : []), "reference_file", ...G.stems];
     const lines = [head.join("\t")];
     for (const k of rows) {
-      const v = [a.c_id[k], num(G.rtS[k], 2), ...(G.hasRi ? [num(a.c_ri[k], 1)] : []), num(a.c_qmz[k], 5), num(a.c_bmz[k], 5), a.c_nions[k], a.c_nshared[k],
+      const v = [a.c_id[k], num(G.rtS[k], 2), ...(G.hasRi ? [num(a.c_ri[k], 1)] : []), num(a.c_qmz[k], md), num(a.c_bmz[k], md), a.c_nions[k], a.c_nshared[k],
         a.c_nfiles[k], isFinite(a.c_height[k]) ? (+a.c_height[k]).toPrecision(6) : "",
         ...(G.hasHits ? [clean(G.name[k]), clean(G.formula[k]), clean(G.inchikey[k]), num(a.c_match[k], 4), num(a.c_reverse[k], 4), num(a.c_lri[k], 1), num(a.c_dri[k], 1)] : []),
         clean((G.h.ref_file || [])[k])];
@@ -323,7 +324,7 @@
       const spec = () => {
         const b = st.hit != null ? G.hit(st.hit) : null, lib = b && b.spectrum;
         return { top: { mz: sp.mz, inten: sp.inten }, bottom: lib || null, prec: a.c_qmz[k], precText: false, mzDigits: G.digits,
-          tol: G.digits === 1 || (lib && unitMass(lib.mz)) ? 0.5 : 0.003, ppm: G.digits === 1 || (lib && unitMass(lib.mz)) ? 0 : 10,
+          tol: G.unit || (lib && unitMass(lib.mz)) ? 0.5 : 0.003, ppm: G.unit || (lib && unitMass(lib.mz)) ? 0 : 10,
           topLabel: `compound #${a.c_id[k]}`, bottomLabel: b ? b.name : "", score: b && lib ? fixed(b.match, 3) : "",
           peakNote: (si, i) => (si === 0 && sp.shared[i] ? "<br>shared with a co-eluting compound" : "") };
       };
@@ -417,13 +418,16 @@
     const traces = ctx.traces || (ctx.traces = new Map());       // compound|file -> answer, while the view is open
     async function loadTrace(k, box) {
       const key = `${a.c_id[k]}|${st.file || ""}`;
-      let t = traces.get(key);
+      let t = traces.get(key), waited = false;
       if (!t) {
+        waited = true;
         box.replaceChildren(h("div.loading", { style: { padding: "28px" } }, P3.spinner(18), h("span.body-small.muted", "Reading the chromatograms…")));
         try { t = await ctx.trace(a.c_id[k], st.file); } catch (e) { t = { error: String(e.message || e), files: [] }; }
         if (!t.error) { traces.set(key, t); if (traces.size > 120) traces.delete(traces.keys().next().value); }
       }
-      if (!ctx.alive() || shown !== k || !box.isConnected) return;
+      // after a wait the view may have moved on; an answer kept from before is drawn at once, before its box is
+      // in the page (the detail is put together first)
+      if (!ctx.alive() || shown !== k || (waited && !box.isConnected)) return;
       // which file: the compound's reference file first, then any other file that holds it
       const files = t.files && t.files.length ? t.files : G.stems.filter((_, f) => isFinite(G.value(k, f)));
       const sel = h("select", { "aria-label": "File" }, files.map((f) => h("option", { value: f }, f)));

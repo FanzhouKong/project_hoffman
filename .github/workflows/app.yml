@@ -2,7 +2,7 @@ name: app
 # Standalone peak3d app (PyInstaller) for Windows, macOS and Linux: build, use it as a user would, publish.
 # Every push builds and checks the four apps (the downloads and the check screenshots stay as workflow artifacts);
 # only a v* tag publishes them, as the release "Mosa vX.Y.Z". Since 1.1.3 there is no preview release. A tag that
-# is not plain vX.Y.Z (v1.4.0b1: the GC-MS preview from gc-support) is published as a pre-release, which leaves the
+# is not plain vX.Y.Z (v1.4.0b2: the GC-MS preview from gc-support) is published as a pre-release, which leaves the
 # latest release as it is.
 on:
   push:
@@ -77,6 +77,12 @@ jobs:
           test -f gc_smoke/gc/compounds.tsv && test -f gc_smoke/gc/compound_table.tsv
           echo "GC compounds: $(( $(wc -l < gc_smoke/gc/compounds.tsv) - 1 ))"
           grep -q 'id="peak3d-gc" type="application/octet-stream">H4sI' gc_smoke/report.html      # the report holds them (gzip, base64)
+      - name: ANDI-MS netCDF inside the app (two synthetic unit-resolution .CDF runs, compounds at nominal masses)
+        run: |
+          python packaging/make_cdf_example.py cdf_in
+          "$BIN" process --input cdf_in --output cdf_out --cores 2 --mode gc | tee cdf_smoke.log
+          if grep -q "gc stages failed" cdf_smoke.log; then echo "::error::the GC stages failed on .CDF files inside the app"; exit 1; fi
+          python -c "import csv, json; p = json.load(open('cdf_out/params.json')); assert p['mass_scale'] > 1, p.get('mass_scale'); r = list(csv.DictReader(open('cdf_out/gc/compounds.tsv'), delimiter='\t')); assert len(r) >= 6 and all(float(x['quant_mz']) == int(float(x['quant_mz'])) for x in r), len(r); print(len(r), 'compounds at nominal masses')"
       - name: asari inside the app (bundled; runs as the app's own `_asari` command)
         if: matrix.extras == '[asari]'
         timeout-minutes: 10

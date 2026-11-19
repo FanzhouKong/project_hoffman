@@ -753,7 +753,10 @@
         features_refresh();
       };
       // the search settings and the filters sit above the feature list, so the detail columns start at the top
-      const filters = [idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
+      // a unit-resolution GC-MS run read from .cdf: the single ions carry their nominal mass times the scale
+      const ms = R.params.mass_scale;
+      const scaleNote = ms && ms !== 1 ? banner(`Unit-resolution data: the m/z in this tab are nominal masses × ${fixed(ms, 5)} (written that way so that isotope peaks pair up as on an accurate-mass instrument), so nominal mass 73 is listed at ${fixed(73 * ms, 4)}. Divide by ${fixed(ms, 5)} for the nominal mass. The Compounds tab shows nominal masses.`) : null;
+      const filters = [scaleNote, idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
           R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null,
           a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, clearBtn, h("span.spacer"), count, eicBtn, dl, dlc), skipRow];

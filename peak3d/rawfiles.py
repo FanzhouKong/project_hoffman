@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-MZML, RAW = ".mzml", ".raw"
+MZML, RAW, CDF = ".mzml", ".raw", ".cdf"
 CONVERTED = "mzml_converted"
 SOURCES = ".sources"
 INSTALL_HINT = ("install the Thermo .raw reader (in the app: the Data card; on the command line: "
@@ -35,14 +35,21 @@ def _log(msg):
 
 # ------------------------------------------------------------------ inputs ----
 def input_files(folder) -> list[Path]:
-    """a run's inputs in a folder, sorted: every .mzML file and every Thermo .raw file (a file; Waters .raw is a
-    folder) without an mzML file of the same name next to it"""
+    """a run's inputs in a folder, sorted: every .mzML file, and every Thermo .raw file (a file; Waters .raw is a
+    folder) and ANDI-MS netCDF file (.cdf, GC-MS; read as it is, cdf.py) without an mzML file of the same name next
+    to it (of a .raw and a .cdf file of one name, the .cdf)"""
     try:
-        entries = [p for p in Path(folder).iterdir() if p.suffix.lower() in (MZML, RAW) and p.is_file()]
+        entries = [p for p in Path(folder).iterdir() if p.suffix.lower() in (MZML, RAW, CDF) and p.is_file()]
     except OSError:
         return []
     have = {p.stem for p in entries if p.suffix.lower() == MZML}
-    return sorted(p for p in entries if p.suffix.lower() == MZML or p.stem not in have)
+    cdf = {p.stem for p in entries if p.suffix.lower() == CDF}
+    return sorted(p for p in entries if p.suffix.lower() == MZML or (p.stem not in have and
+                                                                    (p.suffix.lower() == CDF or p.stem not in cdf)))
+
+
+def is_cdf(path) -> bool:
+    return Path(path).suffix.lower() == CDF
 
 
 def is_raw(path) -> bool:
@@ -61,7 +68,7 @@ def no_inputs_message(folder) -> str:
         hint = " (Waters .raw folders cannot be read here: convert them to mzML with ProteoWizard msconvert)"
     elif any(n.lower().endswith((".d", ".wiff", ".wiff2")) for n, _ in names):
         hint = " (Agilent .d and SCIEX .wiff data cannot be read here: convert them to mzML with ProteoWizard msconvert)"
-    return f"no .mzML or Thermo .raw files in {folder}{hint}"
+    return f"no .mzML, Thermo .raw or .cdf files in {folder}{hint}"
 
 
 # ------------------------------------------------------------------ converter ----

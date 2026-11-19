@@ -38,9 +38,10 @@ results**. The first run compiles Mosa (about a minute); later runs start at onc
 computer.
 
 **GC-MS (preview)**: the pre-release
-[Mosa v1.4.0b1](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.4.0b1), built from the `gc-support`
-branch, adds a GC-MS mode for electron-ionisation data (centroided mzML). Set **Acquisition** to **GC-MS (EI)** on
-the run form: after picking, each run's ions are deconvolved into compounds, and the results open on a
+[Mosa v1.4.0b2](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.4.0b2), built from the `gc-support`
+branch, adds a GC-MS mode for electron-ionisation data: centroided mzML, or ANDI-MS netCDF files (`.cdf`, the usual
+export of GC-MS instruments), which are read as they are; unit-resolution (quadrupole) runs are reported at nominal
+masses. Set **Acquisition** to **GC-MS (EI)** on the run form (a folder of .cdf files sets it by itself): after picking, each run's ions are deconvolved into compounds, and the results open on a
 **Compounds** tab that lists every compound at its quantifier m/z and retention time, with its spectrum, its ions'
 chromatograms and its abundance in every file. Optional: a retention index from an n-alkane or FAME ladder in the
 runs, and an EI library (.msp) to annotate the compounds. Method and limits: [`peak3d/gc/README.md`](peak3d/gc/README.md).

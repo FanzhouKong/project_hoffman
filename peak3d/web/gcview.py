@@ -3,7 +3,7 @@ packed block (bundle.pack), and the chromatograms of one compound's ions in one 
 
 Block (header["kind"] == "peak3d-gc"), n compounds in retention order, N files:
   header   stems, name / formula / inchikey / ref_file per compound, summary (gc/params.json in short), digits
-           (decimals worth showing in an m/z: 1 for unit-mass data, 4 otherwise), hits (per-hit text columns)
+           (decimals worth showing in an m/z: 0 for nominal masses, 4 for accurate ones), hits (per-hit text columns)
   c_*      per compound: id, rt (minutes, aligned), ri, qmz (quantifier m/z), bmz (base peak), nions, nshared,
            nfiles, height (the quantifier's, reference file), ref (file index), refc (component there), match,
            reverse, lri, dri (the annotation's scores and library index; nan without one), riex (index extrapolated)
@@ -101,7 +101,13 @@ def build(output) -> bytes:
     s_mz = np.concatenate([mzs[k] for k in have]).astype(np.float64) if have else np.zeros(0)
     s_ab = np.concatenate([abs_[k] for k in have]).astype(np.float32) if have else np.zeros(0, np.float32)
     s_sh = np.concatenate([shs[k] for k in have]).astype(np.uint8) if have else np.zeros(0, np.uint8)
-    unit_mass = bool(len(s_mz)) and bool(np.all(np.abs(s_mz * 10 - np.round(s_mz * 10)) < 1e-3))
+    # decimals worth showing in an m/z: none for nominal masses (unit-resolution runs), one for masses on a
+    # 0.1 grid, else four
+    digits = 4
+    if len(s_mz) and np.all(np.abs(s_mz - np.round(s_mz)) < 1e-6):
+        digits = 0
+    elif len(s_mz) and np.all(np.abs(s_mz * 10 - np.round(s_mz * 10)) < 1e-3):
+        digits = 1
 
     arrays = {"c_id": _num(comp, "compound_id", np.int32, 0), "c_rt": _num(comp, "rt", np.float64),
               "c_ri": _num(comp, "ri", np.float32), "c_qmz": _num(comp, "quant_mz", np.float64),
@@ -142,11 +148,12 @@ def build(output) -> bytes:
     p = json.loads((d / "params.json").read_text()) if (d / "params.json").exists() else {}
     run = json.loads((output / "params.json").read_text()) if (output / "params.json").exists() else {}
     summary = {k: p.get(k) for k in ("peak3d_version", "n_files", "n_components", "n_compounds", "rt_tol_min", "min_presence",
-                                     "ladder", "ladder_table", "n_ladder", "min_similarity", "ri_tol", "stage_times_s")}
+                                     "ladder", "ladder_table", "n_ladder", "min_similarity", "ri_tol", "stage_times_s",
+                                     "unit_mass")}
     summary["libraries"] = [Path(x).name for x in p.get("libraries") or []]
     summary["picked_in"] = run.get("mode")
     header = {"format": FORMAT, "kind": "peak3d-gc", "title": output.resolve().name, "viewer_version": __version__,
-              "n": n, "stems": stems, "digits": 1 if unit_mass else 4, "summary": summary,
+              "n": n, "stems": stems, "digits": digits, "summary": summary,
               "ref_file": comp["reference_file"].tolist() if n else [],
               **{c: (comp[c].tolist() if c in comp else [""] * n) for c in TEXT}, "hits": hits_head}
     return bundle.pack(bundle._clean(header), arrays)
@@ -189,7 +196,9 @@ def trace(output, cache_dir, compound_id: int, stem: str | None = None, n_ions: 
         off = z["off"]
         mz, ab, sh = (z[x][int(off[k]):int(off[k + 1])] for x in ("mz", "abundance", "shared"))
         model = z["model"][int(z["model_off"][k]):int(z["model_off"][k + 1])] if "model" in z.files else None
-    P = params_from_dict(json.loads((output / "features" / f"{stem}.params.json").read_text()))
+    pj = json.loads((output / "features" / f"{stem}.params.json").read_text())
+    P = params_from_dict(pj)
+    scale = float(pj.get("mass_scale") or 1.0)      # a unit-resolution run: the cloud holds nominal mass x scale
     cloud, source = bundle._source_cloud(output, Path(cache_dir), stem)
     lo, hi = int(c["scan_min"]), int(c["scan_max"])
     pad = max(10, hi - lo)
@@ -198,11 +207,11 @@ def trace(output, cache_dir, compound_id: int, stem: str | None = None, n_ions: 
     quant = int(np.argmin(np.abs(mz - qmz))) if len(mz) else -1
     # each file reports the compound's quantifier; the others: this component's own most abundant ions
     order = [quant] + [int(i) for i in np.argsort(-ab, kind="stable") if int(i) != quant] if quant >= 0 else []
-    tol = ion_tol(mz, ab, P)
+    tol = ion_tol(mz * scale, ab, P)
     top = float(ab.max()) if len(ab) else 1.0
     ions = []
     for i in order[:max(1, int(n_ions))]:
-        y = eic_kernel(cloud.off, cloud.mz, cloud.inten, float(mz[i]), float(tol[i]), s0, s1)
+        y = eic_kernel(cloud.off, cloud.mz, cloud.inten, float(mz[i]) * scale, float(tol[i]), s0, s1)
         ions.append({"mz": float(mz[i]), "abundance": float(ab[i]), "rel": float(100.0 * ab[i] / top) if top > 0 else 0.0,
                      "shared": bool(sh[i]), "quant": i == quant, "y": [float(f"{v:.5g}") for v in y.tolist()]})
     rt = 60.0 * np.asarray(cloud.rt, np.float64)

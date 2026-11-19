@@ -91,6 +91,8 @@ def load_mosa(out, stem, masses, rt, scale=C13):
     z = np.load(out / "gc" / "components" / f"{stem}.npz")
     K, M = len(c), len(masses)
     spec = np.zeros((K, M))
+    if len(z["mz"]) and np.all(z["mz"] == np.rint(z["mz"])):      # a run peak3d read from .cdf itself (1.4.0b2): the
+        scale = 1.0                                                 # components are at nominal masses already
     nom = unit_mass(z["mz"], scale) - masses[0]
     profs = []
     dt = float(np.median(np.diff(rt)))
