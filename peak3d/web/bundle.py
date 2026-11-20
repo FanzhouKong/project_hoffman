@@ -292,6 +292,23 @@ def eic_scans(off, mz, inten, lo, hi):
     return out
 
 
+def bridged_inten(cloud: Cloud):
+    """the cloud's intensities with everything but the centroids the reader filled in (Cloud.bridged) at zero, or
+    None for a cloud without any: a chromatogram read from it says which of a trace's points are interpolated"""
+    mark = getattr(cloud, "bridged", None)
+    if mark is None or not mark.any():
+        return None
+    return np.where(mark, cloud.inten, 0).astype(np.float32)
+
+
+def bridged_ranges(y, yb) -> list:
+    """[start, end, start, end, ...]: the stretches (end exclusive) of a chromatogram y whose value is an
+    interpolated centroid (yb: the same chromatogram read from bridged_inten)"""
+    m = (np.asarray(yb) > 0) & (np.asarray(yb) >= np.asarray(y))
+    d = np.diff(np.concatenate([[0], m.astype(np.int8), [0]]))
+    return np.stack([np.flatnonzero(d == 1), np.flatnonzero(d == -1)], axis=1).reshape(-1).tolist()
+
+
 def _source_cloud(output: Path, cache_dir: Path, stem: str) -> tuple[Cloud, str]:
     """a file's MS1 point cloud: the run's cache, else the mzML (or .cdf) file the run read (params.json), when it
     still exists"""
@@ -301,13 +318,16 @@ def _source_cloud(output: Path, cache_dir: Path, stem: str) -> tuple[Cloud, str]
     params = json.loads((output / "params.json").read_text()) if (output / "params.json").exists() else {}
     for p in map(Path, params.get("input_files") or []):
         if p.stem == stem and p.suffix.lower() in (".mzml", ".cdf") and p.is_file():
-            if p.suffix.lower() == ".cdf":          # read as the run read it: with the run's scan skew taken out
-                from ..cdf import load_cloud as load_cdf
-                fp = output / "features" / f"{stem}.params.json"
-                src = (json.loads(fp.read_text()).get("source") or {}) if fp.exists() else {}
-                return load_cdf(p, skew=src.get("scan_skew", "auto")), "CDF"
+            # read as the run read it: a unit-resolution run (.cdf, or mzML in GC-MS mode) at nominal masses, with
+            # the run's scan skew taken out
+            fp = output / "features" / f"{stem}.params.json"
+            src = (json.loads(fp.read_text()).get("source") or {}) if fp.exists() else {}
+            kind = {"unit resolution": "unit", "accurate mass": "accurate"}.get(src.get("kind"))
+            cdf = p.suffix.lower() == ".cdf"
+            unit = (dict(skew=src.get("scan_skew", "auto"), masses=kind or "auto", bridge=bool(src.get("bridge", False)))
+                    if cdf or kind == "unit" else None)
             from ..io import load_cloud
-            return load_cloud(p, (params.get("options") or {}).get("polarity")), "mzML"
+            return load_cloud(p, (params.get("options") or {}).get("polarity"), unit=unit), "CDF" if cdf else "mzML"
     raise FileNotFoundError(f"no point-cloud cache for {stem} and its mzML file is not where the run read it")
 
 
@@ -329,8 +349,11 @@ def extract_eic(output, cache_dir, stem: str, mz: float, ppm: float, offset_ppm:
         target = np.full(cloud.n_scans, float(mz) / (1.0 - offset_ppm * 1e-6))
     lo_ppm, hi_ppm = (float(ppm), float(ppm)) if lo_ppm is None or hi_ppm is None else (float(lo_ppm), float(hi_ppm))
     y = eic_scans(cloud.off, cloud.mz, cloud.inten, target * (1.0 - lo_ppm * 1e-6), target * (1.0 + hi_ppm * 1e-6))
+    ib = bridged_inten(cloud)             # the stretches the reader interpolated (a hole in the file): drawn dashed
+    extra = {} if ib is None else {"bridged": bridged_ranges(
+        y, eic_scans(cloud.off, cloud.mz, ib, target * (1.0 - lo_ppm * 1e-6), target * (1.0 + hi_ppm * 1e-6)))}
     shift = target / float(mz) * 1e6 - 1e6
-    return {"file": stem, "mz": float(mz), "ppm": float(ppm), "lo_ppm": lo_ppm, "hi_ppm": hi_ppm, "source": source,
+    return {**extra, "file": stem, "mz": float(mz), "ppm": float(ppm), "lo_ppm": lo_ppm, "hi_ppm": hi_ppm, "source": source,
             "n_scans": int(cloud.n_scans),
             "offset_ppm": [float(shift.min()), float(shift.max())] if len(shift) else [0.0, 0.0],
             "rt_s": np.round(60.0 * corr, 3).tolist(), "rt_native_s": np.round(60.0 * cloud.rt, 3).tolist(),
@@ -434,6 +457,7 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
     med_lo, med_hi = _nanmedian_rows(rel_lo), _nanmedian_rows(rel_hi)
     win_lo = np.zeros((n_groups, F), np.float32)
     win_hi = np.zeros((n_groups, F), np.float32)
+    interp = None                          # grid cells whose value is an interpolated centroid (Cloud.bridged)
     for j, k in enumerate(shown):
         s = stems[k]
         cloud = Cloud.load_npz(cache_dir / f"{s}.npz")
@@ -443,6 +467,12 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
         win_lo[:, j], win_hi[:, j] = lo, hi
         centre, tol = target * (1.0 + 0.5 * (hi - lo) * 1e-6), target * 0.5 * (lo + hi) * 1e-6
         traces[:, j, :] = eic_on_grid(cloud.off, cloud.mz, cloud.inten, corr, centre, tol, x0, dx, n_pts)
+        ib = bridged_inten(cloud)
+        if ib is not None:
+            tb = eic_on_grid(cloud.off, cloud.mz, ib, corr, centre, tol, x0, dx, n_pts)
+            if interp is None:
+                interp = np.zeros(traces.shape, bool)
+            interp[:, j, :] = (tb > 0) & (tb >= traces[:, j, :])
         n_scans[:, j, :] = np.minimum(scans_in_window(cloud.off, cloud.mz, cloud.inten, corr, centre, tol, rt_lo, rt_hi),
                                       65535)
     scale = traces.reshape(n_groups, -1).max(axis=1)
@@ -454,6 +484,8 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
     arrays = {"eic_row": rows.astype(np.int32), "eic_x0": x0.astype(np.float32), "eic_dx": dx.astype(np.float32),
               "eic_scale": scale.astype(np.float32), "eic_q": q.reshape(-1), "eic_ns": n_scans.reshape(-1),
               "eic_lo": win_lo.reshape(-1), "eic_hi": win_hi.reshape(-1)}
+    if interp is not None and interp.any():      # one bit per value of eic_q, most significant bit first
+        arrays["eic_b"] = np.packbits(interp.reshape(-1))
     return (info, arrays), None
 
 

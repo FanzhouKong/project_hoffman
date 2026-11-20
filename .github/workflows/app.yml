@@ -2,7 +2,7 @@ name: app
 # Standalone peak3d app (PyInstaller) for Windows, macOS and Linux: build, use it as a user would, publish.
 # Every push builds and checks the four apps (the downloads and the check screenshots stay as workflow artifacts);
 # only a v* tag publishes them, as the release "Mosa vX.Y.Z". Since 1.1.3 there is no preview release. A tag that
-# is not plain vX.Y.Z (v1.4.0b2: the GC-MS preview from gc-support) is published as a pre-release, which leaves the
+# is not plain vX.Y.Z (v1.4.0b3: the GC-MS preview from gc-support) is published as a pre-release, which leaves the
 # latest release as it is.
 on:
   push:

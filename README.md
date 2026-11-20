@@ -38,10 +38,15 @@ results**. The first run compiles Mosa (about a minute); later runs start at onc
 computer.
 
 **GC-MS (preview)**: the pre-release
-[Mosa v1.4.0b2](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.4.0b2), built from the `gc-support`
+[Mosa v1.4.0b3](https://github.com/FanzhouKong/project_hoffman/releases/tag/v1.4.0b3), built from the `gc-support`
 branch, adds a GC-MS mode for electron-ionisation data: centroided mzML, or ANDI-MS netCDF files (`.cdf`, the usual
-export of GC-MS instruments), which are read as they are; unit-resolution (quadrupole) runs are reported at nominal
-masses. Set **Acquisition** to **GC-MS (EI)** on the run form (a folder of .cdf files sets it by itself): after picking, each run's ions are deconvolved into compounds, and the results open on a
+export of GC-MS instruments), which are read as they are; unit-resolution runs (masses on a 0.05 Da grid, or one
+centroid per nominal mass whose value slides as compounds elute) are reported at nominal masses
+(mzML files are tested for this in GC-MS mode, .cdf files always; `--masses unit` / `accurate` overrides what Mosa
+reads from the files). Where such a run lacks an ion's centroids for a stretch although the ion stands well above the
+floor on both sides and a much stronger ion fills those scans, the stretch is filled with a straight line: the peaks
+that hold such points are flagged `bridged`, and their chromatograms are drawn dashed there (`--no-bridge` leaves the
+holes). Set **Acquisition** to **GC-MS (EI)** on the run form (a folder of .cdf files sets it by itself): after picking, each run's ions are deconvolved into compounds, and the results open on a
 **Compounds** tab that lists every compound at its quantifier m/z and retention time, with its spectrum, its ions'
 chromatograms and its abundance in every file. Optional: a retention index from an n-alkane or FAME ladder in the
 runs, and an EI library (.msp) to annotate the compounds. Method and limits: [`peak3d/gc/README.md`](peak3d/gc/README.md).

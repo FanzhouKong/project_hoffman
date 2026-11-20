@@ -278,11 +278,23 @@
           ctx.fillStyle = rgba(col, dim ? 0.04 : 0.1);
           ctx.fill();
         }
-        ctx.beginPath();
-        this.path(r, s.step);
         ctx.strokeStyle = dim ? rgba(col, 0.22) : r.alpha != null && i !== active ? rgba(col, r.alpha) : col;
         ctx.lineWidth = i === active ? (r.width || 2) + 1 : r.width || 2;
+        // interp (0/1 per point): the line through interpolated points is dashed, through measured ones solid; told
+        // apart once the points in view are few enough to be drawn one by one
+        const split = r.interp && !s.step && bisect(r.x, this.xd[1]) - bisect(r.x, this.xd[0]) <= 4 * (b.x1 - b.x0);
+        ctx.beginPath();
+        if (split) this.pathPart(r, false); else this.path(r, s.step);
         ctx.stroke();
+        if (split) {
+          ctx.beginPath();
+          this.pathPart(r, true);
+          ctx.setLineDash([5, 4]);
+          ctx.lineCap = "butt";
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.lineCap = "round";
+        }
       }
       if (s.vline != null && isFinite(s.vline)) {
         ctx.strokeStyle = P.muted;
@@ -373,6 +385,18 @@
           if (!pen) ctx.moveTo(a, Y); else ctx.lineTo(a, Y);
           ctx.lineTo(c, Y);
         } else if (!pen) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+        pen = true;
+      }
+    }
+    // the segments in view that touch an interpolated point (dashed true) or lie between two measured ones (false)
+    pathPart(r, dashed) {
+      const ctx = this.ctx, x = r.x, y = r.y, m = r.interp;
+      const z = Math.min(x.length, bisect(x, this.xd[1]) + 2);
+      let pen = false;
+      for (let i = Math.max(1, bisect(x, this.xd[0]) - 1); i < z; i++) {
+        if (!isFinite(y[i - 1]) || !isFinite(y[i]) || !!(m[i - 1] || m[i]) !== dashed) { pen = false; continue; }
+        if (!pen) ctx.moveTo(this.sx(x[i - 1]), this.sy(y[i - 1]));
+        ctx.lineTo(this.sx(x[i]), this.sy(y[i]));
         pen = true;
       }
     }
@@ -813,7 +837,17 @@
     }));
   }
 
+  // [start, end, start, end, ...] (end exclusive) -> 0/1 per point of an n-point trace, or null without any stretch:
+  // the `interp` of a series, from the stretches a chromatogram's reader says are interpolated
+  function mask(ranges, n) {
+    if (!ranges || !ranges.length) return null;
+    const m = new Uint8Array(n);
+    for (let i = 0; i + 1 < ranges.length; i += 2) m.fill(1, ranges[i], ranges[i + 1]);
+    return m;
+  }
+
   P3.plot = {
+    mask,
     line: (el, spec) => new Line(el, spec),
     scatter: (el, spec) => new Scatter(el, spec),
     bars: (el, spec) => new Bars(el, spec),

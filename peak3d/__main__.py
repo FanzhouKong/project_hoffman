@@ -73,6 +73,18 @@ def build_parser():
                             "(a --set goes on top of the mode's settings)")
         p.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
                        help="override a fixed picker parameter, e.g. --set merge_test=noise (repeatable)")
+        p.add_argument("--masses", choices=("auto", "unit", "accurate"), default="auto",
+                       help="what the masses of a GC-MS run are: unit (unit-resolution scans, reduced to nominal "
+                            "masses), accurate (high-resolution centroids, read as they are) or auto (default: "
+                            "read from each file: unit when its masses sit on a 0.05 Da grid, or when its scans "
+                            "hold one centroid per nominal mass that slides over a peak). auto looks at mzML "
+                            "files in --mode gc only, at .cdf files always")
+
+        p.add_argument("--no-bridge", action="store_true",
+                       help="unit-resolution GC-MS runs: leave the holes in the ion traces as they are. By default a "
+                            "stretch where an ion has no centroid although it stands well above the floor on both "
+                            "sides, and a much stronger ion fills the scans, is filled with the straight line between "
+                            "the two sides; the peaks that hold such points are flagged bridged")
 
     def align_opts(p):
         p.add_argument("--ppm", type=_positive(float), default=5.0, help="m/z tolerance for anchors/grouping")

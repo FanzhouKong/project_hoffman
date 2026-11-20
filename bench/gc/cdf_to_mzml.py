@@ -23,7 +23,12 @@ peak3d expects accurate masses, so each scan is reduced to nominal masses first:
   where it is. --deskew auto measures K in the file (estimate_skew): at the strongest peaks of the total ion
   current, the apex of every ion to a fraction of a scan against its mass. Default 0: nothing is moved.
 
-    python -I bench/gc/cdf_to_mzml.py IN.CDF OUT.mzML [--mass-scale S] [--deskew K|auto] [--name STEM]
+- --as-is: none of the above. The centroids are written with the masses and intensities the file holds (points of
+  zero or negative intensity left out, the scans sorted by mass), as a vendor-neutral converter would write them.
+  This is the mzML to give peak3d since 1.4.0b3: in GC-MS mode it tests the masses of every mzML file itself and
+  reduces a unit-resolution run to nominal masses, with one scan skew for the whole run (peak3d/cdf.py).
+
+    python -I bench/gc/cdf_to_mzml.py IN.CDF OUT.mzML [--as-is] [--mass-scale S] [--deskew K|auto] [--name STEM]
 
 Prints one tab-separated summary line: file, scans, input points, output centroids, m/z range, skew, seconds."""
 import argparse
@@ -68,6 +73,17 @@ def convert(src, scale=C13, skew=0.0, name=None, floor="auto"):
     return cloud, len(mz), skew, n_skew, floor
 
 
+def convert_as_is(src, name=None):
+    """(Cloud, input points): the file's centroids as they are"""
+    from peak3d.cdf import polarity
+    from peak3d.io import from_scans
+    rt, off, mz, it = read_cdf(src)
+    n = len(rt)
+    cloud = from_scans(name or Path(src).stem, rt / 60.0, [mz[off[s]:off[s + 1]] for s in range(n)],
+                       [it[off[s]:off[s + 1]] for s in range(n)], polarity(src))
+    return cloud, len(mz)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("src", type=Path)
@@ -77,6 +93,7 @@ def main():
     ap.add_argument("--mass-scale", type=float, default=C13)
     ap.add_argument("--deskew", default="0", help="scans per 1000 Da, or auto")
     ap.add_argument("--name", default=None)
+    ap.add_argument("--as-is", action="store_true", help="write the file's centroids as they are (see above)")
     a = ap.parse_args()
     if a.measure_skew:
         rt, off, mz, it = read_cdf(a.src)
@@ -87,6 +104,15 @@ def main():
         return
     from peak3d.synth import write_mzml
     tic = time.perf_counter()
+    if a.as_is:
+        cloud, n_in = convert_as_is(a.src, a.name or a.dst.stem)
+        cloud.validate()
+        tmp = a.dst.with_name(a.dst.name + ".part")
+        write_mzml(cloud, tmp)
+        tmp.replace(a.dst)
+        print(f"{a.src.name}\t{cloud.n_scans}\t{n_in}\t{cloud.n_points}\t{cloud.mz.min():.4f}-{cloud.mz.max():.4f}\t"
+              f"as is\t{time.perf_counter() - tic:.1f}", flush=True)
+        return
     cloud, n_in, k, n_k, floor = convert(a.src, a.mass_scale, a.deskew if a.deskew == "auto" else float(a.deskew),
                                          a.name or a.dst.stem, a.noise_floor)
     cloud.validate()

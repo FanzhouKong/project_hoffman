@@ -1,6 +1,6 @@
 # peak3d.gc: GC-MS (electron ionisation)
 
-Status: preview (Mosa 1.4.0b2, branch `gc-support`). Checked on synthetic runs (`peak3d/tests/test_gc_*.py`), on
+Status: preview (Mosa 1.4.0b3, branch `gc-support`). Checked on synthetic runs (`peak3d/tests/test_gc_*.py`), on
 the MRH GC-Orbitrap set with the picker in lc and in gc mode, and on the ten unit-resolution runs of the DeepCPR
 paper (both below).
 
@@ -23,8 +23,8 @@ GC options (`--ri-ladder`, `--ri-carbons`, `--ri-table`, `--ri-tol`, `--ri-type`
 
 ## Input: mzML and ANDI-MS netCDF (.cdf)
 
-A folder of `.cdf` files runs as it is (`peak3d/cdf.py`, read with scipy). Which kind of data a file holds is read
-from its masses:
+A folder of `.cdf` files runs as it is (`peak3d/cdf.py`, read with scipy), and so does a folder of centroided mzML
+files. Which kind of data a file holds is read from its masses, for mzML files (in GC-MS mode) as for .cdf files:
 
 - **Unit resolution** (quadrupoles: masses written on a 0.05 or 0.1 Da grid, one value per nominal mass). Each
   scan is reduced to nominal masses (n holds n - 0.3 <= m < n + 0.7, the rule of the NIST libraries); points below
@@ -41,7 +41,18 @@ from its masses:
   scaled m/z: nominal mass 73 is listed at 73.2449 (`mass_scale` in `params.json`).
 - **Accurate mass** (time-of-flight exports): read as centroids, nothing changed.
 
-`features/<file>.params.json` records what was done (`source`: kind, noise floor, scan skew). asari and MassCube
+**Holes in a unit-resolution run** are filled (`peak3d/cdf.py`, bridge_holes; `--no-bridge` turns it off). A spectrum
+recorded while a very strong compound elutes can lack its weaker ions: the trace of such an ion stops at full height,
+is empty for about a peak width and comes back at full height. A hole is filled with the straight line between the two
+centroids around it when both are at least 10 x the file's intensity floor, every filled value stays under 1 % of its
+scan's strongest ion, and the hole is at most two peak widths long (the file's own width, measured on the strongest
+peaks). The filled centroids are marked in the point cloud: a peak that holds any carries the flag `bridged` and their
+number in `n_bridged` (per-file feature tables), and the app and report.html draw those stretches of a chromatogram
+dashed. Under a filled stretch the intensity is a guess: a peak whose apex lies in a hole comes out too low. Nothing is
+filled in an accurate-mass run.
+
+`features/<file>.params.json` records what was done (`source`: kind, noise floor, scan skew, holes and centroids
+filled). asari and MassCube
 do not read .cdf files.
 
 Check on the ten unit-resolution runs of the DeepCPR paper, read from their .CDF files (`results/gc_deepcpr/mosa_cdf`),
@@ -271,8 +282,23 @@ the delayed copies) but takes the component away from 2.5 % of the truth compoun
 - In a unit-resolution run the single ions (Ions tab, feature tables) carry the scaled m/z (nominal mass x
   1.0033548); only the GC stages report nominal masses. The halogen check and the isotope arithmetic of the LC
   stages mean nothing there.
-- A unit-resolution run converted to mzML outside (`bench/gc/cdf_to_mzml.py`, msconvert) is not recognised as one:
-  read the .cdf files directly.
+- A unit-resolution run that comes as centroided mzML with the masses the instrument wrote (a converter's output, or
+  `bench/gc/cdf_to_mzml.py --as-is`) is recognised in GC-MS mode and treated like the .cdf file (peak3d/cdf.py:
+  nominal masses, the run's scan skew); `--masses unit` / `accurate` overrides the test. One already reduced to
+  nominal masses outside (the script without `--as-is`) is not: its masses are read as accurate ones.
+- Unit-resolution files (.cdf or mzML) that hold one centroid per nominal mass written to many decimals (peak3d/cdf.py,
+  "one per mass"; 22 cerebrospinal-fluid runs, 17 scans/s, `results/gcqtof_csf`): read as accurate masses the
+  picker cut peaks wherever the centroid slid away (half the rows of the aligned table had another row of the same
+  nominal mass within half a peak width; 4 % once the files are read at nominal masses, 2 % with the holes
+  filled). Those files also lack centroids in the middle of peaks (the holes above; module text of peak3d/cdf.py
+  for what was measured): 9 % of the features ended at such a hole, 2.4 % once they are filled
+  (`bench/diag/gc_unit_centroid_check.py`); the rest are holes longer than two peak widths, or with a weak side.
+  The holes are in the vendor's export, whatever the format: the mzML that ChromaTOF wrote of one of these runs
+  holds the same centroids, scan for scan, as its .cdf file (and starts its times at 0, where the .cdf file starts
+  at the 324 s acquisition delay). mzML built from the .cdf files (`scripts/57_gcqtof_cdf_to_mzml.sbatch`) gives
+  the .cdf run's result. Not done: the aligned table and the Compounds tab do not say which values rest on
+  filled centroids (only the per-file feature tables and the chromatograms do), and the deconvolved spectra use
+  the filled values like measured ones.
 - Search ranking (match vs reverse vs a mix), the index window and the 0.6 cross-file similarity are untested
   choices, to be judged on a set with known compounds.
 - No gap filling of compounds; no library search, annotation or marks for compounds from the app's results page.

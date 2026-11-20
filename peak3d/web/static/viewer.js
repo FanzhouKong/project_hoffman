@@ -283,7 +283,15 @@
         const ns = a.eic_ns ? { all: a.eic_ns[(k * F + j) * 2], signal: a.eic_ns[(k * F + j) * 2 + 1] } : null;
         // the m/z window of this file's trace, ppm below / above the feature (older bundles: +/- the run's ppm)
         const lo = a.eic_lo ? a.eic_lo[k * F + j] : e.ppm, hi = a.eic_hi ? a.eic_hi[k * F + j] : e.ppm;
-        return { file: f, y, ns, lo, hi };
+        // the points that are interpolated centroids (a hole of the file the reader filled): one bit per value
+        let b = null;
+        if (a.eic_b) {
+          const m = new Uint8Array(P);
+          let any = 0;
+          for (let p = 0; p < P; p++) { const i = off + p; any |= m[p] = (a.eic_b[i >> 3] >> (7 - (i & 7))) & 1; }
+          if (any) b = m;
+        }
+        return { file: f, y, ns, lo, hi, b };
       });
       return { x, traces };
     }
@@ -1501,7 +1509,7 @@
           const series = e.traces.map((t) => {
             const w = whole.on ? eicPeek(R.stems[t.file], qOf(t)) : null;
             const full = !!(w && w.x);
-            return { id: t.file, label: R.stems[t.file] + winOf(t), x: full ? w.x : e.x, y: full ? w.y : t.y, color: colorOf(t.file), width: 1.5, alpha: 0.9, ns: t.ns };
+            return { id: t.file, label: R.stems[t.file] + winOf(t), x: full ? w.x : e.x, y: full ? w.y : t.y, interp: full ? w.b : t.b, color: colorOf(t.file), width: 1.5, alpha: 0.9, ns: t.ns };
           });
           const dots = [];
           for (const sr of series) {          // each trace's apex inside the peak bounds
@@ -1522,7 +1530,7 @@
           h("p.body-small.muted", `${a.eic_lo ? `Each file over its own m/z span of the feature, at least ±${R.h.eic.ppm} ppm (here up to −${fixed(Math.max(...e.traces.map((t) => t.lo)), 1)} / +${fixed(Math.max(...e.traces.map((t) => t.hi)), 1)} ppm; a file without the feature: the median span)` : `±${R.h.eic.ppm} ppm around the feature`}, on the aligned RT axis${R.h.eic.files.length < R.N ? `; ${R.h.eic.files.length} of ${R.N} files (evenly spaced)` : ""}. ` +
             `Peak ${fixed(t0, 1)}–${fixed(t1, 1)} s (dashed), apex of each trace (dot)` +
             (tic.length ? (one ? "; red line: where the MS2 spectrum was taken" : `; red line: the highest-TIC MS2 spectrum; red stars: the ${int(merged.length)} spectra merged into the consensus, on their file's trace`) : "") +
-            ". Hover a trace to name its file."),
+            ". Hover a trace to name its file." + (e.traces.some((t) => t.b) ? " Dashed stretches are interpolated: the file has no centroid of the ion there (a hole the reader filled)." : "")),
           scanNote(e)), ms1.button));
         // zoom: drag, scroll, buttons; Peak returns to the stored window, Whole run reads the full chromatograms
         const win = [e.x[0], e.x[e.x.length - 1]];
@@ -1546,7 +1554,7 @@
           label: (si) => c.spec.series[si].label,
           tip: (si, k) => {
             const sr = c.spec.series[si], st = statusOf(sr.id), ns = sr.ns;
-            return `<b>${esc(sr.label)}</b><br>RT ${fixed(sr.x[k], 1)} s · ${sci(sr.y[k])}${st != null ? "<br>" + STATUS[st] : ""}` +
+            return `<b>${esc(sr.label)}</b><br>RT ${fixed(sr.x[k], 1)} s · ${sci(sr.y[k])}${sr.interp && sr.interp[k] ? " (interpolated)" : ""}${st != null ? "<br>" + STATUS[st] : ""}` +
               (ns ? `<br>${int(ns.signal)} of ${int(ns.all)} MS1 scans in the peak window hold the ion` : "");
           },
         }, lines())));
@@ -1631,7 +1639,7 @@
       if (!it) {
         it = { v: null };
         it.p = opts.eic(s, q.mz, q.ppm, q.offset, q.lo, q.hi).then(
-          (r) => (it.v = { r, x: Float64Array.from(r.rt_s), xn: Float64Array.from(r.rt_native_s), y: Float64Array.from(r.intensity) }),
+          (r) => (it.v = { r, x: Float64Array.from(r.rt_s), xn: Float64Array.from(r.rt_native_s), y: Float64Array.from(r.intensity), b: P3.plot.mask(r.bridged, r.intensity.length) }),
           (err) => (it.v = { error: err.message || String(err) }));
         eicStore.set(k, it);
         if (eicStore.size > EIC_KEEP) eicStore.delete(eicStore.keys().next().value);
@@ -1780,7 +1788,7 @@
         const got = q ? R.stems.filter((s) => chosen.has(s)).map((s) => [s, eicPeek(s, q)]).filter(([, c]) => c) : [];
         const okd = got.filter(([, c]) => !c.error), bad = got.filter(([, c]) => c.error);
         const native = st.axis === "native";
-        const series = okd.map(([s, c]) => ({ id: s, label: s, x: native ? c.xn : c.x, y: c.y, color: colorOf(s), width: slot.has(s) ? 1.6 : 1.2, alpha: slot.has(s) ? 1 : 0.8, c }));
+        const series = okd.map(([s, c]) => ({ id: s, label: s, x: native ? c.xn : c.x, y: c.y, interp: c.b, color: colorOf(s), width: slot.has(s) ? 1.6 : 1.2, alpha: slot.has(s) ? 1 : 0.8, c }));
         series.sort((p, r) => (slot.has(p.id) ? 1 : 0) - (slot.has(r.id) ? 1 : 0));        // the grey ones underneath
         empty.style.display = series.length ? "none" : "";
         chartEl.style.display = series.length ? "" : "none";
@@ -1795,7 +1803,7 @@
           label: (si) => series[si].label,
           tip: (si, k) => {
             const sr = series[si], c = sr.c;
-            return `<b>${esc(sr.label)}</b><br>RT ${fixed(sr.x[k], 1)} s · ${sci(sr.y[k])}<br>` +
+            return `<b>${esc(sr.label)}</b><br>RT ${fixed(sr.x[k], 1)} s · ${sci(sr.y[k])}${sr.interp && sr.interp[k] ? " (interpolated)" : ""}<br>` +
               (native ? `aligned RT ${fixed(c.x[k], 1)} s` : `raw RT ${fixed(c.xn[k], 1)} s`);
           },
         };
@@ -1821,6 +1829,7 @@
             (q.offset ? (offs.length ? `; each file's m/z offset applied (${sgn(lo)} to ${sgn(hi)} ppm)` : "; no m/z offsets measured for these files") : "; m/z as typed in every file") +
             (fromMzml ? `; ${int(fromMzml)} read from the mzML file${fromMzml > 1 ? "s" : ""} (the point-cloud cache is gone)` : "") + "."));
         }
+        if (okd.some(([, c]) => c.b)) parts.push(h("p", "Dashed stretches are interpolated: the file has no centroid of the ion there (a hole the reader filled). They show once you zoom in."));
         for (const [s, c] of bad) parts.push(banner(`${s}: ${c.error}`, "error"));
         status.replaceChildren(...parts);
       }

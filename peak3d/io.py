@@ -85,6 +85,7 @@ class Cloud:
     polarity: str = ""    # "pos", "neg" or "" (unknown)
     mass_scale: float = 1.0       # m/z = nominal mass x this, for a unit-resolution run read from .cdf (cdf.py); not
     source: dict | None = None    # kept in the cache file (the file's params.json has both). source: what the reader did
+    bridged: np.ndarray | None = None   # (N,) bool: centroids the reader put in (cdf.bridge_holes), not in the file
 
     @property
     def n_scans(self) -> int:
@@ -132,13 +133,20 @@ class Cloud:
                 raise ValueError("m/z must be ascending within each scan")
 
     def save_npz(self, path) -> None:
+        extra = {}
+        if self.bridged is not None and self.bridged.any():       # the points that are not in the file, by index
+            extra["bridged"] = np.flatnonzero(self.bridged).astype(np.int64)
         np.savez(path, rt=self.rt, off=self.off, mz=self.mz, inten=self.inten,
-                 name=np.array(self.name), polarity=np.array(self.polarity))
+                 name=np.array(self.name), polarity=np.array(self.polarity), **extra)
 
     @classmethod
     def load_npz(cls, path) -> "Cloud":
         z = np.load(path, allow_pickle=False)
-        return cls(str(z["name"]), z["rt"], z["off"], z["mz"], z["inten"], str(z["polarity"]))
+        c = cls(str(z["name"]), z["rt"], z["off"], z["mz"], z["inten"], str(z["polarity"]))
+        if "bridged" in z.files:
+            c.bridged = np.zeros(len(c.mz), bool)
+            c.bridged[z["bridged"]] = True
+        return c
 
 
 def from_scans(name: str, rts, mzs, intens, polarity: str = "") -> Cloud:
@@ -281,7 +289,7 @@ def precursor_in_ms1(mz, inten, prec, lo, hi, ppm: float = PRECURSOR_PPM, da: fl
     return p_int, (min(1.0, own / total) if total > 0 else float("nan"))
 
 
-def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cloud:
+def load_cloud(path, polarity: str | None = None, ms2: list | None = None, unit: dict | None = None) -> Cloud:
     """Read MS1 centroids of an mzML file into a Cloud.
 
     polarity: None = require a single polarity in the file (raise on polarity switching),
@@ -293,10 +301,14 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
     the pass, at the precursor corrected by the file's precursor_calibration and with its tolerance. Empty and
     profile-mode MS2 spectra are skipped and counted in ``ms2.n_skipped``, and the calibration is stored in
     ``ms2.cal_mz``, ``cal_ppm``, ``tol_ppm`` and ``cal_n``, when the collector has those attributes
-    (ms2.Collector). An ANDI-MS netCDF file (.cdf, GC-MS) is read by cdf.load_cloud: MS1 only, its own polarity."""
+    (ms2.Collector). An ANDI-MS netCDF file (.cdf, GC-MS) is read by cdf.load_cloud: MS1 only, its own polarity.
+    unit: {"skew": K or "auto", "masses": "auto" | "unit" | "accurate"} has the masses tested for unit resolution
+    (GC-MS; cdf.py): a unit-resolution run comes back at nominal masses with that scan skew taken out, and
+    cloud.source says what was found; "bridge": False leaves the holes of such a run as they are (cdf.bridge_holes).
+    None: an mzML file is read as it is (a .cdf file is always tested)."""
     if Path(path).suffix.lower() == ".cdf":
         from .cdf import load_cloud as load_cdf
-        return load_cdf(path)
+        return load_cdf(path, **(unit or {}))
     from pyteomics import mzml
 
     want = {"pos": "positive scan", "neg": "negative scan"}.get(polarity)
@@ -349,4 +361,8 @@ def load_cloud(path, polarity: str | None = None, ms2: list | None = None) -> Cl
         if hasattr(ms2, "cal_n"):
             ms2.cal_mz, ms2.cal_ppm, ms2.tol_ppm, ms2.cal_n = cal_mz, cal_ppm, tol, cal_n
     pol = polarity or (next(iter(pols)) if pols else "")
-    return from_scans(Path(path).stem, rt, mzs, intens, pol)
+    cloud = from_scans(Path(path).stem, rt, mzs, intens, pol)
+    if unit is not None:
+        from .cdf import unit_from_scans
+        cloud = unit_from_scans(cloud, mzs, intens, **unit)
+    return cloud

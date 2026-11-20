@@ -419,6 +419,27 @@ def _gate_other(df: pd.DataFrame, P: Params) -> pd.Series:
     return ok
 
 
+def bridged_counts(df: pd.DataFrame, cloud: Cloud) -> np.ndarray:
+    """per candidate: how many of the centroids inside its bounds (scan_lo..scan_hi, mz_min..mz_max) the reader put
+    in, where the file had a hole (Cloud.bridged, cdf.bridge_holes); zeros for a cloud without any"""
+    n = np.zeros(len(df), np.int64)
+    mark = getattr(cloud, "bridged", None)
+    if mark is None or not len(df) or not mark.any():
+        return n
+    idx = np.flatnonzero(mark)
+    scan = np.searchsorted(cloud.off, idx, side="right") - 1
+    m = cloud.mz[idx]
+    o = np.lexsort((scan, m))
+    m, scan = m[o], scan[o]
+    lo = np.searchsorted(m, df["mz_min"].values - 1e-9)
+    hi = np.searchsorted(m, df["mz_max"].values + 1e-9, side="right")
+    s0, s1 = df["scan_lo"].values, df["scan_hi"].values
+    for i in np.flatnonzero(hi > lo):
+        s = scan[lo[i]:hi[i]]
+        n[i] = np.count_nonzero((s >= s0[i]) & (s <= s1[i]))
+    return n
+
+
 def flag_strings(df: pd.DataFrame, P: Params) -> pd.Series:
     kf = df["kflags"].values
     cap = (kf & (K.KF_CAP_L | K.KF_CAP_R)) > 0
@@ -437,6 +458,9 @@ def flag_strings(df: pd.DataFrame, P: Params) -> pd.Series:
         ("nohalf", (kf & (K.KF_NOHALF_L | K.KF_NOHALF_R)) > 0),
         # kept as a peak above its ion's own level (background_rule "net"): the height includes that level
         ("on_background", df["on_background"].values if "on_background" in df else False),
+        # some of its centroids are not in the file: the reader filled a hole of the run (n_bridged of them; cdf.py),
+        # so the height and area under that stretch are interpolated
+        ("bridged", df["n_bridged"].values > 0 if "n_bridged" in df else False),
     ]
     out = np.full(len(df), "", dtype=object)
     for name, m in conds:
@@ -536,6 +560,9 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
     P = b.params
     thr = P.min_score if min_score is None else min_score
     df = basins_to_frame(b)
+    unit = float(getattr(cloud, "mass_scale", 1.0) or 1.0) != 1.0      # a unit-resolution run: its tables count the
+    if unit:                                                           # centroids the reader filled in per peak
+        df["n_bridged"] = bridged_counts(df, cloud)
     add_local_width(df, cloud, P)
     if P.narrow_rule == "local":
         df["m1_partner"] = m1_partner(df, cloud, P)
@@ -599,7 +626,7 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
     feats["rt_min"] = feats["rt_min"]
     feats["scan_min"] = feats["scan_lo"]
     feats["scan_max"] = feats["scan_hi"]
-    out = feats[COLUMNS].copy()
+    out = feats[COLUMNS + (["n_bridged"] if unit else [])].copy()
     for c in INT_COLS:
         out[c] = out[c].astype(np.int64)
     rejected = None

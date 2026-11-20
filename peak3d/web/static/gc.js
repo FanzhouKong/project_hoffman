@@ -448,7 +448,7 @@
         let m = 0;
         for (let p = 0; p < x.length; p++) if (inPeak(x[p]) && ion.y[p] > m) m = ion.y[p];
         const y = st.norm ? ion.y.map((v) => (m > 0 ? 100 * v / m : 0)) : ion.y;
-        return { id: i, label: `m/z ${G.mz(ion.mz)}${ion.quant ? " (quantifier)" : ""}${ion.shared ? " · shared" : ""}`, x, y, color: CAT[i % CAT.length], width: ion.quant ? 2.5 : 1.5, alpha: ion.quant ? 1 : 0.85, ion };
+        return { id: i, label: `m/z ${G.mz(ion.mz)}${ion.quant ? " (quantifier)" : ""}${ion.shared ? " · shared" : ""}`, x, y, interp: P3.plot.mask(ion.bridged, x.length), color: CAT[i % CAT.length], width: ion.quant ? 2.5 : 1.5, alpha: ion.quant ? 1 : 0.85, ion };
       });
       const q = t.ions.find((ion) => ion.quant) || t.ions[0];
       if (t.model && q) {             // the compound's elution profile at the quantifier's abundance
@@ -460,13 +460,14 @@
         xFmt: (v, d) => fixed(v, Math.min(d, 1)), yDomain: st.norm ? [0, 115] : null,
         vlines: [{ x: t.rt_min_s, color: "--viz-ink-2", dash: [5, 4], width: 1.25 }, { x: t.rt_max_s, color: "--viz-ink-2", dash: [5, 4], width: 1.25 }, { x: t.apex_s, color: "--viz-muted", dash: [2, 3], width: 1 }],
         label: (si) => c.spec.series[si].label,
-        tip: (si, p) => { const r = c.spec.series[si]; return `<b>${esc(r.label)}</b><br>RT ${fixed(r.x[p], 1)} s · ${st.norm ? fixed(r.y[p], 0) + " %" : sci(r.y[p])}` + (r.ion ? `<br>${fixed(r.ion.rel, 1)} % of the base peak in the spectrum` : ""); },
+        tip: (si, p) => { const r = c.spec.series[si]; return `<b>${esc(r.label)}</b><br>RT ${fixed(r.x[p], 1)} s · ${st.norm ? fixed(r.y[p], 0) + " %" : sci(r.y[p])}${r.interp && r.interp[p] ? " (interpolated)" : ""}` + (r.ion ? `<br>${fixed(r.ion.rel, 1)} % of the base peak in the spectrum` : ""); },
       }));
       traceCharts.push(c);
       detailCharts.push(c);
       box.append(P3.plot.legend([...t.ions.map((ion, i) => ({ kind: "line", bold: ion.quant, color: CAT[i % CAT.length], label: `${G.mz(ion.mz)}${ion.quant ? " (quantifier)" : ""}` })),
         ...(t.model ? [{ color: "--viz-neutral", label: "elution profile" }] : []), { kind: "dash", color: "--viz-ink-2", label: "component start / end" }]),
-        h("p.body-small.muted", { style: { margin: "6px 0 0" } }, `${int(t.ions.length)} of the ${int(t.n_ions)} ions of this file's component ${int(t.component)}; the grey area is the profile every ion was fitted with, drawn at the quantifier's abundance.`));
+        h("p.body-small.muted", { style: { margin: "6px 0 0" } }, `${int(t.ions.length)} of the ${int(t.n_ions)} ions of this file's component ${int(t.component)}; the grey area is the profile every ion was fitted with, drawn at the quantifier's abundance.` +
+          (t.ions.some((ion) => ion.bridged && ion.bridged.length) ? " Dashed stretches are interpolated: the file has no centroid of the ion there (a hole the reader filled)." : "")));
     }
     const traceCharts = [];
 

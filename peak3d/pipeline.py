@@ -100,24 +100,29 @@ def _apply_model(feats, model):
     return feats
 
 
-def _cdf_skew(path):
+def _unit_skew(job):
     from .cdf import file_skew
-    return file_skew(path)
+    path, masses, polarity = job
+    return file_skew(path, masses, polarity)
 
 
 def _pick_one(job):
     path, features_dir, cache_dir, min_score, keep_rejected, polarity, threads, model_path, overrides, ms2_dir, *more = job
-    cdf_skew = more[0] if more else None            # the run's scan skew for .cdf files (pick_files)
+    unit_skew = more[0] if more else None           # the run's scan skew for unit-resolution files (pick_files)
+    masses = more[1] if len(more) > 1 else "auto"   # what the masses are: auto (read from the file), unit, accurate
+    unit_mzml = bool(more[2]) if len(more) > 2 else False   # whether mzML files are tested too (GC-MS mode)
+    bridge = bool(more[3]) if len(more) > 3 else True       # fill the holes of a unit-resolution run (cdf.bridge_holes)
     import numba
     numba.set_num_threads(max(1, int(threads)))
     t = {}
     tic = time.perf_counter()
     spectra = Collector()
-    if cdf_skew is not None and Path(path).suffix.lower() == ".cdf":
-        from .cdf import load_cloud as load_cdf     # ANDI-MS netCDF (GC-MS): the run's one scan skew taken out
-        cloud = load_cdf(path, skew=cdf_skew)
-    else:
-        cloud = load_cloud(path, polarity, spectra)     # MS2 spectra come along in the same pass
+    # unit-resolution GC-MS runs (.cdf, and mzML in GC-MS mode) are reduced to nominal masses, the run's one scan
+    # skew taken out (cdf.py); MS2 spectra come along in the same pass
+    unit = None
+    if unit_skew is not None and (unit_mzml or Path(path).suffix.lower() == ".cdf"):
+        unit = dict(skew=unit_skew, masses=masses, bridge=bridge)
+    cloud = load_cloud(path, polarity, spectra, unit=unit)
     t["parse"] = time.perf_counter() - tic
     stem = cloud.name
     if spectra:
@@ -158,14 +163,19 @@ def _pick_one(job):
                   timings_s={k: round(float(v), 4) if isinstance(v, float) else v for k, v in t.items()},
                   peak3d_version=__version__)
     scale = float(getattr(cloud, "mass_scale", 1.0) or 1.0)
-    if scale != 1.0:                      # a unit-resolution run read from .cdf: m/z = nominal mass x scale (cdf.py)
+    if scale != 1.0:                      # a unit-resolution run: m/z = nominal mass x scale (cdf.py)
         params["mass_scale"] = scale
     if getattr(cloud, "source", None):
         params["source"] = cloud.source
     (Path(features_dir) / f"{stem}.params.json").write_text(json.dumps(params, indent=1))
-    return dict(stem=stem, path=str(path), mass_scale=scale, n_features=int(len(feats)), n_centroids=int(cloud.n_points),
-                n_scans=int(cloud.n_scans), n_ms2=len(spectra), parse_s=round(t["parse"], 3), pick_s=round(t["pick"], 3),
-                features_s=round(t["features"], 3))
+    res = dict(stem=stem, path=str(path), mass_scale=scale, n_features=int(len(feats)), n_centroids=int(cloud.n_points),
+               n_scans=int(cloud.n_scans), n_ms2=len(spectra), parse_s=round(t["parse"], 3), pick_s=round(t["pick"], 3),
+               features_s=round(t["features"], 3))
+    src = getattr(cloud, "source", None) or {}
+    if src.get("bridged_points"):         # a unit-resolution run with holes filled (cdf.bridge_holes)
+        res.update(bridged_holes=int(src.get("bridged_holes", 0)), bridged_points=int(src["bridged_points"]),
+                   n_bridged_features=int((feats["n_bridged"] > 0).sum()) if "n_bridged" in feats else 0)
+    return res
 
 
 def pick_files(files, output: Path, args, cache_dir: Path | None = None):
@@ -191,28 +201,33 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
     tic = time.perf_counter()
     _warm_jit()
     log(f"JIT warm-up {time.perf_counter() - tic:.1f} s; picking {len(files)} files with {n_workers} workers x {threads} threads")
-    # ANDI-MS netCDF files of unit-resolution scans: one scan skew for the run, the median of the files' own (cdf.py)
-    cdf_skew = None
-    cdfs = [str(f) for f in files if f.suffix.lower() == ".cdf"]
-    if cdfs:
-        from .cdf import study_skew
+    # unit-resolution GC-MS runs: one scan skew for the run, the median of the files' own (cdf.py). .cdf files are
+    # always looked at, mzML files in GC-MS mode (or when --masses unit says what they are)
+    unit_skew = None
+    masses = getattr(args, "masses", None) or "auto"
+    unit_mzml = masses == "unit" or (masses == "auto" and (getattr(args, "mode", None) or "lc") == "gc")
+    todo = [(str(f), masses, args.polarity) for f in files if f.suffix.lower() == ".cdf" or unit_mzml]
+    if todo:
+        from .cdf import SKEW_MIN_PEAKS, study_skew
         tic = time.perf_counter()
         if n_workers == 1:
-            ks = [_cdf_skew(f) for f in cdfs]
+            ks = [_unit_skew(f) for f in todo]
         else:
-            with get_context("spawn").Pool(min(n_workers, len(cdfs))) as pool:
-                ks = pool.map(_cdf_skew, cdfs, chunksize=1)
-        cdf_skew = study_skew(ks)
-        from .cdf import SKEW_MIN_PEAKS
+            with get_context("spawn").Pool(min(n_workers, len(todo))) as pool:
+                ks = pool.map(_unit_skew, todo, chunksize=1)
+        unit_skew = study_skew(ks)
         used = [k for k, n in ks if n >= SKEW_MIN_PEAKS]
-        if used:
-            log(f".cdf files: scan skew {cdf_skew:+.2f} scans per 1000 Da taken out (median of {len(used)} files, "
-                f"their own {min(used):+.2f} to {max(used):+.2f}; {time.perf_counter() - tic:.1f} s)")
+        if used and unit_skew == 0.0:
+            log(f"unit-resolution files: no scan skew taken out (the {len(used)} files do not agree on one: their own "
+                f"{min(used):+.2f} to {max(used):+.2f} scans per 1000 Da; {time.perf_counter() - tic:.1f} s)")
+        elif used:
+            log(f"unit-resolution files: scan skew {unit_skew:+.2f} scans per 1000 Da taken out (median of {len(used)} "
+                f"files, their own {min(used):+.2f} to {max(used):+.2f}; {time.perf_counter() - tic:.1f} s)")
         elif any(n for _, n in ks):
-            log(f".cdf files: too few strong peaks to measure the scan skew on (fewer than {SKEW_MIN_PEAKS} per file): "
-                "none taken out")
+            log("unit-resolution files: too few strong peaks to measure the scan skew on (fewer than "
+                f"{SKEW_MIN_PEAKS} per file): none taken out")
     jobs = [(str(f), str(features_dir), str(cache_dir), args.min_score, args.keep_rejected, args.polarity, threads,
-             str(args.model) if args.model else None, overrides, str(ms2_dir), cdf_skew) for f in files]
+             str(args.model) if args.model else None, overrides, str(ms2_dir), unit_skew, masses, unit_mzml, not getattr(args, "no_bridge", False)) for f in files]
     tic = time.perf_counter()
     if n_workers == 1:
         results = [_pick_one(j) for j in jobs]
@@ -221,6 +236,11 @@ def pick_files(files, output: Path, args, cache_dir: Path | None = None):
             results = pool.map(_pick_one, jobs, chunksize=1)
     man = pd.DataFrame(results)
     man.to_csv(features_dir / "manifest.tsv", sep="\t", index=False)
+    if "bridged_points" in man and man["bridged_points"].fillna(0).sum() > 0:
+        nb = man.fillna(0)
+        log(f"unit-resolution files: {int(nb['bridged_holes'].sum())} holes filled ({int(nb['bridged_points'].sum())} "
+            f"interpolated centroids, {100.0 * nb['bridged_points'].sum() / max(1, man['n_centroids'].sum()):.1f} % of all; "
+            f"{int(nb['n_bridged_features'].sum())} peaks hold some and are flagged bridged; --no-bridge leaves the holes)")
     log(f"picked {len(files)} files in {time.perf_counter() - tic:.1f} s: "
         f"{man['n_features'].sum()} features, median {man['pick_s'].median():.2f} s pick / {man['parse_s'].median():.2f} s parse per file")
     return results
@@ -718,7 +738,7 @@ def process(files, args, raw_files: dict | None = None):
     if raw_files:
         extra["raw_files"] = raw_files
     scales = sorted({float(r.get("mass_scale", 1.0)) for r in results} - {1.0})
-    if scales:                            # unit-resolution .cdf runs: the tables' m/z are nominal masses x this
+    if scales:                            # unit-resolution runs: the tables' m/z are nominal masses x this
         extra["mass_scale"] = scales[0]
     _write_params(output, args, res, stage, files, extra=extra)
     gc_stages(output, cache_dir, args)

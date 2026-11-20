@@ -210,10 +210,14 @@ def trace(output, cache_dir, compound_id: int, stem: str | None = None, n_ions: 
     tol = ion_tol(mz * scale, ab, P)
     top = float(ab.max()) if len(ab) else 1.0
     ions = []
+    ib = bundle.bridged_inten(cloud)      # the stretches the reader interpolated (a hole in the file): drawn dashed
     for i in order[:max(1, int(n_ions))]:
         y = eic_kernel(cloud.off, cloud.mz, cloud.inten, float(mz[i]) * scale, float(tol[i]), s0, s1)
         ions.append({"mz": float(mz[i]), "abundance": float(ab[i]), "rel": float(100.0 * ab[i] / top) if top > 0 else 0.0,
                      "shared": bool(sh[i]), "quant": i == quant, "y": [float(f"{v:.5g}") for v in y.tolist()]})
+        if ib is not None:
+            ions[-1]["bridged"] = bundle.bridged_ranges(
+                y, eic_kernel(cloud.off, cloud.mz, ib, float(mz[i]) * scale, float(tol[i]), s0, s1))
     rt = 60.0 * np.asarray(cloud.rt, np.float64)
     out = {"file": stem, "files": found, "source": source, "component": k, "rt_s": np.round(rt[s0:s1], 3).tolist(),
            "apex_s": float(60.0 * c["rt"]), "rt_min_s": float(rt[lo]), "rt_max_s": float(rt[hi]), "ions": ions,
