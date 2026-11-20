@@ -253,7 +253,7 @@ def _read_features(features_dir: Path):
         if f.name == "manifest.tsv" or f.name.endswith(".rejected.tsv"):
             continue
         df = pd.read_csv(f, sep="\t")
-        keep = list(COLUMNS)
+        keep = list(COLUMNS) + [c for c in ("n_bridged",) if c in df.columns]   # unit-resolution runs count filled centroids
         feats[f.stem] = df[keep] if all(c in df.columns for c in COLUMNS) else df
     return feats
 

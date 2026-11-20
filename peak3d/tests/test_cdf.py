@@ -460,6 +460,8 @@ def test_mzml_folder_of_a_unit_resolution_run_gives_the_compounds_of_the_cdf_fol
     assert fp["source"]["kind"] == "unit resolution" and fp["source"]["masses"] == "grid"
     assert fp["source"]["scan_skew"] == pytest.approx(ref["source"]["scan_skew"], abs=1e-3)
     assert fp["n_features"] == ref["n_features"]
+    ft = pd.read_csv(out / "features" / "q_a.tsv", sep="\t")          # the table as the alignment wrote it back
+    assert "rt_corr" in ft and "n_bridged" in ft and (ft["n_bridged"] == 0).all()
     a = pd.read_csv(out / "gc" / "compounds.tsv", sep="\t")
     b = pd.read_csv(study["out"] / "gc" / "compounds.tsv", sep="\t")
     assert len(a) == len(b) and np.array_equal(a["quant_mz"], b["quant_mz"]) and np.allclose(a["rt"], b["rt"], atol=1e-4)
