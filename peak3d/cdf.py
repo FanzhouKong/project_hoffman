@@ -58,9 +58,13 @@ is filled with the straight line between the two centroids around it when
   - every filled value stays under BRIDGE_RATIO of the scan's strongest ion (the scan shows why the ion is missing),
   - the hole is at most BRIDGE_WIDTHS peak widths long (peak_width: the file's own; a longer line would stand for a
     whole peak).
+When the trace rises into the hole and falls out of it (the top of a peak lies in the hole), the fill is the
+Gaussian through the BRIDGE_SHAPE_PTS centroids on either side (a parabola in log intensity, curving down, its vertex
+inside the hole and at most BRIDGE_SHAPE_MAX x the higher side) instead of the line, so the apex sits inside the
+hole and not at the end of a straight ramp; otherwise, or when that curve breaks the BRIDGE_RATIO rule, the line.
 The filled points are marked (Cloud.bridged): a peak that holds any is flagged `bridged` with their number in
 `n_bridged`, and the app draws those stretches of a chromatogram dashed. Under a filled stretch the height is a
-guess: a peak whose apex lies in a hole comes out too low. bridge=False (`--no-bridge`) leaves the holes.
+guess. bridge=False (`--no-bridge`) leaves the holes.
 
 One scan skew per run is taken out only when the run's files agree on it (study_skew): a scanning instrument shows the
 same K in every file of a method (-1.31 to -0.95 and, four files of five, 0.5 to 0.7 in the two quadrupole sets of
@@ -71,6 +75,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+from numba import njit
 
 from .io import C13, Cloud, from_scans
 
@@ -90,6 +95,8 @@ MASSES = ("auto", "unit", "accurate")
 BRIDGE_FLANK = 10.0        # a hole is filled when the centroids on both sides are at least this many times the floor,
 BRIDGE_RATIO = 0.01        # every filled value is under this share of its scan's strongest ion,
 BRIDGE_WIDTHS = 2.0        # and the hole is at most this many peak widths (FWHM) long
+BRIDGE_SHAPE_PTS = 3       # centroids on each side a peak-shaped fill is fitted to (they rise into / fall out of it)
+BRIDGE_SHAPE_MAX = 4.0     # a peak-shaped fill tops out at most this many times the higher side, else the line
 SKEW_MIN_PEAKS = 10        # a scan skew measured on fewer peaks is not applied
 SKEW_MAX_SPAN = 1.2        # ... nor one that would have the mass range take more than this many scan intervals
 
@@ -420,36 +427,130 @@ def peak_width(X, n_peaks=200) -> float:
     return float(np.median(widths)) if len(widths) >= 10 else 0.0
 
 
+@njit(cache=True)
+def _peak_fill(y, s0, s1, k, top):
+    """kernel of peak_fill: the filled values, or an empty array"""
+    n = len(y)
+    none = np.zeros(0)
+    if s0 - k < 0 or s1 + k > n:
+        return none
+    for q in range(s0 - k, s0):
+        if y[q] <= 0 or (q > s0 - k and y[q] < y[q - 1]):
+            return none
+    for q in range(s1, s1 + k):
+        if y[q] <= 0 or (q > s1 and y[q] > y[q - 1]):
+            return none
+    if y[s0 - 1] <= y[s0 - k] or y[s1] <= y[s1 + k - 1]:
+        return none
+    c = 0.5 * (s0 + s1 - 1)
+    # least squares of log y = c0 + c1 x + c2 x^2 over the 2k samples (normal equations)
+    S0 = S1 = S2 = S3 = S4 = T0 = T1 = T2 = 0.0
+    for q in range(s0 - k, s1 + k):
+        if s0 <= q < s1:
+            continue
+        x = q - c
+        v = np.log(y[q])
+        x2 = x * x
+        S0 += 1.0
+        S1 += x
+        S2 += x2
+        S3 += x2 * x
+        S4 += x2 * x2
+        T0 += v
+        T1 += v * x
+        T2 += v * x2
+    A = np.array([[S4, S3, S2], [S3, S2, S1], [S2, S1, S0]])
+    b = np.array([T2, T1, T0])
+    det = np.linalg.det(A)
+    if not abs(det) > 1e-12:
+        return none
+    c2, c1, c0 = np.linalg.solve(A, b)
+    if not c2 < 0:
+        return none
+    xv = -c1 / (2.0 * c2)
+    if not (s0 - 1 - c < xv < s1 - c):
+        return none
+    hi = max(y[s0 - 1], y[s1])
+    if np.exp(c0 - c1 * c1 / (4.0 * c2)) > top * hi:
+        return none
+    out = np.empty(s1 - s0)
+    for q in range(s0, s1):
+        x = q - c
+        out[q - s0] = np.exp(c0 + c1 * x + c2 * x * x)
+    return out
+
+
+def peak_fill(y, s0, s1, k=BRIDGE_SHAPE_PTS, top=BRIDGE_SHAPE_MAX):
+    """the values of the empty samples y[s0:s1] on the Gaussian through the k samples on either side, when y rises
+    into the hole and falls out of it (each side's k samples all present and monotone toward the hole), the fitted
+    log-parabola curves down with its vertex inside the hole and tops out at most top x the higher side; else None"""
+    v = _peak_fill(y if y.dtype == np.float64 else y.astype(np.float64), int(s0), int(s1), int(k), float(top))
+    return v if len(v) else None
+
+
+@njit(cache=True)
+def _bridge(X, max_len, level, ratio, base, k, top):
+    """kernel of bridge_holes: fills X in place, returns (mask of the filled cells, holes filled)"""
+    S, M = X.shape
+    B = np.zeros((S, M), np.bool_)
+    n = 0
+    for j in range(M):
+        y = X[:, j]
+        s = 0
+        while s < S and y[s] <= 0:          # empty scans before the trace starts are no hole
+            s += 1
+        while s < S:
+            while s < S and y[s] > 0:
+                s += 1
+            if s >= S:
+                break
+            s0 = s
+            while s < S and y[s] <= 0:
+                s += 1
+            if s >= S:                       # nor after it ends
+                break
+            s1 = s
+            if s1 - s0 > max_len:
+                continue
+            left = y[s0 - 1]
+            right = y[s1]
+            if min(left, right) < level:
+                continue
+            v = _peak_fill(y, s0, s1, k, top)
+            ok = len(v) > 0
+            for q in range(s0, s1):
+                if ok and v[q - s0] > ratio * base[q]:
+                    ok = False
+            if not ok:
+                v = np.empty(s1 - s0)
+                ok = True
+                for q in range(s0, s1):
+                    v[q - s0] = left + (right - left) * (q - s0 + 1) / (s1 - s0 + 1)
+                    if v[q - s0] > ratio * base[q]:
+                        ok = False
+                if not ok:
+                    continue
+            for q in range(s0, s1):
+                y[q] = v[q - s0]
+                B[q, j] = True
+            n += 1
+    return B, n
+
+
 def bridge_holes(X, max_len, flank=BRIDGE_FLANK, ratio=BRIDGE_RATIO):
     """fill the holes of a scans x masses matrix in place (module text): (mask of the filled cells, holes filled).
     max_len: the longest hole filled, in scans."""
     S, M = X.shape
-    B = np.zeros(X.shape, bool)
     max_len = int(max_len)
     if max_len < 1 or S < 3 or not (X > 0).any():
-        return B, 0
-    base = X.max(axis=1)
+        return np.zeros(X.shape, bool), 0
+    base = X.max(axis=1).astype(np.float64)
     level = flank * float(np.percentile(X[X > 0], 1))
-    n = 0
-    for j in range(M):
-        y = X[:, j]
-        z = y <= 0
-        if z.all() or not z.any():
-            continue
-        d = np.diff(np.concatenate([[0], z.view(np.int8), [0]]))
-        a, b = np.flatnonzero(d == 1), np.flatnonzero(d == -1)        # the empty scans a .. b - 1
-        ok = (a > 0) & (b < S) & (b - a <= max_len)
-        a, b = a[ok], b[ok]
-        ok = np.minimum(y[a - 1], y[b]) >= level
-        for s0, s1 in zip(a[ok], b[ok]):
-            left, right = y[s0 - 1], y[s1]
-            v = left + (right - left) * np.arange(1, s1 - s0 + 1) / (s1 - s0 + 1)
-            if np.any(v > ratio * base[s0:s1]):
-                continue
-            y[s0:s1] = v
-            B[s0:s1, j] = True
-            n += 1
-    return B, n
+    Y = X if X.dtype == np.float64 and X.flags.c_contiguous else np.ascontiguousarray(X, dtype=np.float64)
+    B, n = _bridge(Y, max_len, level, float(ratio), base, BRIDGE_SHAPE_PTS, float(BRIDGE_SHAPE_MAX))
+    if Y is not X:
+        X[...] = Y
+    return B, int(n)
 
 
 def unit_cloud(name, rt, off, mz, it, scale=C13, skew="auto", floor="auto", pol="pos", bridge=True):

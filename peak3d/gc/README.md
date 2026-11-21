@@ -37,8 +37,10 @@ files. Which kind of data a file holds is read from its masses, for mzML files (
   spectra, the quantifier m/z and `spectra.msp` are at **nominal masses**, every library (unit-mass or accurate) is
   compared by nominal mass, and the ladder is looked up at nominal masses (there a molecular ion counts only when
   it is stronger than the ion one mass below it, since the 13C peak of a fragment sits on the molecular mass of the
-  next smaller alkane). The tables of single ions (`features/`, `aligned_feature_table.tsv`, the Ions tab) keep the
-  scaled m/z: nominal mass 73 is listed at 73.2449 (`mass_scale` in `params.json`).
+  next smaller alkane). The aligned tables of single ions (`aligned_feature_table.tsv`, `aligned_feature_area.tsv`,
+  `presence_mask.tsv`) and the Ions tab show the nominal mass in `mz`; `mz_scaled` holds the scaled value the point
+  clouds are read at (nominal mass 73 at 73.2449, `mass_scale` in `params.json`). The per-file tables (`features/`)
+  keep the scaled m/z.
 - **Accurate mass** (time-of-flight exports): read as centroids, nothing changed.
 
 **Holes in a unit-resolution run** are filled (`peak3d/cdf.py`, bridge_holes; `--no-bridge` turns it off). A spectrum
@@ -46,10 +48,28 @@ recorded while a very strong compound elutes can lack its weaker ions: the trace
 is empty for about a peak width and comes back at full height. A hole is filled with the straight line between the two
 centroids around it when both are at least 10 x the file's intensity floor, every filled value stays under 1 % of its
 scan's strongest ion, and the hole is at most two peak widths long (the file's own width, measured on the strongest
-peaks). The filled centroids are marked in the point cloud: a peak that holds any carries the flag `bridged` and their
-number in `n_bridged` (per-file feature tables), and the app and report.html draw those stretches of a chromatogram
-dashed. Under a filled stretch the intensity is a guess: a peak whose apex lies in a hole comes out too low. Nothing is
+peaks). When the trace rises into the hole and falls out of it (a peak's top lies in the hole), the fill is the
+Gaussian through three centroids on either side instead, so the apex sits inside the hole and not at the end of a
+straight ramp (at most 4 x the higher side; else the line). The filled centroids are marked in the point cloud: a peak
+that holds any carries the flag `bridged` and their number in `n_bridged` (per-file feature tables), and the app and
+report.html draw those stretches of a chromatogram dashed. Under a filled stretch the intensity is a guess. Nothing is
 filled in an accurate-mass run.
+
+The picker then checks each peak of a unit-resolution run against its own measured centroids (`features.unit_checks`,
+2026-11-20):
+- a peak that holds filled centroids must be a peak in the measured ones too (on both sides of the apex they climb
+  toward it by at least 3 x its noise and a fifth of their own rise, over at least its minimum number of scans); a
+  straight fill between two lone centroids, or a ramp that is the whole rise, is dropped (reason `fill` in
+  `--keep-rejected` tables);
+- two pieces of one ion that a hole cut apart (the first rising into it, the second falling out of it, the ion
+  absent in every scan between them) become one peak;
+- `hole_apex`: the ion is missing (or filled) at or next to the apex, or two pieces were joined: height and area
+  are lower bounds;
+- `saturated`: the apex scan lost centroids to detector overload (fewer than 0.9 x its neighbours' running median
+  of measured centroids: 59-63 % of the scans with a base peak of 1e8-1e9 counts in the LECO CSF runs, 0-0.4 % under
+  1e7), the ion holds at least a tenth of that scan's base peak, and its top is distorted: flatter than its flanks
+  imply (flat-top ratio >= 1.5; a Gaussian 1) or jumping by 30 % of its height between two scans. The cells go to
+  `saturated_mask.tsv` as in LC.
 
 `features/<file>.params.json` records what was done (`source`: kind, noise floor, scan skew, holes and centroids
 filled). asari and MassCube
@@ -113,6 +133,8 @@ it is a peak above the ion's own level out there (the median of the cleaner side
 | `net_ripple_k` | 5 | its rise above that level is at least this many times the level's scan-to-scan noise |
 | `net_ridge_max` | 0.5 | rises of this share of its own are not common out there (90th percentile above the level) |
 | `net_fwhm_min` | 0.5 | its width at half the rise is at least this many median peak widths, reached on both sides |
+| `net_fwhm_max` | 3 | ... and at most this many (wider, its own foot reaches the windows its level is read from) |
+| `net_peak_k` | 3 | its rise is at least this many times the level's spread at the peak scale ((median - lower quartile) / 0.6745 of the side window): a trace exported smoothed has almost no scan-to-scan noise while it wanders by a peak's height |
 
 Such a feature carries the flag `on_background`; its height includes the floor. It is scored above the floor
 (prominence, far level), is not a reference for the file's peak-width thresholds and is exempt from the wide-view
@@ -188,9 +210,13 @@ the same ion.
 
 **Compounds across files (`pipeline.py`).** The strongest unmatched component is a reference; in each other file
 the component within the alignment's RT tolerance (corrected time) with the most similar spectrum joins at a
-similarity of 0.6 or more. The quantifier is the strongest ion of the reference spectrum that needed no other
-component's model; each file's value is that ion's abundance in its own deconvolved spectrum. No gap filling yet:
-a file without the component has an empty cell.
+similarity of 0.6 or more. A second pass (2026-11-20) joins compounds that are one compound split across files:
+the same quantifier ion, within the RT tolerance, no file in both, and reference spectra that agree on the ions they
+share (cosine >= 0.6 over at least three shared ions that carry at least a third of each spectrum's weight) while
+they differ elsewhere (an ion lost to a hole or a clipped top in one file, a co-eluting neighbour's ion in another).
+On the MRH truth it joins no two truth compounds; `gc/params.json` counts the joins (`split_joins`). The quantifier
+is the strongest ion of the reference spectrum that needed no other component's model; each file's value is that
+ion's abundance in its own deconvolved spectrum. No gap filling yet: a file without the component has an empty cell.
 
 **Retention index (`ri.py`).** van den Dool & Kratz: linear between the bracketing ladder compounds, the nearest
 segment extended outside the ladder (flagged). `--ri-ladder alkane` (RI = 100 x carbons) or `fame` (FiehnLib

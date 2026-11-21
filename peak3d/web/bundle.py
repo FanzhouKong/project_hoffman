@@ -25,7 +25,7 @@ from .. import __version__
 from ..io import Cloud, _lower_bound, _upper_bound
 
 FORMAT = 1
-BASE_COLS = ("group_id", "mz", "rt", "rt_min", "rt_max", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
+BASE_COLS = ("group_id", "mz", "mz_scaled", "rt", "rt_min", "rt_max", "n_detected", "n_confirmed", "n_filled", "mz_ppm_spread",
              "rt_sd", "iso_offset", "charge", "compound_id", "role", "neutral_mass", "is_base", "n_members",
              "possible_halogen", "halogen_pattern")
 C13 = 1.0033548378          # 13C - 12C
@@ -448,7 +448,7 @@ def _chromatograms(output: Path, cache_dir: Path, stems, table, files_info, ppm,
     pad = np.maximum(0.75 * (rt_hi - rt_lo), 0.1)
     x0 = rt_lo - pad
     dx = (rt_hi + pad - x0) / (n_pts - 1)
-    mz_c = t["mz"].to_numpy(float)
+    mz_c = t["mz_scaled" if "mz_scaled" in t else "mz"].to_numpy(float)     # unit runs: as the clouds hold it
     traces = np.zeros((n_groups, F, n_pts), np.float32)
     n_scans = np.zeros((n_groups, F, 2), np.uint16)       # MS1 scans inside [rt_min, rt_max] per file, and with signal
     offsets = {r["stem"]: (r.get("mz_offset_ppm") or 0.0) for r in files_info}
@@ -823,7 +823,9 @@ def build(output, cache_dir=None, *, eic_budget: int = EIC_BUDGET, eic_files: in
         mean = np.where(nz, V, 0).sum(axis=1) / cnt
         var = np.where(nz, (V - mean[:, None]) ** 2, 0).sum(axis=1) / np.maximum(cnt - 1, 1)
         cv = np.where(cnt >= 2, 100 * np.sqrt(var) / mean, np.nan)
-    arrays = {"g_id": col("group_id", np.int32), "g_mz": col("mz", np.float64), "g_rt": col("rt", np.float32),
+    # g_mz: the m/z the point clouds hold (unit-resolution runs: mz_scaled; the viewer shows the nominal mass)
+    arrays = {"g_id": col("group_id", np.int32), "g_mz": col("mz_scaled" if "mz_scaled" in table else "mz", np.float64),
+              "g_rt": col("rt", np.float32),
               "g_rt_min": col("rt_min", np.float32), "g_rt_max": col("rt_max", np.float32),
               "g_ndet": col("n_detected", np.uint16), "g_nconf": col("n_confirmed", np.uint16),
               "g_nfill": col("n_filled", np.uint16), "g_ppm": col("mz_ppm_spread", np.float32, np.nan),

@@ -124,7 +124,7 @@ def ridge_ratio(df: pd.DataFrame, cloud: Cloud, P: Params) -> dict:
     return ratios_from_levels(L, df["height"].values)
 
 
-NET_COLUMNS = ("floor_rel", "ridge_net")       # of ratios_from_levels; columns only under background_rule "net"
+NET_COLUMNS = ("floor_rel", "ridge_net", "ripple_peak")   # of ratios_from_levels; columns only under background_rule "net"
 
 
 def net_width(df: pd.DataFrame, cloud: Cloud, P: Params) -> np.ndarray:
@@ -223,8 +223,16 @@ def ratios_from_levels(L: np.ndarray, height: np.ndarray) -> dict:
     # rises above it by a share of the peak's own rise
     q90 = np.where(any_side, L[rows, c, K.SL_Q90], 0.0)
     ridge_net = np.where(rise > 0, (q90 - lvl) / np.where(rise > 0, rise, 1.0), np.inf)
+    # the same rise against that side's spread at the peak scale (median - lower quartile, as a Gaussian sd; the
+    # lower half, so another compound's peak out there does not count): a trace exported smoothed has almost no
+    # scan-to-scan ripple while it still wanders by a peak's height
+    spread = np.where(any_side, (L[rows, c, K.SL_MED] - L[rows, c, K.SL_Q25]) / 0.6745, 0.0)
+    den = np.maximum(rip, spread)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ripple_peak = np.where(den > 0, rise / np.where(den > 0, den, 1.0), np.inf)
     return {"ridge_ratio": lower_side(K.SL_Q90), "background_ratio": lower_side(K.SL_Q25),
-            "ripple_ratio": ripple, "far_level": far_level, "floor_rel": lvl / h, "ridge_net": ridge_net}
+            "ripple_ratio": ripple, "far_level": far_level, "floor_rel": lvl / h, "ridge_net": ridge_net,
+            "ripple_peak": ripple_peak}
 
 
 def eic_check(df: pd.DataFrame, cloud: Cloud, P: Params) -> pd.DataFrame:
@@ -398,9 +406,15 @@ def level_gates(df: pd.DataFrame, P: Params) -> pd.Series:
 
 
 def net_gates(df: pd.DataFrame, P: Params) -> pd.Series:
-    """a peak above the ion's own level (background_rule "net"; columns ripple_ratio, ridge_net, net_fwhm)"""
-    return (df["ripple_ratio"] >= P.net_ripple_k) & (df["ridge_net"] <= P.net_ridge_max) \
+    """a peak above the ion's own level (background_rule "net"; columns ripple_ratio, ripple_peak, ridge_net,
+    net_fwhm): it rises net_ripple_k scan-to-scan ripples and net_peak_k peak-scale spreads above that level, bumps
+    of net_ridge_max of its rise are not common out there, and its width at half the rise is net_fwhm_min to
+    net_fwhm_max median widths"""
+    ok = (df["ripple_ratio"] >= P.net_ripple_k) & (df["ridge_net"] <= P.net_ridge_max) \
         & (df["net_fwhm"] >= P.net_fwhm_min * P.fwhm_med)
+    if "ripple_peak" in df:
+        ok &= df["ripple_peak"] >= P.net_peak_k
+    return ok & ~(df["net_fwhm"] > P.net_fwhm_max * P.fwhm_med)
 
 
 def _gate_other(df: pd.DataFrame, P: Params) -> pd.Series:
@@ -440,6 +454,121 @@ def bridged_counts(df: pd.DataFrame, cloud: Cloud) -> np.ndarray:
     return n
 
 
+UNIT_TOL = 0.3            # Da: a unit-resolution run holds one centroid per nominal mass, 1.0034 Da apart
+OVERLOAD_COUNT = 0.9      # a scan with fewer measured centroids than this share of its neighbours' median ...
+OVERLOAD_SCANS = 401      # ... (a running median over this many scans) lost ions to detector overload (cdf.py, holes)
+SAT_SHARE = 0.1           # an ion with at least this share of such a scan's base peak is one of the ions that overload
+                          # it; flagged saturated when its top is also distorted:
+SAT_FLAT = 1.5            # flatter than its flanks imply (kernels.unit_trace flat-top ratio; 1 for a Gaussian, median
+                          # 0.8 over the CSF runs' peaks, 1.7-1.8 for the clipped m/z 443 at 915 s) ...
+SAT_JUMP = 0.3            # ... or jumping by this share of its height between two scans above half height (m/z 575
+                          # there: 0.4-0.6; a Gaussian at >= 5 scans per FWHM: at most 0.17)
+
+
+def overload_scans(cloud: Cloud):
+    """(per scan: detector overloaded, per scan: base peak) of a unit-resolution run. Overloaded: the scan holds fewer
+    than OVERLOAD_COUNT x the running median of its neighbours' measured (not filled) centroids. In the LECO CSF runs
+    this marks 59-63 % of the scans with a base peak of 1e8-1e9 counts and 0-0.4 % of those under 1e7."""
+    from scipy.ndimage import median_filter
+    S = cloud.n_scans
+    if S == 0:
+        return np.zeros(0, bool), np.zeros(0)
+    sc = cloud.scan_index()
+    real = ~cloud.bridged if getattr(cloud, "bridged", None) is not None else np.ones(cloud.n_points, bool)
+    n = np.bincount(sc[real], minlength=S).astype(np.float64)
+    med = median_filter(n, min(OVERLOAD_SCANS, 2 * (S // 2) + 1 if S > 1 else 1), mode="nearest")
+    base = np.zeros(S)
+    nz = np.flatnonzero(np.diff(cloud.off) > 0)
+    if len(nz):
+        base[nz] = np.maximum.reduceat(cloud.inten, cloud.off[nz])
+    return n < OVERLOAD_COUNT * med, base
+
+
+def unit_checks(cand: pd.DataFrame, cloud: Cloud, P: Params) -> pd.DataFrame:
+    """Unit-resolution runs (cdf.py): per candidate, from its own chromatogram (kernels.unit_trace)
+      fill_ok    a candidate holding filled points (n_bridged) is a peak in the measured points too: on both sides of
+                 the apex they climb toward it by at least k_noise x its noise and min_prominence_rel x their own
+                 rise (highest - lowest measured), and they number at least its minimum scan count. A straight
+                 fill between two lone centroids, or a ramp that is the whole rise, is not.
+      hole_apex  the apex scan or a scan next to it has no measured centroid of the ion: the top lies in a hole of
+                 the run (height and area are lower bounds)
+      n_sat_unit 1 when the apex scan lost centroids to detector overload (overload_scans), the candidate holds
+                 at least SAT_SHARE of that scan's base peak and its top is distorted (SAT_FLAT / SAT_JUMP), else 0"""
+    n = len(cand)
+    if n == 0:
+        return pd.DataFrame({"fill_ok": np.zeros(0, bool), "hole_apex": np.zeros(0, bool),
+                             "n_sat_unit": np.zeros(0, np.int64)}, index=cand.index)
+    filled = cloud.bridged if getattr(cloud, "bridged", None) is not None else np.zeros(0, np.bool_)
+    sa = cand["scan_apex"].values.astype(np.int64)
+    U = K.unit_trace(cloud.off, cloud.mz, cloud.inten, cloud.rt, filled, cand["mz"].values.astype(np.float64),
+                     np.full(n, UNIT_TOL), cand["scan_lo"].values.astype(np.int64),
+                     cand["scan_hi"].values.astype(np.int64), sa)
+    nb = cand["n_bridged"].values if "n_bridged" in cand else np.zeros(n)
+    min_scans = cand["min_scans_local"].values if "min_scans_local" in cand else np.full(n, P.min_scans)
+    rise = np.nan_to_num(U[:, K.UT_TOP] - U[:, K.UT_FOOT])
+    need = np.maximum(P.k_noise * cand["noise"].values, P.min_prominence_rel * rise)
+    climb = np.nan_to_num(np.minimum(U[:, K.UT_CLIMB_L], U[:, K.UT_CLIMB_R]))
+    supported = (np.nan_to_num(U[:, K.UT_NMEAS]) >= min_scans) & (climb >= need) & (rise > 0)
+    over, base = overload_scans(cloud)
+    sat = np.zeros(n, np.int64)
+    if len(over):
+        s = np.clip(sa, 0, len(over) - 1)
+        bent = (np.nan_to_num(U[:, K.UT_FLAT]) >= SAT_FLAT) | (np.nan_to_num(U[:, K.UT_JUMP]) >= SAT_JUMP)
+        sat = (over[s] & (cand["height"].values >= SAT_SHARE * base[s]) & bent).astype(np.int64)
+    return pd.DataFrame({"fill_ok": (nb <= 0) | supported, "hole_apex": U[:, K.UT_HOLE_APEX] > 0,
+                         "n_sat_unit": sat}, index=cand.index)
+
+
+def join_hole_pieces(cand: pd.DataFrame, keep: np.ndarray, cloud: Cloud, P: Params) -> np.ndarray:
+    """Unit-resolution runs: two kept candidates of one ion that a hole of the run cut apart become one. The first
+    ends with its apex at its last scan (within one), the second starts with its apex at its first, and every scan
+    between them lacks the ion; the hole is at most cdf.BRIDGE_WIDTHS median widths long. The taller piece stays,
+    with the bounds, scans, points and areas of both, the hole counted in n_gaps and hole_apex set; the other is
+    dropped. Returns the new keep mask (cand is changed in place)."""
+    from .cdf import BRIDGE_WIDTHS
+    keep = keep.copy()
+    idx = np.flatnonzero(keep)
+    if len(idx) < 2:
+        return keep
+    mz = cand["mz"].values
+    lo, hi, sa = (cand[c].values.astype(np.int64) for c in ("scan_lo", "scan_hi", "scan_apex"))
+    scale = float(getattr(cloud, "mass_scale", 1.0) or 1.0)
+    o = idx[np.lexsort((lo[idx], np.rint(mz[idx] / scale)))]
+    max_gap = max(1, int(round(BRIDGE_WIDTHS * P.fwhm_scans)))
+    pairs = []
+    for a, b in zip(o[:-1], o[1:]):
+        g = lo[b] - hi[a] - 1
+        if abs(mz[a] - mz[b]) > UNIT_TOL or not 1 <= g <= max_gap:
+            continue
+        if sa[a] < hi[a] - 1 or sa[b] > lo[b] + 1:
+            continue
+        gap = np.arange(hi[a] + 1, lo[b], dtype=np.int64)
+        v = K.max_in_scan(cloud.off, cloud.mz, cloud.inten, np.full(len(gap), mz[a]), np.full(len(gap), UNIT_TOL), gap)
+        if np.any(v > 0):
+            continue
+        pairs.append((a, b, g))
+    if not pairs:
+        return keep
+    h = cand["height"].values
+    cols = {c: cand.columns.get_loc(c) for c in cand.columns}
+    for a, b, g in pairs:
+        if not (keep[a] and keep[b]):
+            continue
+        k, d = (a, b) if h[a] >= h[b] else (b, a)
+        for c in ("area", "area_bsub", "n_scans", "n_points", "n_bridged"):
+            if c in cols:
+                cand.iat[k, cols[c]] = cand.iat[a, cols[c]] + cand.iat[b, cols[c]]
+        cand.iat[k, cols["n_gaps"]] = cand.iat[a, cols["n_gaps"]] + cand.iat[b, cols["n_gaps"]] + g
+        cand.iat[k, cols["scan_lo"]] = lo[a]
+        cand.iat[k, cols["scan_hi"]] = hi[b]
+        cand.iat[k, cols["rt_min"]] = cand.iat[a, cols["rt_min"]]
+        cand.iat[k, cols["rt_max"]] = cand.iat[b, cols["rt_max"]]
+        if "hole_apex" in cols:
+            cand.iat[k, cols["hole_apex"]] = True
+        keep[d] = False
+    return keep
+
+
 def flag_strings(df: pd.DataFrame, P: Params) -> pd.Series:
     kf = df["kflags"].values
     cap = (kf & (K.KF_CAP_L | K.KF_CAP_R)) > 0
@@ -461,6 +590,9 @@ def flag_strings(df: pd.DataFrame, P: Params) -> pd.Series:
         # some of its centroids are not in the file: the reader filled a hole of the run (n_bridged of them; cdf.py),
         # so the height and area under that stretch are interpolated
         ("bridged", df["n_bridged"].values > 0 if "n_bridged" in df else False),
+        # unit-resolution runs: the top lies in a hole of the run, the ion missing at or next to the apex (or two
+        # pieces a hole cut apart were joined): height and area are lower bounds
+        ("hole_apex", df["hole_apex"].values.astype(bool) if "hole_apex" in df else False),
     ]
     out = np.full(len(df), "", dtype=object)
     for name, m in conds:
@@ -597,6 +729,15 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
         ok2 = (E["eic_class"].values == "ok")
         eic_rej = cand[~ok2].assign(reason="eic:" + cand.loc[~ok2, "eic_class"].astype(str))
         cand = cand[ok2].reset_index(drop=True)
+    fill_rej = None
+    if unit and len(cand):
+        # unit-resolution runs: peaks the hole fills made are dropped; tops in holes and overloaded scans flagged
+        Uc = unit_checks(cand, cloud, P)
+        cand["hole_apex"] = Uc["hole_apex"].values
+        cand["n_sat"] = np.maximum(cand["n_sat"].values, Uc["n_sat_unit"].values)
+        ok3 = Uc["fill_ok"].values
+        fill_rej = cand[~ok3].assign(reason="fill")
+        cand = cand[ok3].reset_index(drop=True)
     sat_rej = None
     if P.satellite_merge and P.sat_da > 0 and len(cand) > 1:
         keep_s, new_mz = merge_satellites(cand, cloud, P)
@@ -616,6 +757,9 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
     cand["score"] = cand["score_rule"]
     cand["flags"] = flag_strings(cand, P)
     keep = cand["score"].values >= thr
+    if unit:
+        keep = join_hole_pieces(cand, keep, cloud, P)
+        cand["flags"] = flag_strings(cand, P)
     feats = cand[keep].reset_index(drop=True)
     # feature ids and parent ids in the kept table
     feats["feature_id"] = np.arange(len(feats), dtype=np.int64)
@@ -636,6 +780,8 @@ def build_features(cloud: Cloud, b: Basins, min_score: float | None = None, keep
             parts.append(wide_rej)
         if eic_rej is not None:
             parts.append(eic_rej)
+        if fill_rej is not None:
+            parts.append(fill_rej)
         if sat_rej is not None:
             parts.append(sat_rej)
         parts.append(cand[~keep].assign(reason="score"))

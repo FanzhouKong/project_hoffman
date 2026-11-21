@@ -1639,3 +1639,142 @@ def apply_scan_shifts(off, mz, a, b, m_lo, m_hi):
         for p in range(off[s], off[s + 1]):
             m = min(max(mz[p], m_lo[s]), m_hi[s])
             mz[p] *= 1.0 - (a[s] + b[s] / np.sqrt(m)) * 1e-6
+
+
+# columns of unit_trace
+UT_NMEAS, UT_TOP, UT_FOOT, UT_CLIMB_L, UT_CLIMB_R, UT_HOLE_APEX, UT_FLAT, UT_NTOP, UT_JUMP = 0, 1, 2, 3, 4, 5, 6, 7, 8
+NUT = 9
+FLAT_GAUSS = 1.2156      # Gaussian: time from apex to half height / time from half height to a tenth = 1.1774 / 0.9686
+
+
+@njit(cache=True)
+def _crossing(t, y, k, step, end, level):
+    """time at which y falls below level walking from index k by step (+1 / -1) up to end (inclusive), linearly
+    interpolated; NaN if it does not"""
+    j = k
+    while j != end:
+        n = j + step
+        if y[n] < level:
+            if y[j] == y[n]:
+                return t[n]
+            return t[j] + (t[n] - t[j]) * (y[j] - level) / (y[j] - y[n])
+        j = n
+    return np.nan
+
+
+@njit(cache=True, parallel=True)
+def unit_trace(off, mz, inten, rt, filled, q_mz, q_tol, s_lo, s_hi, s_apex):
+    """The chromatogram of each query inside its bounds (scans s_lo..s_hi, the most intense centroid within +/- q_tol
+    per scan; filled: per point, the reader put it in where the file had a hole; empty = none). Per query
+    (float64[n, NUT], UT_*): measured (not filled) scans, their highest and lowest value, the climb of the measured
+    values toward the apex on each side (max - min of the measured points left / right of s_apex, apex included),
+    whether the apex scan or a scan next to it holds no measured value (the top lies in a hole), the flat-top ratio
+    (half-height distances from the apex over FLAT_GAUSS x the half-to-tenth distances, both sides summed, on the
+    measured points with holes interpolated: 1 for a Gaussian, larger when the top is flatter than the flanks imply;
+    NaN where the trace does not fall to a tenth inside the bounds), the scans within 10 % of the top, and the largest
+    change between two neighbouring scans above half height, as a share of the height (a Gaussian sampled at five or
+    more scans per FWHM changes by at most a sixth of its height per scan)."""
+    n = len(q_mz)
+    S = len(off) - 1
+    out = np.full((n, NUT), np.nan)
+    has_fill = len(filled) == len(inten)
+    for i in prange(n):
+        lo = max(0, s_lo[i])
+        hi = min(S - 1, s_hi[i])
+        m = hi - lo + 1
+        if m < 1:
+            continue
+        y = np.full(m, np.nan)
+        for s in range(lo, hi + 1):
+            a = off[s]
+            b = off[s + 1]
+            l = a
+            h = b
+            v = q_mz[i] - q_tol[i]
+            while l < h:
+                mid = (l + h) >> 1
+                if mz[mid] < v:
+                    l = mid + 1
+                else:
+                    h = mid
+            best = 0.0
+            bf = False
+            p = l
+            while p < b and mz[p] <= q_mz[i] + q_tol[i]:
+                if inten[p] > best:
+                    best = inten[p]
+                    bf = filled[p] if has_fill else False
+                p += 1
+            if best > 0 and not bf:
+                y[s - lo] = best
+        ap = min(max(s_apex[i], lo), hi) - lo
+        nm = 0
+        top = -1.0
+        foot = np.inf
+        maxl = -1.0
+        minl = np.inf
+        maxr = -1.0
+        minr = np.inf
+        for k in range(m):
+            v = y[k]
+            if v == v:
+                nm += 1
+                top = max(top, v)
+                foot = min(foot, v)
+                if k <= ap:
+                    maxl = max(maxl, v)
+                    minl = min(minl, v)
+                if k >= ap:
+                    maxr = max(maxr, v)
+                    minr = min(minr, v)
+        out[i, UT_NMEAS] = nm
+        if nm == 0:
+            continue
+        out[i, UT_TOP] = top
+        out[i, UT_FOOT] = foot
+        out[i, UT_CLIMB_L] = maxl - minl if maxl >= 0 else 0.0
+        out[i, UT_CLIMB_R] = maxr - minr if maxr >= 0 else 0.0
+        hole = False
+        for k in range(max(0, ap - 1), min(m, ap + 2)):
+            if y[k] != y[k]:
+                hole = True
+        out[i, UT_HOLE_APEX] = 1.0 if hole else 0.0
+        # holes interpolated (ends held), then the flat-top ratio around the highest measured point
+        z = y.copy()
+        last = -1
+        for k in range(m):
+            if z[k] == z[k]:
+                if last >= 0 and k - last > 1:
+                    for q in range(last + 1, k):
+                        z[q] = z[last] + (z[k] - z[last]) * (q - last) / (k - last)
+                elif last < 0:
+                    for q in range(0, k):
+                        z[q] = z[k]
+                last = k
+        for q in range(last + 1, m):
+            z[q] = z[last]
+        t = rt[lo:hi + 1]
+        kt = int(np.argmax(z))
+        base = min(z[0], z[m - 1])
+        hgt = z[kt] - base
+        if hgt <= 0 or m < 5:
+            continue
+        ntop = 0
+        jump = 0.0
+        for k in range(m):
+            if z[k] - base >= 0.9 * hgt:
+                ntop += 1
+            if k > 0 and z[k] - base >= 0.5 * hgt and z[k - 1] - base >= 0.5 * hgt:
+                jump = max(jump, abs(z[k] - z[k - 1]) / hgt)
+        out[i, UT_NTOP] = ntop
+        out[i, UT_JUMP] = jump
+        l50 = _crossing(t, z - base, kt, -1, 0, 0.5 * hgt)
+        l10 = _crossing(t, z - base, kt, -1, 0, 0.1 * hgt)
+        r50 = _crossing(t, z - base, kt, 1, m - 1, 0.5 * hgt)
+        r10 = _crossing(t, z - base, kt, 1, m - 1, 0.1 * hgt)
+        if l50 == l50 and l10 == l10 and r50 == r50 and r10 == r10:
+            num = (t[kt] - l50) + (r50 - t[kt])
+            den = FLAT_GAUSS * ((l50 - l10) + (r10 - r50))
+            if den > 0:
+                out[i, UT_FLAT] = num / den
+    return out

@@ -409,9 +409,12 @@ def test_cdf_folder_runs_and_compounds_are_at_nominal_masses(study):
     with np.load(out / "gc" / "components" / "q_a.npz") as z:
         assert np.all(z["mz"] == np.rint(z["mz"]))
     assert "Num Peaks" in (out / "gc" / "spectra.msp").read_text()
-    # the single ions keep the scaled m/z
+    # the single ions: mz is the nominal mass, mz_scaled the m/z the point clouds hold (nominal mass x the scale)
     t = pd.read_csv(out / "aligned_feature_table.tsv", sep="\t")
-    assert np.allclose(t["mz"] / io.C13, np.rint(t["mz"] / io.C13), atol=2e-3)
+    assert np.all(t["mz"] == np.rint(t["mz"]))
+    assert np.allclose(t["mz_scaled"] / io.C13, np.rint(t["mz_scaled"] / io.C13), atol=2e-3)
+    assert np.all(np.rint(t["mz_scaled"] / io.C13) == t["mz"])
+    assert "mz_scaled" not in bundle.table_stems(out, t.columns)
 
 
 def test_viewer_block_and_chromatograms_of_a_unit_resolution_run(study):

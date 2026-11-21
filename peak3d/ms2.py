@@ -214,7 +214,7 @@ def map_to_groups(output, ppm: float = 10.0, da_floor: float = 0.004, fragment_t
         _stale(output)
         return pd.DataFrame(columns=MAP_COLUMNS)
     g_id = table["group_id"].to_numpy(np.int64)
-    g_mz = table["mz"].to_numpy(np.float64)
+    g_mz = table["mz_scaled" if "mz_scaled" in table else "mz"].to_numpy(np.float64)   # unit runs: as the clouds hold it
     g_rt = table["rt"].to_numpy(np.float64)
     lo, hi = table["rt_min"].to_numpy(np.float64), table["rt_max"].to_numpy(np.float64)
     pad = np.maximum(2.0 / 60.0, 0.25 * (hi - lo))

@@ -14,7 +14,11 @@ or `peak3d pick`). Everything is written to OUTPUT/gc/; no file of the LC output
 
 Compounds across files: the strongest unmatched component is a reference; in every other file the component within
 the alignment's RT tolerance (on the corrected time axis) whose spectrum is most similar to it joins, when the
-similarity (accurate-mass cosine, weights intensity^0.6 x m/z) reaches 0.6. The quantifier is the strongest ion of
+similarity (accurate-mass cosine, weights intensity^0.6 x m/z) reaches 0.6. A second pass joins compounds that are one
+compound split across files (_merge_split): same quantifier ion, within the RT tolerance of each other, no file in
+both, and their reference spectra agree on the ions they share (cosine >= 0.6 over those ions, at least MERGE_IONS of
+them, carrying at least MERGE_COVER of each spectrum's weight) although they differ elsewhere (an ion lost to a hole
+or a saturated top in one file, a co-eluting neighbour's ion in another). The quantifier is the strongest ion of
 the reference spectrum that needed no other component's model; a file's value is that ion's abundance in its own
 deconvolved spectrum."""
 from __future__ import annotations
@@ -36,6 +40,10 @@ from . import ri as RI
 from .deconv import DeconvParams, deconvolve, params_from_dict
 
 MATCH_MIN = 0.6            # spectrum similarity for the same compound in two files
+MERGE_IONS = 3             # second pass: ions two split compounds share at least (a component holds at least 3)
+MERGE_COVER = 1 / 3        # ... carrying at least this share of each reference spectrum's weight (squared norm). On the
+                           # MRH truth (54 compounds) it joins one compound split over two rows and joins no two truth
+                           # compounds; on the 22 LECO CSF runs 139 of 200 complementary same-quantifier pairs qualify
 QUANT_TOL, QUANT_PPM = 0.003, 10.0
 HIT_SPECTRA = 3            # library spectra kept per compound, best hits first (the viewer's head-to-tail plot)
 
@@ -142,6 +150,80 @@ def _group(rt, file, order, off, mz, w, rt_tol, min_sim, n_files, tol, ppm):
                 best_s[f] = 0.0
         G += 1
     return gid, G
+
+
+@njit(cache=True)
+def _shared(ma, wa, mb, wb, tol, ppm):
+    """(cosine over the ions both spectra hold, number of them, the smaller share of either spectrum's squared weight
+    they carry); spectra sorted by m/z"""
+    na = 0.0
+    nb = 0.0
+    for x in wa:
+        na += x * x
+    for x in wb:
+        nb += x * x
+    num = 0.0
+    sa = 0.0
+    sb = 0.0
+    n = 0
+    a = 0
+    for p in range(len(mb)):
+        d = max(tol, ppm * 1e-6 * mb[p])
+        while a < len(ma) and ma[a] < mb[p] - d:
+            a += 1
+        if a < len(ma) and ma[a] <= mb[p] + d:
+            num += wa[a] * wb[p]
+            sa += wa[a] * wa[a]
+            sb += wb[p] * wb[p]
+            n += 1
+            a += 1
+    if n == 0 or na <= 0 or nb <= 0:
+        return 0.0, 0, 0.0
+    return num / np.sqrt(sa * sb), n, min(sa / na, sb / nb)
+
+
+def _merge_split(gid, G, rt, file_of, tic, quant, off, mz, w, rt_tol, n_files, tol, ppm):
+    """the second pass of the module text: compounds (gid of every component, G of them) joined when one is the other
+    split across files. Strongest compound first; each takes, one at a time, the qualifying compound with the
+    highest shared-ion cosine whose files it does not hold yet. Returns (new gid, new G, joins)."""
+    members = [[] for _ in range(G)]
+    for i, g in enumerate(gid):
+        members[g].append(i)
+    ref = np.array([max(m, key=lambda i: tic[i]) for m in members], np.int64)
+    g_rt = np.array([float(np.median(rt[m])) for m in members])
+    g_tic = np.array([float(np.sum(tic[m])) for m in members])
+    g_q = quant[ref]
+    files = np.zeros((G, n_files), bool)
+    for g, m in enumerate(members):
+        files[g, file_of[m]] = True
+    o = np.argsort(g_rt, kind="stable")
+    srt = g_rt[o]
+    root = np.arange(G)
+    joins = 0
+    for g in np.argsort(-g_tic, kind="stable"):
+        if root[g] != g:
+            continue
+        lo, hi = np.searchsorted(srt, g_rt[g] - rt_tol), np.searchsorted(srt, g_rt[g] + rt_tol, side="right")
+        ra = ref[g]
+        while True:
+            best, best_s = -1, 0.0
+            for h in o[lo:hi]:
+                if h == g or root[h] != h or files[g][files[h]].any():
+                    continue
+                if not abs(g_q[h] - g_q[g]) <= max(tol, ppm * 1e-6 * g_q[g]):     # NaN: no quantifier
+                    continue
+                rb = ref[h]
+                s, n, cover = _shared(mz[off[ra]:off[ra + 1]], w[off[ra]:off[ra + 1]], mz[off[rb]:off[rb + 1]],
+                                      w[off[rb]:off[rb + 1]], tol, ppm)
+                if s >= MATCH_MIN and n >= MERGE_IONS and cover >= MERGE_COVER and s > best_s:
+                    best, best_s = h, s
+            if best < 0:
+                break
+            root[best] = g
+            files[g] |= files[best]
+            joins += 1
+    new = np.unique(root, return_inverse=True)[1].astype(np.int64)
+    return new[gid], int(new.max()) + 1 if len(new) else 0, joins
 
 
 def _corrected(output: Path, stem: str, t):
@@ -273,7 +355,11 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
                            len(stems), QUANT_TOL, QUANT_PPM)
     gid = np.empty(len(o), np.int64)
     gid[o] = gid_sorted
+    quant_all = np.concatenate([comps[s]["quant_mz"].to_numpy(np.float64) for s in stems])
+    gid, G, joins = _merge_split(gid, G, rt_all, file_of, tic_all, quant_all, off_all, mz_all, ab_all ** 0.6 * (mz_all / 100.0),
+                                 rt_tol, len(stems), QUANT_TOL, QUANT_PPM)
     times["matching_s"] = round(time.perf_counter() - tic, 3)
+    times["split_joins"] = joins
 
     # 3. compound rows: reference = the member with the largest summed abundance
     need = max(1, min(int(min_presence), len(stems)))
@@ -316,7 +402,7 @@ def run(output, cores: int = 1, cache_dir=None, ladder: str | None = None, carbo
         comps[s]["compound_id"] = cid[pos:pos + len(comps[s])]
         pos += len(comps[s])
     log(f"{len(compounds)} compounds in at least {need} of {len(stems)} files (RT tolerance {60 * rt_tol:.2f} s, "
-        f"{G - len(keep)} below that)")
+        f"{G - len(keep)} below that; {joins} joined as one compound split across files)")
 
     # 4. retention index
     notes = []

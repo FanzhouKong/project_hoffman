@@ -987,7 +987,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, f"not a file of this output: {stem!r}")
         params = json.loads((out / "params.json").read_text()) if (out / "params.json").exists() else {}
         ppm = float((params.get("options") or {}).get("ppm") or 5.0)
-        res = bundle.ms1_pattern(out, out / ".cache", stem, float(row["mz"]), float(row["rt"]), float(row["rt_min"]),
+        res = bundle.ms1_pattern(out, out / ".cache", stem, float(row.get("mz_scaled") or row["mz"]), float(row["rt"]),
+                                 float(row["rt_min"]),
                                  float(row["rt_max"]), int(float(row.get("charge") or 1)), ppm,
                                  bundle.file_offsets(out).get(stem, 0.0))
         res.update(group_id=int(key), files=stems, value=float(row.get(stem) or 0))

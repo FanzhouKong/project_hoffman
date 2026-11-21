@@ -251,10 +251,19 @@ class Params:
     #            MRH GC-Orbitrap set, 11 files, dry run on the picker's candidates: 91 of 106 truth ions the level
     #            gates reject are kept, with 2,680 more candidates per file (24 % of the features), 73 % of them with
     #            three or more picked ions at the same apex (27 % of all candidates the level gates reject).
+    #            Two more conditions (2026-11-20): the rise is also at least net_peak_k times that side's spread at the
+    #            peak scale ((median - lower quartile) / 0.6745 of the side window), since a trace exported smoothed
+    #            has almost no scan-to-scan noise while it wanders by a peak's height (LECO CSF runs: residual
+    #            lag-1 autocorrelation 0.98); and the width at half the rise is at most net_fwhm_max median widths,
+    #            beyond which the peak's own foot reaches the windows its level is read from. On the MRH truth
+    #            neither costs any of the 82 truth ions the rule keeps (1,320 fewer candidates, 21 of 436
+    #            true-negative hits gone).
     background_rule: str = "level"
     net_ripple_k: float = 5.0
     net_ridge_max: float = 0.5
     net_fwhm_min: float = 0.5
+    net_peak_k: float = 3.0
+    net_fwhm_max: float = 3.0
     k_noise: float = 3.0
     min_snr: float = 3.0
     min_prominence_rel: float = 0.2

@@ -38,6 +38,12 @@
       this.eicAt = new Map();
       if (header.eic) a.eic_row.forEach((row, k) => this.eicAt.set(row, k));
       this.rtS = Float32Array.from(a.g_rt, (v) => v * 60);       // retention times are shown in seconds
+      // a unit-resolution GC-MS run: the traces are read at nominal mass x mass_scale (g_mz); m/z are shown, filtered
+      // and searched as the nominal masses
+      const ms = this.params.mass_scale;
+      this.unitMass = !!(ms && ms !== 1);
+      this.mzd = this.unitMass ? Float64Array.from(a.g_mz, (v) => Math.round(v / ms)) : a.g_mz;
+      this.mzDig = this.unitMass ? 0 : 4;
       // compound groups (adducts, in-source fragments, multimers and their isotopes of one compound; null when the
       // results predate them) and the isotope candidates the shape test did not confirm
       this.cid = a.g_cid || null;
@@ -353,7 +359,7 @@
     const parts = [head.concat(R.cid ? COMPOUND_COLS : [], a.g_hal ? HAL_COLS : [], notes ? MS2_COLS : [], a.m_q ? R.stems : []).join("\t") + "\n"];
     let buf = [];
     for (const g of rows) {
-      const row = [a.g_id[g], a.g_mz[g].toFixed(6), num(60 * a.g_rt[g], 2), num(60 * a.g_rt_min[g], 2), num(60 * a.g_rt_max[g], 2),
+      const row = [a.g_id[g], R.unitMass ? String(R.mzd[g]) : a.g_mz[g].toFixed(6), num(60 * a.g_rt[g], 2), num(60 * a.g_rt_min[g], 2), num(60 * a.g_rt_max[g], 2),
         a.g_ndet[g], a.g_nconf[g], a.g_nfill[g], num(a.g_ppm[g], 3), num(60 * a.g_rtsd[g], 3), a.g_iso[g], a.g_z[g]];
       if (fill) row.splice(at, 0, filledFiles(g));
       if (sat) row.splice(satAt, 0, satFiles(g));
@@ -573,9 +579,9 @@
       let lo = Infinity, hi = -Infinity;
       for (let g = 0; g < R.G; g++) if (R.a.g_max[g] > 0) { lo = Math.min(lo, R.logMax[g]); hi = Math.max(hi, R.logMax[g]); }
       track(P3.plot.scatter(mapEl, {
-        height: 460, x: R.rtS, y: R.a.g_mz, v: R.logMax, vDomain: [lo, hi], xLabel: "Retention time (s)", yLabel: "m/z",
+        height: 460, x: R.rtS, y: R.mzd, v: R.logMax, vDomain: [lo, hi], xLabel: "Retention time (s)", yLabel: "m/z",
         xFmt: (v, d) => fixed(v, Math.min(d, 1)), yFmt: (v, d) => fixed(v, Math.min(d, 1)), selected: state.sel,
-        tip: (g) => `<b>m/z ${fixed(R.a.g_mz[g], 4)}</b><br>RT ${fixed(R.rtS[g], 1)} s · max ${sci(R.a.g_max[g])}<br>detected in ${R.a.g_ndet[g]} of ${R.N} files` +
+        tip: (g) => `<b>m/z ${fixed(R.mzd[g], R.mzDig)}</b><br>RT ${fixed(R.rtS[g], 1)} s · max ${sci(R.a.g_max[g])}<br>detected in ${R.a.g_ndet[g]} of ${R.N} files` +
           (R.annotated[g] ? `<br>${esc(R.annotation(g).name)}` : ""),
         onClick: (g) => { state.sel = g; show("features"); },
       }));
@@ -606,7 +612,7 @@
       const onlyCid = state.cidF != null && R.cid;
       for (let g = 0; g < R.G; g++) {
         if (onlyCid) { if (R.cid[g] === state.cidF) out.push(g); continue; }
-        if (a.g_mz[g] < mzLo || a.g_mz[g] > mzHi || R.rtS[g] < rtLo || R.rtS[g] > rtHi) continue;
+        if (R.mzd[g] < mzLo || R.mzd[g] > mzHi || R.rtS[g] < rtLo || R.rtS[g] > rtHi) continue;
         if (state.mono && a.g_iso[g] > 0) continue;
         if (state.all && a.g_ndet[g] < R.N) continue;
         if (state.withEic && !R.eicAt.has(g)) continue;
@@ -615,14 +621,14 @@
         if (state.halogen && R.hal(g) < 2) continue;
         if (starOn && !R.stars(g).some((c) => state.starF[c])) continue;
         if (idq != null && a.g_id[g] !== idq) continue;
-        if (mzq != null && Math.abs(a.g_mz[g] - mzq) / mzq * 1e6 > state.ppm) continue;
+        if (mzq != null && (R.unitMass ? R.mzd[g] !== Math.round(mzq) : Math.abs(a.g_mz[g] - mzq) / mzq * 1e6 > state.ppm)) continue;
         out.push(g);
       }
       const key = {
         id: a.g_id, mz: a.g_mz, rt: a.g_rt, ndet: a.g_ndet, nfill: a.g_nfill, max: a.g_max, cv: a.g_cv, iso: a.g_iso,
         ms2: R.nms2, score: R.annScore, cmp: R.cid ? a.g_nmem : null, hal: a.g_hal,
       }[state.sortKey];
-      if (mzq != null) out.sort((p, r) => Math.abs(a.g_mz[p] - mzq) - Math.abs(a.g_mz[r] - mzq));
+      if (mzq != null) out.sort((p, r) => Math.abs(R.mzd[p] - mzq) - Math.abs(R.mzd[r] - mzq));
       else if (state.sortKey === "ident") {         // annotated first, by name; then the rest by best score
         const name = (g) => (R.annotated[g] ? String(R.annotation(g).name).toLowerCase() : null);
         out.sort((p, r) => { const x = name(p), y = name(r); return x == null ? (y == null ? (R.annScore[r] || 0) - (R.annScore[p] || 0) : 1) : y == null ? -1 : state.sortDir * x.localeCompare(y); });
@@ -763,16 +769,16 @@
       // the search settings and the filters sit above the feature list, so the detail columns start at the top
       // a unit-resolution GC-MS run read from .cdf: the single ions carry their nominal mass times the scale
       const ms = R.params.mass_scale;
-      const scaleNote = ms && ms !== 1 ? banner(`Unit-resolution data: the m/z in this tab are nominal masses × ${fixed(ms, 5)} (written that way so that isotope peaks pair up as on an accurate-mass instrument), so nominal mass 73 is listed at ${fixed(73 * ms, 4)}. Divide by ${fixed(ms, 5)} for the nominal mass. The Compounds tab shows nominal masses.`) : null;
+      const scaleNote = ms && ms !== 1 ? banner(`Unit-resolution data: the m/z in this tab are nominal masses (the tables' mz column too; mz_scaled holds the nominal mass × ${fixed(ms, 5)} at which the traces are read, so that isotope peaks pair up as on an accurate-mass instrument).`) : null;
       const filters = [scaleNote, idPanel, h("div.toolbar", searchField, ppmField, range("m/z", "mzLo", "mzHi", ""), range("RT", "rtLo", "rtHi", "s")),
         h("div.toolbar", chip("mono", "Monoisotopic"), chip("all", "In every file"), R.h.eic ? chip("withEic", "With chromatograms") : null,
           R.m2 ? chip("withMs2", "With MS2") : null, R.id ? chip("identified", "Annotated") : null,
           a.g_hal ? chip("halogen", "Possible halogen") : null, ...STARS.map(starChip), cidBox, clearBtn, h("span.spacer"), count, eicBtn, dl, dlc), skipRow];
       const mini = track(P3.plot.scatter(mapEl, {
-        height: 210, x: R.rtS, y: a.g_mz, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
+        height: 210, x: R.rtS, y: R.mzd, v: R.logMax, vDomain: [lo, hi], r: R.G > 20000 ? 1 : R.G > 3000 ? 1.5 : 2.2,
         xLabel: "RT (s)", yLabel: "m/z", xFmt: (v, d) => fixed(v, Math.min(d, 0)), yFmt: (v, d) => fixed(v, Math.min(d, 0)),
         selected: state.sel, brushHint: "Drag to set the m/z and RT windows · double-click to clear", onBrush: setWindow,
-        tip: (g) => `<b>#${a.g_id[g]} · m/z ${fixed(a.g_mz[g], 4)}</b><br>RT ${fixed(R.rtS[g], 1)} s` + (R.annotated[g] ? `<br>${esc(R.annotation(g).name)}` : ""),
+        tip: (g) => `<b>#${a.g_id[g]} · m/z ${fixed(R.mzd[g], R.mzDig)}</b><br>RT ${fixed(R.rtS[g], 1)} s` + (R.annotated[g] ? `<br>${esc(R.annotation(g).name)}` : ""),
         onClick: (g) => { select(g); const i = list.indexOf(g); if (i >= 0) ensureVisible(i); },
       }));
 
@@ -834,7 +840,7 @@
       function rowEl(g) {
         const tr = h("tr", { "aria-selected": String(g === state.sel), "data-g": g },
           h("td.r.id-cell", R.stars(g).map((c) => h("span.star-ic.mini." + c, markIcon(c, true))), int(a.g_id[g])), ...(R.m2 ? [scoreCell(g), identCell(g)] : []),
-          h("td.r", fixed(a.g_mz[g], 4)), h("td.r", fixed(R.rtS[g], 1)),
+          h("td.r", fixed(R.mzd[g], R.mzDig)), h("td.r", fixed(R.rtS[g], 1)),
           h("td.r", fixed((a.g_rt_max[g] - a.g_rt_min[g]) * 60, 1)), h("td.r", `${a.g_ndet[g]}/${R.N}`),
           h("td.r", int(a.g_nfill[g])), h("td.r", sci(a.g_max[g])), h("td.r", isFinite(a.g_cv[g]) ? fixed(a.g_cv[g], 0) + "%" : "–"),
           ionCell(g), ...(a.g_hal ? [halCell(g)] : []), ...(R.cid ? [cmpCell(g)] : []), ...(R.m2 ? [h("td.r", R.nms2[g] ? int(R.nms2[g]) : "–")] : []));
@@ -1105,7 +1111,7 @@
       const t0 = 60 * a.g_rt_min[g], t1 = 60 * a.g_rt_max[g];
       headEl.replaceChildren(h("div.head-row",
         h("div.head-main",
-          h("div.head-line", h("span.label-medium.muted", `Feature #${a.g_id[g]}`), h("span.title-large.num", `m/z ${fixed(a.g_mz[g], 4)}`),
+          h("div.head-line", h("span.label-medium.muted", `Feature #${a.g_id[g]}`), h("span.title-large.num", `m/z ${fixed(R.mzd[g], R.mzDig)}`),
             h("span.body-medium.muted", `RT ${fixed(R.rtS[g], 1)} s (${fixed(t0, 1)}–${fixed(t1, 1)} s)`),
             x && !x.unknown ? h("span.body-medium.id-best", h("b", x.name), `${x.adduct ? " · " + x.adduct : ""} · ${fixed(x.score, 2)}${x.source === "user" ? (x.confirmed ? " · confirmed" : " · your choice") : ""}`) :
               x && x.unknown ? h("span.body-medium.id-best", h("i", "unknown"), " · set by you") : null),

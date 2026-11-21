@@ -377,10 +377,12 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     parts = []
     fwhms = []
     fwhm_scans = {}
+    scales = set()
     for k, s in enumerate(stems):
         df = feats[s]
         pj = features_dir / f"{s}.params.json"
         fp = json.loads(pj.read_text()) if pj.exists() else {}
+        scales.add(float(fp.get("mass_scale") or 1.0))
         a_, b_ = fp.get("sig_a", 0.5), fp.get("sig_b", 0.0)
         fwhm_scans[s] = float(fp.get("fwhm_scans", 0.0))
         if np.isfinite(fp.get("fwhm_med", np.nan)):
@@ -565,16 +567,24 @@ def align_and_group(output: Path, cache_dir: Path, args, stage_times: dict | Non
     if comp is not None:
         for c in ("compound_id", "role", "neutral_mass", "is_base", "n_members"):
             base[c] = comp[c].values
+    text = MZ_TEXT
+    unit_scale = next(iter(scales)) if len(scales) == 1 and next(iter(scales)) != 1.0 else None
+    if unit_scale is not None:
+        # unit-resolution runs (cdf.py): mz is the nominal mass; mz_scaled the nominal mass x mass_scale at which the
+        # traces are read (the app and anything that reads the point clouds use it)
+        base.insert(2, "mz_scaled", base["mz"].values)
+        base["mz"] = np.rint(base["mz"].values / unit_scale)
+        text = {**MZ_TEXT, "mz": "%.0f", "mz_scaled": "%.6f"}
     # presence of every group (before the rule) in every file: 2 detected, 1 confirmed peak, 0 absent
     pres = np.where(detected, 2, np.where(confirmed, 1, 0)).astype(np.int8)
     write_tsv(pd.concat([base[["group_id", "mz", "rt", "n_detected", "n_confirmed"]], pd.DataFrame(pres, columns=stems)],
-                        axis=1), output / "presence_mask.tsv", text_formats=MZ_TEXT)
+                        axis=1), output / "presence_mask.tsv", text_formats=text)
     main_is_height = getattr(args, "quant", "height") == "height"
     main = pd.concat([base, pd.DataFrame(H if main_is_height else AR, columns=stems)], axis=1)[keep_g]
     other = pd.concat([base, pd.DataFrame(AR if main_is_height else H, columns=stems)], axis=1)[keep_g]
-    write_tsv(main, output / "aligned_feature_table.tsv", "%.6g", text_formats=MZ_TEXT)
+    write_tsv(main, output / "aligned_feature_table.tsv", "%.6g", text_formats=text)
     write_tsv(other, output / ("aligned_feature_area.tsv" if main_is_height else "aligned_feature_height.tsv"), "%.6g",
-              text_formats=MZ_TEXT)
+              text_formats=text)
     write_tsv(pd.concat([base[["group_id"]], pd.DataFrame((~detected).astype(np.int8), columns=stems)], axis=1)[keep_g],
               output / "filled_mask.tsv")
     # saturated: the peak detected in that file has a scan where the file's centroids are distorted by detector
